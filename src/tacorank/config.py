@@ -52,7 +52,13 @@ class RunConfig(StrictModel):
     max_confirmation_attempts: int = Field(default=2, ge=0)
     seed_schedule: List[int]
     context_token_limit: int = Field(default=6_000, gt=0)
-    adapter_mode: Literal["fake"] = "fake"
+    adapter_mode: Literal["live", "fake"] = "live"
+    live_adapter_config_sha256: Optional[str] = None
+    editable_roots: List[str] = Field(default_factory=lambda: ["solution"])
+    target_interface_excerpts: Dict[str, str] = Field(default_factory=dict)
+    coding_step_limit: int = Field(default=20, gt=0)
+    coding_token_limit: int = Field(default=4_096, gt=0)
+    coding_wall_time_limit_seconds: int = Field(default=900, gt=0)
     research_provider: Literal["fake", "deepseek"]
     deepseek_model: NonEmptyStr = "deepseek-v4-pro"
     deepseek_base_url: NonEmptyStr = "https://api.deepseek.com"
@@ -85,11 +91,28 @@ class RunConfig(StrictModel):
             raise ValueError("artifact_roots must be unique")
         return roots
 
+    @field_validator("editable_roots")
+    @classmethod
+    def validate_editable_roots(cls, values: List[str]) -> List[str]:
+        if not values:
+            raise ValueError("editable_roots must not be empty")
+        roots = [normalize_relative_path(value) for value in values]
+        if len(roots) != len(set(roots)):
+            raise ValueError("editable_roots must be unique")
+        return roots
+
     @field_validator("data_manifest_sha256", "evaluator_sha256")
     @classmethod
     def validate_hashes(cls, value: str) -> str:
         if not SHA256_RE.fullmatch(value):
             raise ValueError("hashes must be lowercase sha256")
+        return value
+
+    @field_validator("live_adapter_config_sha256")
+    @classmethod
+    def validate_optional_live_config_hash(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not SHA256_RE.fullmatch(value):
+            raise ValueError("live_adapter_config_sha256 must be lowercase sha256")
         return value
 
     @field_validator("deepseek_base_url")
@@ -117,8 +140,8 @@ class RunConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_contract_fields(self) -> "RunConfig":
-        if self.primary_metric_name not in self.metric_names:
-            raise ValueError("primary_metric_name must be listed in metric_names")
+        if not self.metric_names:
+            raise ValueError("metric_names must not be empty")
         if len(set(self.metric_names)) != len(self.metric_names):
             raise ValueError("metric_names must be unique")
         if not self.command_ids or len(set(self.command_ids)) != len(self.command_ids):
@@ -132,8 +155,13 @@ class RunConfig(StrictModel):
         ):
             raise ValueError("timeout profiles must have positive named durations")
         if self.baseline_metrics is not None:
-            if set(self.baseline_metrics) != set(self.metric_names):
-                raise ValueError("baseline_metrics must exactly match metric_names")
+            expected_baseline_names = set(self.metric_names) | {
+                self.primary_metric_name
+            }
+            if set(self.baseline_metrics) != expected_baseline_names:
+                raise ValueError(
+                    "baseline_metrics must contain the metric names and primary metric"
+                )
             if self.primary_metric_name not in self.baseline_metrics:
                 raise ValueError("baseline_metrics is missing the primary metric")
         return self

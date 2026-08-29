@@ -336,7 +336,7 @@ def _production_worker(parts: SimpleNamespace) -> tuple[TraeCodingWorker, Path]:
     )
     dotenv_identity_directory.mkdir(parents=True)
     trae_cli = bin_directory / "trae-cli"
-    trae_cli.write_text(f"#!{sys.executable}\n" + _FAKE_TRAE, encoding="utf-8")
+    trae_cli.write_text("#!/usr/bin/env python3\n" + _FAKE_TRAE, encoding="utf-8")
     trae_cli.chmod(0o755)
     direct_url = identity_directory / "direct_url.json"
     direct_url.write_text(
@@ -379,7 +379,7 @@ def _production_worker(parts: SimpleNamespace) -> tuple[TraeCodingWorker, Path]:
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text("# reviewed pinned source fixture\n", encoding="utf-8")
     docker = root / "docker"
-    docker.write_text(f"#!{sys.executable}\n" + _FAKE_DOCKER, encoding="utf-8")
+    docker.write_text("#!/usr/bin/env python3\n" + _FAKE_DOCKER, encoding="utf-8")
     docker.chmod(0o755)
     parts.config = replace(
         parts.config,
@@ -484,7 +484,7 @@ def test_repair_is_a_direct_commit_on_the_same_branch(
         context_id="context-repair",
         run_id="run1",
         experiment_id="exp1",
-        repair_attempt=2,
+        repair_attempt=1,
         original_experiment_spec=parts.spec,
         current_patch_commit_sha=initial.patch_commit_sha,
         accepted_patch_receipt_id="receipt-1",

@@ -8,7 +8,7 @@ import csv
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Mapping, Sequence, Tuple
 
 from tacorank.evaluation.adapter import (
     EvaluationIntegrityError,
@@ -117,11 +117,21 @@ def validate_submission(
                     "submission has more rows than the evaluation population"
                 )
             expected = expected_rows[expected_index]
-            if len(expected) < 3:
-                raise ValueError(
-                    "expected rows must expose user_id and video_id at indexes 1 and 2"
-                )
-            if user_id != str(expected[1]) or video_id != str(expected[2]):
+            if isinstance(expected, Mapping):
+                if "user_id" not in expected or "video_id" not in expected:
+                    raise ValueError(
+                        "expected row mappings must expose user_id and video_id"
+                    )
+                expected_user = expected["user_id"]
+                expected_video = expected["video_id"]
+            else:
+                if len(expected) < 3:
+                    raise ValueError(
+                        "expected rows must expose user_id and video_id at indexes 1 and 2"
+                    )
+                expected_user = expected[1]
+                expected_video = expected[2]
+            if user_id != str(expected_user) or video_id != str(expected_video):
                 raise ValueError(
                     "line %d does not align with the evaluation row" % line_number
                 )

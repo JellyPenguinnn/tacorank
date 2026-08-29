@@ -289,10 +289,10 @@ class TraeCodingWorker:
             self.identity_resolver.for_repair(context, decision)
         )
         repair_attempt = _context_int(context, "repair_attempt")
-        if identity.attempt != repair_attempt:
+        if identity.attempt != repair_attempt + 1:
             raise CodingWorkerError(
                 "CANDIDATE_IDENTITY_MISMATCH",
-                "resolved attempt does not match recovery context repair_attempt",
+                "resolved coding attempt does not follow the recovery attempt",
             )
         current_commit = _context_text(context, "current_patch_commit_sha")
         original_spec = getattr(context, "original_experiment_spec", None)

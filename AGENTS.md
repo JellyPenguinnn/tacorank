@@ -17,14 +17,15 @@ KuaiRand-specific adapters live in `benchmarks/kuairand_pure/`. The official sta
 - From the starter-kit directory, run `python3 submit.py --check --split test submission.csv` before submission.
 
 ## Harness Operations
-The contract and protected-path files must be frozen and the placeholder hashes in a copied `config.example.json` must be replaced before starting a run.
+The contract and protected-path files must be frozen, all placeholder hashes in copies of `config.example.json` and `live-adapters.example.json` must be replaced, and the live worktree/data/runtime prerequisites must pass preflight before starting a production run.
 
-- `tacorank run --config run-config.json`: start a new run from frozen configuration.
-- `tacorank resume --run-id run_001 --repository-root .`: resume the orchestrator from ledger evidence.
+- `tacorank run --config run-config.json --live-config live-adapters.json`: start one production experiment using the hash-bound live adapters. The command fails closed before creating ledger state when prerequisites are missing.
+- `tacorank run --config test-config.json --allow-test-adapters`: run deterministic fake adapters only when the config explicitly sets `adapter_mode` to `fake`; this mode is for tests, not benchmark evidence.
+- `tacorank resume --run-id run_001 --repository-root .`: repair a truncated ledger tail if necessary and print the phase from which orchestration can be resumed; it does not yet restart adapter execution.
 - `tacorank status --run-id run_001 --repository-root .`: print the current projected run state.
 - `tacorank validate-ledger --run-id run_001 --repository-root .`: validate schema, sequence, hashes, transitions, and referenced artifacts.
 - `tacorank rebuild-views --run-id run_001 --repository-root .`: regenerate `STATUS.md`, `LESSONS.md`, and `SUMMARY.md` from the ledger.
-- `tacorank finalize --run-id run_001 --repository-root .`: perform final selection; this currently fails closed until real reproduction adapters replace fake mode.
+- `tacorank finalize --run-id run_001 --repository-root .`: validate that the run is stopped, then fail closed because the standalone reproduction/final-selection command is not implemented yet.
 
 ## Coding Style & Naming
 Support Python 3.9+. Follow PEP 8 with four-space indentation, `snake_case` modules/functions, `PascalCase` classes, and uppercase constants. Add type hints to public APIs and prefer immutable dataclasses or Pydantic models for structured state. Keep decision, trust, and metric logic deterministic; avoid hidden global state and unnecessary dependencies.
