@@ -4,7 +4,7 @@ TacoRank is a deterministic, evidence-tracked harness for autonomous recommender
 
 The repository is organized for five developers with one canonical schema and explicit typed handoffs. The controller owns orchestration; role components return values and never compete for control.
 
-> **Current main status:** Persons 1–4 have implemented and tested component logic. Person 1 can use either a fake planner or the real DeepSeek provider; the other command-line adapters remain deterministic fakes. Person 5's evaluation and research-reflection paths remain scaffolds, so this is an integration-ready research harness—not yet a live autonomous training deployment.
+> **Current main status:** All five roles have implemented and tested component logic. Person 1 can use either a fake planner or the real DeepSeek provider; the other command-line adapters remain deterministic fakes. This is an integration-ready research harness—not yet a live autonomous training deployment.
 
 ## System architecture
 
@@ -42,7 +42,7 @@ Generated status, lesson, summary, context, and chart files are derived views—
 | Person 2 | Shared schemas, append-only memory, contexts, orchestration, budgets, replay, resume and CLI | `src/tacorank/schemas.py`, `memory/`, `context/`, `orchestrator/`, `artifacts.py`, `cli.py` | P0 harness and fake lifecycle implemented |
 | Person 3 | Trae coding worker, Git worktrees, Gate A, sandboxed execution, telemetry, artifacts and Gate B | `src/tacorank/coding/`, `git/`, `safety/`, `execution/` | Implemented and integration-tested; live runtime validation remains |
 | Person 4 | SRE monitoring, failure classification, bounded recovery and operational reflection | `src/tacorank/sre/`, `src/tacorank/recovery/` | Implemented and failure-injection tested |
-| Person 5 | Protected evaluation, trust decisions, stability, final selection and research reflection | `src/tacorank/evaluation/`, `reflection/`, `reporting/` | Evaluation/reflection scaffolds remain; basic derived reporting is implemented |
+| Person 5 | Protected evaluation, trust decisions, stability, final selection and research reflection | `src/tacorank/evaluation/`, `reflection/`, `reporting/`, `benchmarks/kuairand_pure/` | Implemented and covered by evaluator, reflection and reporting tests |
 
 Only Person 2 appends events or changes controller state. Person 1 chooses research direction, Person 3 edits and executes candidate code, Person 4 interprets operational failures, and Person 5 owns metric truth.
 
@@ -62,15 +62,15 @@ src/tacorank/
   execution/         symbolic commands, sandbox, telemetry and artifacts
   sre/               live health observation
   recovery/          classification and bounded recovery policy
-  evaluation/        Person 5 evaluation surface
-  reflection/        operational/research lesson surfaces
+  evaluation/        protected metrics, trust and experiment decisions
+  reflection/        evidence-linked research lesson generation
   reporting/         reproducible derived views
 solution/             only candidate area intended for coding-agent edits
 research/methods/     reviewed experiment method cards
 tests/                unit, integration and failure-injection coverage
 contract/             human-frozen competition contract
-runs/                 append-only run evidence and derived views
-artifacts/            content-addressed run artifacts
+runs/                 ignored run evidence and derived views
+artifacts/            ignored content-addressed run artifacts
 kuairand-starter-kit/ starter-kit Git submodule
 ```
 
@@ -103,6 +103,9 @@ python -m pytest tests/coding tests/git tests/safety tests/execution tests/failu
 
 # Person 4
 python -m pytest tests/sre tests/recovery tests/integration/test_recovery_lifecycle.py
+
+# Person 5
+python -m pytest tests/evaluation tests/reflection tests/reporting
 ```
 
 ### Provider keys and Trae coding worker
@@ -163,13 +166,12 @@ tacorank finalize --run-id run_001 --repository-root .
 2. Preserve role ownership and communicate through typed adapter interfaces.
 3. Never modify frozen contracts, protected paths, evaluator logic, data splits, or event history from candidate code.
 4. Update affected fixtures and cross-component tests with every shared-schema change.
-5. Keep datasets, credentials and local environments out of Git; preserve run evidence only under the team's reviewed evidence policy.
+5. Keep datasets, credentials, submissions, model artifacts, sensitive run ledgers and local environments out of Git.
 6. Run the complete test suite before requesting integration review.
 
 ## Current limitations
 
 - The outer CLI can use a real DeepSeek planner, but coding, execution, recovery, output checking, and evaluation are still wired to fake adapters.
-- Person 5's evaluator, trust, stability and research-reflection implementation is pending.
 - `solution/` does not yet contain the real candidate training pipeline.
 - Live Trae, production Docker, GPU and full-data runs have not been validated by this repository snapshot.
 - GPU commands fail closed until the execution backend can prove a hard per-container GPU-memory limit.
