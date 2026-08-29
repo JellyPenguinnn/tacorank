@@ -256,6 +256,45 @@ class Harness:
         text = contract_path.read_text(encoding="utf-8").strip()
         return text[:2_000]
 
+    def _remaining_run_budget(self, state) -> dict:
+        totals = state.resource_totals
+        remaining = {
+            "experiments": state.remaining_experiments,
+            "wall_time_seconds": max(
+                0,
+                state.wall_time_limit_seconds
+                - int(state.elapsed_wall_time_seconds),
+            ),
+        }
+        if self.config.token_limit is not None:
+            remaining["token"] = max(
+                0,
+                self.config.token_limit
+                - totals.provider_tokens
+                - totals.estimated_tokens,
+            )
+        if self.config.gpu_seconds_limit is not None:
+            remaining["gpu_seconds"] = max(
+                0,
+                self.config.gpu_seconds_limit
+                - int(totals.gpu_weighted_time_ms / 1000),
+            )
+        return remaining
+
+    def _current_runtime_settings(
+        self, experiment_id: str, before_event_id: str
+    ) -> dict:
+        current = {}
+        for event in self.events():
+            if event.event_id == before_event_id:
+                break
+            if event.payload.type != "execution.started":
+                continue
+            request = event.payload.request
+            if request.experiment_id == experiment_id:
+                current = dict(request.runtime_settings)
+        return current
+
     def _validate_runtime_adjustments(self, adjustments: dict) -> None:
         configured = self.config.allowed_runtime_adjustments
         for name, value in adjustments.items():
@@ -268,6 +307,8 @@ class Harness:
                 approved = approved[0] if approved else None
             if value != approved:
                 raise OrchestrationError("runtime adjustment value is not frozen")
+            if name == "timeout_profile" and value not in self.config.timeout_profiles:
+                raise OrchestrationError("timeout profile is not frozen")
 
     async def _recover(
         self,
@@ -307,15 +348,11 @@ class Harness:
                 previous_error_fingerprints=self._previous_failure_fingerprints(
                     experiment_id, failure_event.event_id
                 ),
-                remaining_run_budget={
-                    "experiments": state.remaining_experiments,
-                    "wall_time_seconds": max(
-                        0,
-                        state.wall_time_limit_seconds
-                        - int(state.elapsed_wall_time_seconds),
-                    ),
-                },
+                remaining_run_budget=self._remaining_run_budget(state),
                 allowed_runtime_adjustments=self.config.allowed_runtime_adjustments,
+                current_runtime_settings=self._current_runtime_settings(
+                    experiment_id, failure_event.event_id
+                ),
                 contract_summary=self._contract_summary(),
             ),
         )
@@ -494,7 +531,7 @@ class Harness:
                     patch_receipt_id=patch_check.receipt_id,
                     seed=self.config.seed_schedule[seed_index],
                     data_manifest_sha256=self.config.data_manifest_sha256,
-                    timeout_seconds=600,
+                    timeout_seconds=self.config.timeout_profiles.get("standard", 600),
                     memory_limit_mb=4096,
                     gpu_memory_limit_mb=0,
                     network_enabled=False,
@@ -531,6 +568,14 @@ class Harness:
                     )
                     runtime_settings.update(decision.runtime_adjustments)
                     next_request_template = request
+                    if "timeout_profile" in decision.runtime_adjustments:
+                        next_request_template = request.model_copy(
+                            update={
+                                "timeout_seconds": self.config.timeout_profiles[
+                                    decision.runtime_adjustments["timeout_profile"]
+                                ]
+                            }
+                        )
                     next_execution_cause = decision_event.event_id
                     stage_queue.appendleft(fidelity)
                     continue

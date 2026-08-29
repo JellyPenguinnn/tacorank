@@ -82,9 +82,17 @@ class RecoveryManager:
                 "Abandon: the same locally normalized failure occurred twice.",
                 {},
             )
+        for dimension, value in context.remaining_run_budget.items():
+            if value <= 0:
+                return (
+                    "abandon",
+                    "RUN_%s_BUDGET_EXHAUSTED" % dimension.upper(),
+                    "Abandon: the frozen %s run budget is exhausted." % dimension,
+                    {},
+                )
 
         adjustment = select_runtime_adjustment(failure.failure_class, context)
-        if failure.failure_class in {"oom", "numerical_error"} and adjustment is not None:
+        if failure.failure_class in {"oom", "numerical_error", "timeout"} and adjustment is not None:
             return (
                 "adjust_approved_runtime_setting",
                 "APPROVED_%s_ADJUSTMENT" % adjustment.name.upper(),

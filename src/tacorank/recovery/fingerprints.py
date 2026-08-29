@@ -19,6 +19,10 @@ _PY_FRAME = re.compile(
     r'File\s+["\'](?P<path>[^"\']+)["\'],\s+line\s+\d+,\s+in\s+(?P<func>[^\s]+)'
 )
 _EXCEPTION = re.compile(r"(?m)^([A-Za-z_][\w.]*(?:Error|Exception))\s*:")
+_VOLATILE_FIELD = re.compile(
+    r"(?i)\b(pid|worker(?:[_ -]?id)?|port|attempt|request[_ -]?id|"
+    r"token|password|api[_ -]?key|bearer)\s*[=:]\s*[^\s,;]+"
+)
 
 
 def _value(value: Any) -> Any:
@@ -33,6 +37,7 @@ def normalize_text(text: str | None) -> str:
     text = _ADDRESS.sub("<address>", text)
     text = _TEMP_PATH.sub("<temp-path>", text)
     text = _LINE_NUMBER.sub(r"\1<line>", text)
+    text = _VOLATILE_FIELD.sub(r"\1=<volatile>", text)
     return " ".join(text.split())
 
 
@@ -66,8 +71,9 @@ def fingerprint_failure(
         "violation_codes": sorted(
             {str(_value(code)).strip().upper() for code in violation_codes if code}
         ),
-        # A short normalized summary distinguishes errors with no structured data.
-        "summary": normalize_text(text)[:300] if not exception else None,
+        # Keep the normalized message even when an exception type is present:
+        # ValueError shape mismatches and missing-column errors are distinct.
+        "summary": normalize_text(text)[:300],
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

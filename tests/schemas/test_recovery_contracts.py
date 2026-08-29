@@ -80,6 +80,13 @@ def test_canonical_recovery_decision_never_allows_attempt_zero():
     RecoveryDecision(repair_attempt=1, **values)
     with pytest.raises(ValidationError):
         RecoveryDecision(repair_attempt=0, **values)
+    with pytest.raises(ValidationError):
+        RecoveryDecision(
+            repair_attempt=1,
+            action="adjust_approved_runtime_setting",
+            runtime_adjustments={"batch_size": -1},
+            **{key: value for key, value in values.items() if key != "action"},
+        )
 
 
 def test_person4_telemetry_uses_the_canonical_shape():

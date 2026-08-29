@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from tacorank.recovery.classifier import classify_failure
+from tacorank.recovery.fingerprints import fingerprint_failure
 from tacorank.recovery.policy import RecoveryManager
 from tacorank.orchestrator.router import Harness
 from tacorank.schemas import RecoveryAction
@@ -79,6 +80,21 @@ def test_supplied_hash_cannot_bypass_normalized_fingerprint_limit():
     assert decision.reason_code == "REPEATED_ERROR_FINGERPRINT"
 
 
+def test_distinct_same_type_exception_messages_have_distinct_fingerprints():
+    shape = fingerprint_failure("ValueError", "ValueError: shape mismatch")
+    column = fingerprint_failure("ValueError", "ValueError: missing column")
+    assert shape != column
+
+
+@pytest.mark.parametrize("dimension", ["wall_time_seconds", "token", "gpu_seconds"])
+def test_exhausted_run_budget_abandons_before_any_work(dimension):
+    ctx = context()
+    ctx.remaining_run_budget = {dimension: 0}
+    decision = decide(run_failure("infrastructure_error"), ctx)
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "RUN_%s_BUDGET_EXHAUSTED" % dimension.upper()
+
+
 def test_harness_recomputes_prior_fingerprints_and_excludes_current_failure():
     prior = run_failure(upstream_hash="a" * 64)
     current = run_failure(upstream_hash="b" * 64)
@@ -137,6 +153,30 @@ def test_approved_oom_adjustment_is_structured_and_reachable():
     )
     assert decision.action == RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING
     assert decision.runtime_adjustments == {"batch_size": 32}
+
+
+def test_timeout_profile_adjustment_is_reachable():
+    decision = decide(
+        run_failure("timeout", "deadline exceeded after checkpoint progress"),
+        context(adjustments={"timeout_profile": {"next_value": "extended"}}),
+    )
+    assert decision.action == RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING
+    assert decision.runtime_adjustments == {"timeout_profile": "extended"}
+
+
+def test_identical_adjustment_is_not_repeated_after_a_different_failure():
+    ctx = context(
+        adjustments={"batch_size": {"next_value": 32}},
+    )
+    ctx.current_runtime_settings = {"batch_size": 32}
+    ctx.attempt_history = [
+        {
+            "action": "adjust_approved_runtime_setting",
+            "runtime_adjustments": {"batch_size": 32},
+        }
+    ]
+    decision = decide(run_failure("oom", "different memory summary"), ctx)
+    assert decision.action == RecoveryAction.ROLLBACK
 
 
 def test_oom_without_contract_approved_adjustment_rolls_back():
