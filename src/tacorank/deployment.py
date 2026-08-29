@@ -77,7 +77,7 @@ def setup_live_deployment(
     runtime_identity = _trae_identity(runtime)
     generated_data = _prepare_data(root, deployment, data)
 
-    trae_yaml = deployment / "trae-agent.yaml"
+    trae_yaml = runtime / "trae-agent.yaml"
     _write_text_exclusive(trae_yaml, _trae_yaml())
     trae_yaml.chmod(0o600)
     live_path = deployment / "live-adapters.json"

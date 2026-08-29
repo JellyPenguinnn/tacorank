@@ -92,6 +92,14 @@ _INPUT_COMMAND_IDS = frozenset(
     }
 )
 _POPULATION_KEYS = frozenset({"smoke", "proxy", "full"})
+_TRAE_PATH_KEYS = (
+    "config_file",
+    "docker_executable",
+    "trae_install_root",
+    "trae_install_identity_file",
+    "trae_runtime_root",
+    "python_dotenv_metadata_file",
+)
 
 
 class LiveAdapterConfig(StrictModel):
@@ -199,6 +207,31 @@ class LiveAdapters:
     output_gate: Any
     evaluator: Any
     baseline: EvaluationResult
+
+
+def _trae_config_from_mapping(values: Mapping[str, Any]) -> TraeConfig:
+    """Normalize JSON-shaped live values at the Trae dataclass boundary."""
+
+    normalized = dict(values)
+    try:
+        normalized["command_prefix"] = tuple(normalized["command_prefix"])
+        for key in _TRAE_PATH_KEYS:
+            if normalized.get(key) is not None:
+                normalized[key] = Path(normalized[key])
+        for key in (
+            "repair_allowed_command_ids",
+            "approved_environment_names",
+            "credential_environment_names",
+        ):
+            if key in normalized:
+                normalized[key] = tuple(normalized[key])
+        if "credential_environment_aliases" in normalized:
+            normalized["credential_environment_aliases"] = tuple(
+                tuple(item) for item in normalized["credential_environment_aliases"]
+            )
+        return TraeConfig(**normalized)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ContractError("live Trae configuration has invalid field types") from error
 
 
 @dataclass(frozen=True)
@@ -754,23 +787,10 @@ def build_live_adapters(
         hidden_path_tokens=tuple(live.hidden_path_tokens),
         future_column_patterns=tuple(live.future_column_patterns),
     )
-    trae_values = dict(live.trae)
-    trae_values["command_prefix"] = tuple(trae_values["command_prefix"])
-    for tuple_key in (
-        "repair_allowed_command_ids",
-        "approved_environment_names",
-        "credential_environment_names",
-    ):
-        if tuple_key in trae_values:
-            trae_values[tuple_key] = tuple(trae_values[tuple_key])
-    if "credential_environment_aliases" in trae_values:
-        trae_values["credential_environment_aliases"] = tuple(
-            tuple(item) for item in trae_values["credential_environment_aliases"]
-        )
     coding_worker = TraeCodingWorker(
         worktrees=worktrees,
         artifact_repository_root=root,
-        config=TraeConfig(**trae_values),
+        config=_trae_config_from_mapping(live.trae),
         identity_resolver=LedgerCandidateIdentityResolver(event_store),
     )
     coding_worker.preflight()
