@@ -6,7 +6,7 @@ import pytest
 from tacorank.recovery.classifier import classify_failure
 from tacorank.recovery.policy import RecoveryManager
 from tacorank.orchestrator.router import Harness
-from tacorank.schemas import RecoveryAction, RecoveryPolicyContext
+from tacorank.schemas import RecoveryAction
 
 
 def run_failure(outcome="code_error", summary="candidate failure", upstream_hash=None):
@@ -18,12 +18,26 @@ def run_failure(outcome="code_error", summary="candidate failure", upstream_hash
     )
 
 
-def context(*, remaining=2, previous=()):
-    return RecoveryPolicyContext(
+def context(*, remaining=2, previous=(), retries=0, adjustments=None):
+    return SimpleNamespace(
         run_id="run-1",
         experiment_id="exp-1",
+        original_experiment_spec=SimpleNamespace(
+            hypothesis="Pairwise training improves within-user ordering",
+            expected_mechanism="more informative preference gradients",
+            target_files=["solution/train.py"],
+        ),
+        current_patch_commit_sha="abc123",
+        failure_event_id="evt-failure-1",
+        attempt_history=[],
+        repair_attempts_used=2 - remaining,
+        max_repair_attempts=2,
+        same_commit_retries_used=retries,
         remaining_repair_budget=remaining,
         previous_error_fingerprints=list(previous),
+        remaining_run_budget={"experiments": 1},
+        allowed_runtime_adjustments=adjustments or {},
+        contract_summary="Frozen contract; protected evaluator and data.",
     )
 
 
@@ -40,6 +54,9 @@ def test_candidate_code_failure_gets_focused_first_repair():
     assert decision.repair_attempt == 1
     assert decision.remaining_repair_budget == 1
     assert "original hypothesis" in decision.instructions.lower()
+    assert "Pairwise training" in decision.instructions
+    assert "abc123" in decision.instructions
+    assert "solution/train.py" in decision.instructions
 
 
 def test_repair_budget_is_hard_capped_and_attempt_is_never_zero():
@@ -47,7 +64,8 @@ def test_repair_budget_is_hard_capped_and_attempt_is_never_zero():
 
     assert decision.action == RecoveryAction.ABANDON
     assert decision.reason_code == "REPAIR_BUDGET_EXHAUSTED"
-    assert decision.repair_attempt >= 1
+    assert decision.repair_attempt == 2
+    assert decision.remaining_repair_budget == 0
 
 
 def test_supplied_hash_cannot_bypass_normalized_fingerprint_limit():
@@ -93,7 +111,32 @@ def test_transient_execution_failure_gets_one_exact_retry(outcome):
     second = decide(result, context(previous=[fingerprint]))
 
     assert first.action == RecoveryAction.RETRY_SAME_COMMIT
+    assert first.repair_attempt == 1
+    assert first.remaining_repair_budget == 2
     assert second.action == RecoveryAction.ABANDON
+
+
+def test_same_commit_retry_is_global_across_different_fingerprints():
+    second_failure = run_failure("hang", "different worker failure")
+    decision = decide(second_failure, context(retries=1))
+
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "SAME_COMMIT_RETRY_EXHAUSTED"
+
+
+def test_timeout_without_progress_does_not_receive_exact_retry():
+    decision = decide(run_failure("timeout", "deadline exceeded"))
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "TIMEOUT_WITHOUT_PROGRESS"
+
+
+def test_approved_oom_adjustment_is_structured_and_reachable():
+    decision = decide(
+        run_failure("oom", "CUDA out of memory"),
+        context(adjustments={"batch_size": {"next_value": 32}}),
+    )
+    assert decision.action == RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING
+    assert decision.runtime_adjustments == {"batch_size": 32}
 
 
 def test_oom_without_contract_approved_adjustment_rolls_back():

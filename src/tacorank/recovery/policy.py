@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, Tuple
 
 from .classifier import FailureClassification, classify_failure
 from .operational_reflection import build_operational_lesson
@@ -12,36 +12,32 @@ from .self_debug import build_self_debug_instructions
 MAX_REPAIR_ATTEMPTS = 2
 
 
-def _action(value: str) -> Any:
-    from tacorank.schemas import RecoveryAction
-
-    return RecoveryAction(value)
-
-
 class RecoveryManager:
     """Choose one auditable recovery action without executing it."""
 
     async def decide(self, failure_event_id: str, result: Any, context: Any) -> Any:
-        """Implement the canonical asynchronous recovery-manager port."""
         if not failure_event_id:
             raise ValueError("failure_event_id is required")
+        if context.failure_event_id != failure_event_id:
+            raise ValueError("recovery context cites a different failure event")
 
         classification = classify_failure(result)
-        remaining_before = min(
-            MAX_REPAIR_ATTEMPTS,
-            max(0, int(getattr(context, "remaining_repair_budget", 0))),
+        maximum = min(MAX_REPAIR_ATTEMPTS, int(context.max_repair_attempts))
+        used = int(context.repair_attempts_used)
+        remaining_before = int(context.remaining_repair_budget)
+        same_count = (
+            list(context.previous_error_fingerprints).count(
+                classification.fingerprint
+            )
+            + 1
         )
-        prior = getattr(context, "previous_error_fingerprints", None)
-        if prior is None:
-            prior = getattr(context, "prior_error_fingerprints", ())
-        same_count = list(prior or ()).count(classification.fingerprint) + 1
 
-        action, reason, instructions = self._route(
+        action, reason, instructions, adjustments = self._route(
             classification, context, same_count, remaining_before
         )
         consumes_repair = action == "trae_repair"
-        repair_attempt = max(1, MAX_REPAIR_ATTEMPTS - remaining_before + 1)
-        remaining_after = max(0, remaining_before - int(consumes_repair))
+        remaining_after = remaining_before - int(consumes_repair)
+        repair_attempt = min(max(1, used + 1), max(1, maximum))
         lesson = build_operational_lesson(
             classification,
             context,
@@ -49,18 +45,19 @@ class RecoveryManager:
             failure_event_id=failure_event_id,
         )
 
-        from tacorank.schemas import RecoveryDecision
+        from tacorank.schemas import RecoveryAction, RecoveryDecision
 
         return RecoveryDecision(
             run_id=context.run_id,
             experiment_id=context.experiment_id,
             failure_event_id=failure_event_id,
             repair_attempt=repair_attempt,
-            action=_action(action),
+            action=RecoveryAction(action),
             reason_code=reason,
             instructions=instructions,
             same_error_count=same_count,
             remaining_repair_budget=remaining_after,
+            runtime_adjustments=adjustments,
             lesson_candidate=lesson,
         )
 
@@ -70,46 +67,79 @@ class RecoveryManager:
         context: Any,
         same_count: int,
         remaining: int,
-    ) -> tuple[str, str, str]:
+    ) -> Tuple[str, str, str, Dict[str, Any]]:
         if failure.deliberate_integrity_violation:
-            return "abandon", "INTEGRITY_VIOLATION", (
-                "Abandon: the failure crosses a protected integrity boundary."
+            return (
+                "abandon",
+                "INTEGRITY_VIOLATION",
+                "Abandon: the failure crosses a protected integrity boundary.",
+                {},
             )
         if same_count >= 2:
-            return "abandon", "REPEATED_ERROR_FINGERPRINT", (
-                "Abandon: the same locally normalized failure occurred twice; "
-                "do not spend another attempt."
-            )
-        if failure.failure_class in {"infrastructure_error", "hang", "timeout"}:
-            return "retry_same_commit", "TRANSIENT_SAME_COMMIT_RETRY", (
-                "Retry the exact sealed commit once with identical approved settings; "
-                "do not invoke code repair."
+            return (
+                "abandon",
+                "REPEATED_ERROR_FINGERPRINT",
+                "Abandon: the same locally normalized failure occurred twice.",
+                {},
             )
 
         adjustment = select_runtime_adjustment(failure.failure_class, context)
         if failure.failure_class in {"oom", "numerical_error"} and adjustment is not None:
             return (
                 "adjust_approved_runtime_setting",
-                f"APPROVED_{adjustment.name.upper()}_ADJUSTMENT",
+                "APPROVED_%s_ADJUSTMENT" % adjustment.name.upper(),
                 adjustment.instruction(),
+                {adjustment.name: adjustment.value},
             )
         if failure.failure_class == "oom":
-            return "rollback", "OOM_NO_APPROVED_ADJUSTMENT", (
-                "Rollback: no legal lower-memory setting is available in the frozen allowlist."
-            )
-        if remaining <= 0:
-            return "abandon", "REPAIR_BUDGET_EXHAUSTED", (
-                "Abandon: the maximum of two code-repair attempts has been consumed."
+            return (
+                "rollback",
+                "OOM_NO_APPROVED_ADJUSTMENT",
+                "Rollback: no legal lower-memory setting is available.",
+                {},
             )
 
-        attempt = max(1, MAX_REPAIR_ATTEMPTS - remaining + 1)
+        transient = failure.failure_class in {"infrastructure_error", "hang"}
+        timeout_retry = failure.failure_class == "timeout" and failure.made_progress
+        if transient or timeout_retry:
+            if int(context.same_commit_retries_used) < 1:
+                return (
+                    "retry_same_commit",
+                    "TRANSIENT_SAME_COMMIT_RETRY",
+                    "Retry the exact sealed commit once with identical settings.",
+                    {},
+                )
+            return (
+                "abandon",
+                "SAME_COMMIT_RETRY_EXHAUSTED",
+                "Abandon: the exact same-commit retry has already been used.",
+                {},
+            )
+        if failure.failure_class == "timeout":
+            return (
+                "abandon",
+                "TIMEOUT_WITHOUT_PROGRESS",
+                "Abandon: timeout evidence does not show reliable progress.",
+                {},
+            )
+        if remaining <= 0:
+            return (
+                "abandon",
+                "REPAIR_BUDGET_EXHAUSTED",
+                "Abandon: the code-repair budget has been consumed.",
+                {},
+            )
+
+        attempt = int(context.repair_attempts_used) + 1
         instructions = build_self_debug_instructions(
-            failure,
-            context,
-            attempt,
-            remaining - 1,
+            failure, context, attempt, remaining - 1
         )
-        return "trae_repair", f"REPAIRABLE_{failure.reason_code}", instructions
+        return (
+            "trae_repair",
+            "REPAIRABLE_%s" % failure.reason_code,
+            instructions,
+            {},
+        )
 
 
 async def decide_recovery(failure_event_id: str, result: Any, context: Any) -> Any:

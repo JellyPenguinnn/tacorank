@@ -46,6 +46,7 @@ class ExperimentNode:
     latest_commit_sha: Optional[str] = None
     attempt_count: int = 0
     repair_count: int = 0
+    same_commit_retry_count: int = 0
     confirmation_count: int = 0
     highest_fidelity: Optional[Fidelity] = None
     status: ExperimentStatus = ExperimentStatus.PROPOSED

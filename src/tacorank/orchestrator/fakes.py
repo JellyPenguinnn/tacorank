@@ -329,5 +329,5 @@ class FakeRecoveryManager:
             reason_code="fake_abandon",
             instructions="Stop the fake failed experiment.",
             same_error_count=1,
-            remaining_repair_budget=max(0, context.remaining_repair_budget - 1),
+            remaining_repair_budget=context.remaining_repair_budget,
         )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import Field, field_validator, model_validator
 
@@ -35,7 +35,8 @@ class RunConfig(StrictModel):
     gpu_seconds_limit: Optional[int] = Field(default=None, gt=0)
     convergence_epsilon: float = Field(default=0.002, ge=0)
     convergence_patience: int = Field(default=3, gt=0)
-    max_repairs_per_experiment: int = Field(default=2, ge=0)
+    max_repairs_per_experiment: int = Field(default=2, ge=0, le=2)
+    allowed_runtime_adjustments: Dict[str, Any] = Field(default_factory=dict)
     max_confirmation_attempts: int = Field(default=2, ge=0)
     seed_schedule: List[int]
     context_token_limit: int = Field(default=6_000, gt=0)
@@ -81,6 +82,14 @@ class RunConfig(StrictModel):
             raise ValueError("command_ids must be non-empty and unique")
         if not self.seed_schedule:
             raise ValueError("seed_schedule must not be empty")
+        allowed_adjustments = {
+            "batch_size",
+            "num_workers",
+            "mixed_precision",
+            "timeout_profile",
+        }
+        if not set(self.allowed_runtime_adjustments).issubset(allowed_adjustments):
+            raise ValueError("runtime adjustment is not contract-approved")
         if self.baseline_metrics is not None:
             if set(self.baseline_metrics) != set(self.metric_names):
                 raise ValueError("baseline_metrics must exactly match metric_names")

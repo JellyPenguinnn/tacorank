@@ -38,6 +38,8 @@ def build_self_debug_instructions(
     commit = _get(context, "current_patch_commit_sha", default="unknown accepted commit")
     contract = _get(context, "contract_summary", default="protected evaluator, data and command boundaries")
     history = _get(context, "attempt_history", default=()) or ()
+    if not target_files:
+        target_files = _get(spec, "target_files", default=()) or ()
     targets = ", ".join(target_files) or "only the candidate files implicated by the failure"
     check = success_check or {
         "output_contract": "the existing Gate B output-contract checks",
@@ -52,5 +54,6 @@ def build_self_debug_instructions(
         f"{classification.evidence or 'no additional safe trace text'}.{previous} First explain the fault "
         f"briefly, then patch {targets}. Preserve {contract}; do not edit protected evaluators, data "
         f"loaders, contracts, or command configuration. Make {check} pass. This is repair attempt "
-        f"{repair_attempt} of 2; {remaining_budget} repair attempt(s) remain after this decision."
+        f"{repair_attempt} of {_get(context, 'max_repair_attempts', default=2)}; "
+        f"{remaining_budget} repair attempt(s) remain after this decision."
     )

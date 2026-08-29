@@ -1,6 +1,7 @@
 {
   "adapter_mode": "fake",
   "artifact_roots": ["artifacts", "runs"],
+  "allowed_runtime_adjustments": {},
   "baseline_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "baseline_metrics": {
     "gauc": 0.6674,

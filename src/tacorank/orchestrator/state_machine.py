@@ -169,15 +169,25 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         decision = payload.decision
         node = state.experiments.get(decision.experiment_id)
         _require(node is not None and node.status == ExperimentStatus.RECOVERING, "nothing is recoverable")
+        consumes_repair = int(decision.action == RecoveryAction.TRAE_REPAIR)
+        expected_attempt = min(
+            max(1, node.repair_count + 1),
+            max(1, state.max_repairs_per_experiment),
+        )
         _require(
-            decision.repair_attempt <= state.max_repairs_per_experiment,
-            "repair budget exceeded",
+            decision.repair_attempt == expected_attempt,
+            "repair attempt is inconsistent",
         )
         _require(
             decision.remaining_repair_budget
-            == state.max_repairs_per_experiment - decision.repair_attempt,
+            == state.max_repairs_per_experiment - node.repair_count - consumes_repair,
             "remaining repair budget is inconsistent",
         )
+        if decision.action == RecoveryAction.RETRY_SAME_COMMIT:
+            _require(
+                node.same_commit_retry_count == 0,
+                "same-commit retry has already been used",
+            )
     elif event_type == EventType.OUTPUT_CHECKED:
         result = payload.result
         node = state.experiments.get(result.experiment_id)

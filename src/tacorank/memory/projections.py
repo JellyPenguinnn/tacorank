@@ -87,6 +87,7 @@ def project(events: Iterable[Event]) -> RunState:
             candidate = payload.candidate
             node = _node(state, candidate.experiment_id)
             node.latest_commit_sha = candidate.patch_commit_sha
+            node.same_commit_retry_count = 0
             node.attempt_count = max(node.attempt_count, candidate.attempt)
             node.status = ExperimentStatus.PATCH_READY
             state.active_attempt = candidate.attempt
@@ -121,7 +122,12 @@ def project(events: Iterable[Event]) -> RunState:
             node = _node(state, decision.experiment_id)
             if decision.action == RecoveryAction.TRAE_REPAIR:
                 node.repair_count = max(node.repair_count, decision.repair_attempt)
-            if decision.action == RecoveryAction.ABANDON:
+            if decision.action == RecoveryAction.RETRY_SAME_COMMIT:
+                node.same_commit_retry_count += 1
+            if decision.action in (
+                RecoveryAction.ABANDON,
+                RecoveryAction.ROLLBACK,
+            ):
                 node.status = ExperimentStatus.INVALID
                 node.terminal_event_id = event.event_id
                 state.phase = "planning"
@@ -144,11 +150,19 @@ def project(events: Iterable[Event]) -> RunState:
         elif event.event_type == EventType.EVALUATION_COMPLETED:
             result = payload.result
             node = _node(state, result.experiment_id)
-            node.status = ExperimentStatus.EVALUATED
+            node.status = (
+                ExperimentStatus.RECOVERING
+                if result.trust.verdict == TrustVerdict.NO_OP
+                else ExperimentStatus.EVALUATED
+            )
             node.metric_set = result.metric_set
             node.trust = result.trust
             node.highest_fidelity = result.fidelity
-            state.phase = "decision"
+            state.phase = (
+                "recovery"
+                if result.trust.verdict == TrustVerdict.NO_OP
+                else "decision"
+            )
             if result.population.value == "public_validation":
                 state.public_validation_queries += 1
             if result.fidelity == Fidelity.FULL:
