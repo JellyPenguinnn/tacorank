@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
 from .artifacts import ArtifactStore
+from .agents import ResearchPlanner
 from .config import ContractError, RunConfig, verify_contract
 from .context.builder import ContextBuilder
 from .memory.event_store import EventStore, LedgerError
@@ -27,6 +29,7 @@ from .orchestrator.fakes import (
 )
 from .orchestrator.router import Harness
 from .orchestrator.state_machine import validator
+from .providers import DeepSeekResearchProvider, ProviderError
 from .reporting import rebuild_views
 from .schemas import (
     EvaluationResult,
@@ -64,7 +67,32 @@ def _status_dict(state) -> dict:
     }
 
 
-def _fake_harness(config: RunConfig) -> Harness:
+def _planner_for(config: RunConfig):
+    if config.research_provider == "fake":
+        return FakeResearchPlanner(config.baseline_commit_sha)
+    api_key = os.environ.get(config.deepseek_api_key_env, "").strip()
+    if not api_key:
+        raise ProviderError(
+            "DeepSeek research provider requires environment variable %s"
+            % config.deepseek_api_key_env
+        )
+    provider = DeepSeekResearchProvider(
+        api_key=api_key,
+        model=config.deepseek_model,
+        base_url=config.deepseek_base_url,
+        timeout_seconds=config.deepseek_timeout_seconds,
+        max_output_tokens=config.deepseek_max_output_tokens,
+        thinking_enabled=config.deepseek_thinking_enabled,
+        reasoning_effort=config.deepseek_reasoning_effort,
+    )
+    return ResearchPlanner(
+        provider,
+        input_token_limit=config.context_token_limit,
+        output_token_limit=config.deepseek_max_output_tokens,
+    )
+
+
+def _harness(config: RunConfig) -> Harness:
     verified = verify_contract(config)
     artifacts = ArtifactStore(config.repository_root, config.artifact_roots)
     store = EventStore(
@@ -77,7 +105,7 @@ def _fake_harness(config: RunConfig) -> Harness:
         verified_contract=verified,
         event_store=store,
         context_builder=ContextBuilder(config, verified, artifacts),
-        planner=FakeResearchPlanner(config.baseline_commit_sha),
+        planner=_planner_for(config),
         coding_worker=FakeCodingWorker(artifacts),
         patch_gate=FakePatchGate(artifacts),
         runner=FakeExecutionRunner(artifacts),
@@ -138,7 +166,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if args.command == "run":
             config = RunConfig.load(args.config)
-            harness = _fake_harness(config)
+            harness = _harness(config)
             baseline = _baseline(config, harness.verified_contract.contract_sha256)
             harness.bootstrap(baseline)
             asyncio.run(harness.run_one_experiment())
@@ -171,7 +199,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "P0 intentionally refuses to fabricate it"
             )
         return 0
-    except (ContractError, LedgerError, ValueError) as exc:
+    except (ContractError, LedgerError, ProviderError, ValueError) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 2
 

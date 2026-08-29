@@ -1,4 +1,4 @@
-# RankForge Current-Run Improvement Playbook
+# TacoRank Current-Run Improvement Playbook
 
 **Schema version:** 1.0
 **Status:** predefined, human-reviewed direction for the current run

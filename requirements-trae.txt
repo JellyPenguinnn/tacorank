@@ -1,0 +1,7 @@
+# Trae Agent runs as a separate Python 3.12+ coding-worker process.
+# The upstream project has no immutable package release, so pin the reviewed
+# source revision instead of following its mutable main branch.
+trae-agent @ git+https://github.com/bytedance/trae-agent.git@e839e559ac61bdd0e057c375dd1dee391fee797d
+# Keep load_dotenv search semantics reviewed; production also preflights every
+# .env candidate and never relies on PYTHON_DOTENV_DISABLED alone.
+python-dotenv==1.2.2

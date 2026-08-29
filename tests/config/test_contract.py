@@ -41,3 +41,19 @@ def test_commands_and_artifact_roots_must_match_frozen_contract(config):
     config.artifact_roots = ["artifacts"]
     with pytest.raises(ContractError, match="artifact_roots"):
         verify_contract(config)
+
+
+@pytest.mark.parametrize(
+    "field,value,match",
+    [
+        ("deepseek_base_url", "http://api.deepseek.com", "HTTPS origin"),
+        ("deepseek_base_url", "https://user:secret@api.deepseek.com", "credential-free"),
+        ("deepseek_api_key_env", "deepseek-key", "uppercase environment variable"),
+    ],
+)
+def test_deepseek_configuration_rejects_unsafe_values(config, field, value, match):
+    payload = config.model_dump(mode="python")
+    payload[field] = value
+
+    with pytest.raises(ValueError, match=match):
+        RunConfig.model_validate(payload)

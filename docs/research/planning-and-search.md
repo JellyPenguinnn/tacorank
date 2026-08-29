@@ -1,6 +1,6 @@
 # Person 1 research planning and search contract
 
-This module is the research-intelligence boundary for RankForge/TacoRank.
+This module is the research-intelligence boundary for TacoRank.
 It consumes a verified `PlannerContext` and returns one `PlannerOutput`.
 Person 1 does not mutate the run, write `events.jsonl`, edit code, execute a
 candidate, compute metrics, or enforce the final stop gate. Those operations

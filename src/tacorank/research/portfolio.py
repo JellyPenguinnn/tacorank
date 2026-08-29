@@ -147,7 +147,7 @@ def load_method_cards(directory: str | Path) -> ExperimentPortfolio:
     """Load schema-v1 cards with a JSON machine-readable first fenced block.
 
     A small YAML-like front-matter fallback is retained for migration of older
-    local cards, but new cards should use the attached RankForge memory schema.
+    local cards, but new cards should use the attached TacoRank memory schema.
     Malformed cards are skipped rather than becoming planner knowledge.
     """
 
