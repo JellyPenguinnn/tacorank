@@ -566,6 +566,11 @@ class DockerSandbox:
 
         portable_tmpfs = self.output_quota_verifier is None
         runtime_user = "0:0" if portable_tmpfs else self.container_user
+        supervisor_capabilities = (
+            ["--cap-add", "SETUID", "--cap-add", "SETGID"]
+            if portable_tmpfs
+            else []
+        )
         argv = [
             str(docker),
             "run",
@@ -581,6 +586,7 @@ class DockerSandbox:
             "--read-only",
             "--cap-drop",
             "ALL",
+            *supervisor_capabilities,
             "--security-opt",
             "no-new-privileges:true",
             "--pids-limit",
@@ -791,15 +797,7 @@ class DockerSandbox:
                 "production Docker execution requires a hard output disk quota limit"
             )
         name = "tacorank-preflight-{0}".format(secrets.token_hex(12))
-        script = (
-            "import json,os;"
-            "import tacorank.execution.solution_cli;"
-            "import benchmarks.kuairand_pure.pipeline;"
-            "s=os.statvfs('/artifacts');"
-            "p='/artifacts/preflight';"
-            "open(p,'wb').write(b'ok');os.unlink(p);"
-            "print(json.dumps({'capacity':s.f_frsize*s.f_blocks}))"
-        )
+        child_uid, child_gid = self.container_user.split(":", 1)
         command = [
             str(docker),
             "run",
@@ -812,6 +810,10 @@ class DockerSandbox:
             "--read-only",
             "--cap-drop",
             "ALL",
+            "--cap-add",
+            "SETUID",
+            "--cap-add",
+            "SETGID",
             "--security-opt",
             "no-new-privileges:true",
             "--pids-limit",
@@ -823,7 +825,7 @@ class DockerSandbox:
             "--cpus",
             "1",
             "--user",
-            self.container_user,
+            "0:0",
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,noexec,size=32m",
             "--tmpfs",
@@ -831,8 +833,13 @@ class DockerSandbox:
             "--entrypoint",
             "/usr/local/bin/python3",
             self.image,
-            "-c",
-            script,
+            "-m",
+            "tacorank.execution.container_supervisor",
+            "self-test",
+            "--uid",
+            child_uid,
+            "--gid",
+            child_gid,
         ]
         cleanup_completed: Optional[subprocess.CompletedProcess[str]] = None
         cleanup_error: Optional[BaseException] = None

@@ -32,6 +32,9 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--uid", type=int, required=True)
     run.add_argument("--gid", type=int, required=True)
     run.add_argument("candidate_arguments", nargs=argparse.REMAINDER)
+    self_test = commands.add_parser("self-test", allow_abbrev=False)
+    self_test.add_argument("--uid", type=int, required=True)
+    self_test.add_argument("--gid", type=int, required=True)
     for name in ("probe", "release"):
         command = commands.add_parser(name, allow_abbrev=False)
         command.add_argument("--control-directory", required=True)
@@ -102,15 +105,18 @@ def _run(path: Path, uid: int, gid: int, arguments: Sequence[str]) -> int:
         raise SupervisorError("control directory could not be created exclusively") from error
     _owned_control_directory(path)
 
-    child = subprocess.Popen(
-        [sys.executable, *candidate_arguments],
-        stdin=subprocess.DEVNULL,
-        stdout=None,
-        stderr=None,
-        shell=False,
-        close_fds=True,
-        preexec_fn=_candidate_preexec(uid, gid),
-    )
+    try:
+        child = subprocess.Popen(
+            [sys.executable, *candidate_arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=None,
+            stderr=None,
+            shell=False,
+            close_fds=True,
+            preexec_fn=_candidate_preexec(uid, gid),
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SupervisorError("candidate process could not be started") from error
 
     def forward(requested: int, _frame: object) -> None:
         if child.poll() is None:
@@ -163,6 +169,39 @@ def _release(path: Path) -> int:
     return 0
 
 
+def _self_test(uid: int, gid: int) -> int:
+    script = (
+        "import json,os,sys;"
+        "assert os.geteuid()==int(sys.argv[1]);"
+        "assert os.getegid()==int(sys.argv[2]);"
+        "status=dict(line.split(':',1) for line in open('/proc/self/status') if ':' in line);"
+        "assert int(status['CapEff'].strip(),16)==0;"
+        "assert status['NoNewPrivs'].strip()=='1';"
+        "import tacorank.execution.solution_cli;"
+        "import benchmarks.kuairand_pure.pipeline;"
+        "s=os.statvfs('/artifacts');"
+        "p='/artifacts/preflight';"
+        "open(p,'xb').write(b'ok');os.unlink(p);"
+        "print(json.dumps({'capacity':s.f_frsize*s.f_blocks}))"
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(uid), str(gid)],
+            stdin=subprocess.DEVNULL,
+            stdout=None,
+            stderr=None,
+            shell=False,
+            close_fds=True,
+            check=False,
+            preexec_fn=_candidate_preexec(uid, gid),
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SupervisorError("candidate identity self-test could not start") from error
+    if completed.returncode != 0:
+        raise SupervisorError("candidate identity self-test failed")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
@@ -178,6 +217,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _probe(control)
         if arguments.command == "release":
             return _release(control)
+        if arguments.command == "self-test":
+            return _self_test(arguments.uid, arguments.gid)
         raise SupervisorError("unknown supervisor command")
     except SupervisorError as error:
         print("tacorank container supervisor: {0}".format(error), file=sys.stderr)

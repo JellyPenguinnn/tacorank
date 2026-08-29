@@ -552,6 +552,12 @@ def test_docker_portable_quota_uses_bounded_tmpfs_and_output_copy(
     )
     assert launch.runtime_cleanup is not None
     assert launch.argv[launch.argv.index("--user") + 1] == "0:0"
+    cap_adds = [
+        launch.argv[index + 1]
+        for index, value in enumerate(launch.argv)
+        if value == "--cap-add"
+    ]
+    assert cap_adds == ["SETUID", "SETGID"]
     assert "tacorank.execution.container_supervisor" in launch.argv
     extraction = launch.runtime_cleanup.output_extraction
     assert extraction is not None
@@ -614,6 +620,10 @@ def test_docker_preflight_launches_and_cleans_exact_capability_probe(
 
     assert proof.environment_sha256 == IMAGE_ENVIRONMENT_SHA256
     assert any(argv[1] == "run" and "--read-only" in argv for argv in calls)
+    runtime_probe = next(argv for argv in calls if argv[1] == "run")
+    assert "tacorank.execution.container_supervisor" in runtime_probe
+    assert "self-test" in runtime_probe
+    assert runtime_probe[runtime_probe.index("--user") + 1] == "0:0"
     assert any(argv[1:3] == ["rm", "--force"] for argv in calls)
     assert all(
         environment["DOCKER_HOST"] == "unix://" + str(socket_path)
