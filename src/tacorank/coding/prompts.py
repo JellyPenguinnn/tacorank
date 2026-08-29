@@ -1,0 +1,454 @@
+"""Deterministic, bounded prompts for initial and repair coding tasks."""
+
+from __future__ import annotations
+
+import dataclasses
+import enum
+import hashlib
+import json
+import re
+from typing import Any, Dict, Mapping, Optional, Protocol, Sequence, Tuple
+
+from tacorank.git.patches import validate_relative_path
+
+from .redaction import SecretRedactor
+
+
+MAX_PROMPT_BYTES = 512 * 1024
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_GATE_A_CHECK_NAMES = frozenset(
+    {
+        "diff_parse",
+        "changed_file_match",
+        "editable_path",
+        "protected_path",
+        "path_escape",
+        "contract_hash",
+        "syntax_import",
+        "interface_contract",
+        "command_policy",
+        "data_boundary",
+        "network_policy",
+        "secret_scan",
+        "dependency_policy",
+        "smoke_test",
+    }
+)
+
+
+class PromptContractError(ValueError):
+    """Raised before invocation when a coding context violates its contract."""
+
+
+class CoderContextLike(Protocol):
+    context_id: str
+    run_id: str
+    experiment_id: str
+    contract_sha256: str
+    experiment_spec: Any
+    parent_commit_sha: str
+    target_interface_excerpts: Any
+    editable_roots: Sequence[str]
+    protected_paths: Sequence[str]
+    allowed_command_ids: Sequence[str]
+    selected_method_cards: Sequence[Any]
+    active_lessons: Sequence[Any]
+    step_limit: int
+    token_limit: int
+    wall_time_limit_seconds: int
+    context_artifact: Any
+
+
+class RecoveryContextLike(Protocol):
+    context_id: str
+    run_id: str
+    experiment_id: str
+    repair_attempt: int
+    original_experiment_spec: Any
+    current_patch_commit_sha: str
+    accepted_patch_receipt_id: Optional[str]
+    failure_class: str
+    error_fingerprint: str
+    error_summary: str
+    relevant_trace_tail: str
+    failed_checks: Sequence[Any]
+    previous_repair_fingerprints: Sequence[str]
+    recovery_instructions: str
+    remaining_repair_budget: int
+    editable_roots: Sequence[str]
+    protected_paths: Sequence[str]
+
+
+def build_coding_prompt(
+    context: CoderContextLike,
+    spec: Any,
+    *,
+    redactor: Optional[SecretRedactor] = None,
+) -> str:
+    """Build the initial Trae task for exactly one approved experiment spec."""
+
+    safe_redactor = redactor or SecretRedactor()
+    context_spec = _required_attribute(context, "experiment_spec")
+    spec_document = _json_document(spec, "experiment_spec")
+    if _canonical_json(context_spec) != _canonical_json(spec_document):
+        raise PromptContractError("context experiment_spec differs from the approved spec")
+
+    run_id = _required_text(context, "run_id")
+    experiment_id = _required_text(context, "experiment_id")
+    if spec_document.get("run_id") != run_id or spec_document.get("experiment_id") != experiment_id:
+        raise PromptContractError("spec identity does not match coding context")
+    parent = _validated_object_id(_required_text(context, "parent_commit_sha"))
+    if spec_document.get("parent_commit_sha") != parent:
+        raise PromptContractError("spec parent commit does not match coding context")
+    contract_sha = _validated_sha256(_required_text(context, "contract_sha256"))
+    editable_roots = _validated_paths(_required_attribute(context, "editable_roots"), "editable_roots")
+    protected_paths = _validated_paths(
+        _required_attribute(context, "protected_paths"), "protected_paths"
+    )
+    commands = _validated_commands(_required_attribute(context, "allowed_command_ids"))
+    step_limit = _positive_int(context, "step_limit")
+    token_limit = _positive_int(context, "token_limit")
+    wall_limit = _positive_int(context, "wall_time_limit_seconds")
+
+    sections = [
+        "# TacoRank bounded coding task",
+        "",
+        "Implement exactly the approved ExperimentSpec below and return a code patch plus a concise explanation.",
+        "Do not choose or reinterpret the hypothesis. Do not run full-data training, compute official metrics, access protected labels, modify memory, or declare research success.",
+        "Do not use network access, install packages, or run commands other than the symbolic lightweight capabilities listed below.",
+        "",
+        "## Immutable identity",
+        _bullet("run_id", run_id),
+        _bullet("experiment_id", experiment_id),
+        _bullet("context_id", _required_text(context, "context_id")),
+        _bullet("parent_commit_sha", parent),
+        _bullet("contract_sha256", contract_sha),
+        "",
+        "## Context provenance",
+        _json_block(_json_value(_required_attribute(context, "context_artifact"))),
+        "",
+        "## Hard bounds",
+        _bullet("max_steps", step_limit),
+        _bullet("max_provider_tokens", token_limit),
+        _bullet("wall_time_limit_seconds", wall_limit),
+        "",
+        "## File and tool policy",
+        _json_block(
+            {
+                "editable_roots": editable_roots,
+                "protected_paths": protected_paths,
+                "allowed_command_ids": commands,
+            }
+        ),
+        "Only edit paths under editable_roots. Protected paths always win over editable roots.",
+        "Dependency files may be inspected but not changed unless the ExperimentSpec explicitly names a reviewed dependency change.",
+        "",
+        "## Required target interfaces",
+        _json_block(_json_value(_required_attribute(context, "target_interface_excerpts"))),
+        "",
+        "## Approved ExperimentSpec (exact)",
+        _json_block(spec_document),
+        "",
+        "## Selected method cards",
+        _json_block(_json_value(_required_attribute(context, "selected_method_cards"))),
+        "",
+        "## Applicable lessons",
+        _json_block(_json_value(_required_attribute(context, "active_lessons"))),
+        "",
+        "## Completion contract",
+        "Make the smallest coherent implementation of this exact hypothesis. Run only permitted lightweight checks. Finish with a non-empty patch and a concise account of files changed and checks actually run.",
+    ]
+    return _finalize("\n".join(sections), safe_redactor)
+
+
+def build_repair_prompt(
+    context: RecoveryContextLike,
+    decision: Any,
+    *,
+    step_limit: int,
+    token_limit: int,
+    wall_time_limit_seconds: int,
+    allowed_command_ids: Sequence[str],
+    redactor: Optional[SecretRedactor] = None,
+) -> str:
+    """Build a repair task that preserves the original research hypothesis."""
+
+    safe_redactor = redactor or SecretRedactor()
+    spec_document = _json_document(
+        _required_attribute(context, "original_experiment_spec"),
+        "original_experiment_spec",
+    )
+    run_id = _required_text(context, "run_id")
+    experiment_id = _required_text(context, "experiment_id")
+    if spec_document.get("run_id") != run_id or spec_document.get("experiment_id") != experiment_id:
+        raise PromptContractError("original spec identity does not match recovery context")
+    repair_attempt = _nonnegative_int(context, "repair_attempt")
+    remaining_budget = _nonnegative_int(context, "remaining_repair_budget")
+    if remaining_budget < 1:
+        raise PromptContractError("repair budget is exhausted")
+    current_commit = _validated_object_id(_required_text(context, "current_patch_commit_sha"))
+    failed_checks = _json_value(_required_attribute(context, "failed_checks"))
+    if not isinstance(failed_checks, list):
+        raise PromptContractError("failed_checks must serialize to a sequence")
+    gate_a_rejection = _contains_gate_a_failure(failed_checks)
+    receipt_id = getattr(context, "accepted_patch_receipt_id", None)
+    if gate_a_rejection:
+        if receipt_id is not None:
+            raise PromptContractError(
+                "Gate-A rejection recovery cannot identify an accepted patch receipt"
+            )
+    elif not isinstance(receipt_id, str) or not receipt_id.strip():
+        raise PromptContractError(
+            "post-acceptance recovery requires accepted_patch_receipt_id"
+        )
+    limits = {
+        "max_steps": _standalone_positive_int(step_limit, "step_limit"),
+        "max_provider_tokens": _standalone_positive_int(token_limit, "token_limit"),
+        "wall_time_limit_seconds": _standalone_positive_int(
+            wall_time_limit_seconds, "wall_time_limit_seconds"
+        ),
+    }
+    commands = _validated_commands(allowed_command_ids)
+    editable_roots = _validated_paths(_required_attribute(context, "editable_roots"), "editable_roots")
+    protected_paths = _validated_paths(
+        _required_attribute(context, "protected_paths"), "protected_paths"
+    )
+    decision_document = _json_document(decision, "recovery_decision")
+    if decision_document.get("action") != "trae_repair":
+        raise PromptContractError("recovery decision is not a trae_repair action")
+    if decision_document.get("run_id", run_id) != run_id or decision_document.get(
+        "experiment_id", experiment_id
+    ) != experiment_id:
+        raise PromptContractError("recovery decision identity does not match context")
+    if decision_document.get("repair_attempt", repair_attempt) != repair_attempt:
+        raise PromptContractError("recovery decision attempt does not match context")
+
+    sections = [
+        "# TacoRank bounded repair task",
+        "",
+        "Repair the current patch using only the supplied failure evidence. Preserve the original hypothesis and mechanism exactly; do not substitute a different experiment.",
+        "Do not run full-data training, compute official metrics, access protected labels, modify memory, use network access, install packages, or declare research success.",
+        "",
+        "## Immutable identity",
+        _bullet("run_id", run_id),
+        _bullet("experiment_id", experiment_id),
+        _bullet("context_id", _required_text(context, "context_id")),
+        _bullet("repair_attempt", repair_attempt),
+        _bullet("current_patch_commit_sha", current_commit),
+        _json_bullet("accepted_patch_receipt_id", receipt_id),
+        _bullet("remaining_repair_budget", remaining_budget),
+        "",
+        "## Hard bounds",
+        _json_block({**limits, "allowed_command_ids": commands}),
+        "",
+        "## File policy",
+        _json_block(
+            {"editable_roots": editable_roots, "protected_paths": protected_paths}
+        ),
+        "Only edit paths under editable_roots. Protected paths always win.",
+        "",
+        "## Original ExperimentSpec (must remain unchanged)",
+        _json_block(spec_document),
+        "",
+        "## Validated recovery decision",
+        _json_block(decision_document),
+        "",
+        "## Failure evidence",
+        _json_block(
+            {
+                "failure_class": _required_text(context, "failure_class"),
+                "error_fingerprint": _required_text(context, "error_fingerprint"),
+                "error_summary": _required_text(context, "error_summary"),
+                "relevant_trace_tail": _required_text(context, "relevant_trace_tail"),
+                "failed_checks": failed_checks,
+                "previous_repair_fingerprints": _json_value(
+                    _required_attribute(context, "previous_repair_fingerprints")
+                ),
+                "recovery_instructions": _required_text(
+                    context, "recovery_instructions"
+                ),
+            }
+        ),
+        "",
+        "## Completion contract",
+        "Make only the smallest repair justified by this evidence. Run permitted lightweight checks and finish with a non-empty repair patch plus a concise account of files changed and checks actually run.",
+    ]
+    return _finalize("\n".join(sections), safe_redactor)
+
+
+def prompt_sha256(prompt: str) -> str:
+    """Return the hash recorded in adapter configuration evidence."""
+
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def _finalize(prompt: str, redactor: SecretRedactor) -> str:
+    redacted = redactor.redact(prompt)
+    encoded = redacted.encode("utf-8")
+    if len(encoded) > MAX_PROMPT_BYTES:
+        raise PromptContractError(f"coding prompt exceeds {MAX_PROMPT_BYTES} bytes")
+    if redactor.contains_known_secret(encoded):
+        raise PromptContractError("known credential remained in coding prompt")
+    return redacted
+
+
+def _json_document(value: Any, name: str) -> Dict[str, Any]:
+    normalized = _json_value(value)
+    if not isinstance(normalized, dict):
+        raise PromptContractError(f"{name} must serialize to an object")
+    return normalized
+
+
+def _json_value(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        value = _json_value(value.model_dump(mode="json"))
+    elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+        value = _json_value(dataclasses.asdict(value))
+    elif isinstance(value, enum.Enum):
+        value = _json_value(value.value)
+    elif isinstance(value, Mapping):
+        normalized = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise PromptContractError("JSON object keys must be strings")
+            normalized[key] = _json_value(item)
+        value = normalized
+    elif isinstance(value, (list, tuple)):
+        value = [_json_value(item) for item in value]
+    try:
+        serialized = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return json.loads(serialized)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise PromptContractError("context value is not finite JSON data") from exc
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        _json_value(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _json_block(value: Any) -> str:
+    return "```json\n" + json.dumps(
+        _json_value(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    ) + "\n```"
+
+
+def _required_attribute(value: Any, field: str) -> Any:
+    try:
+        result = getattr(value, field)
+    except AttributeError as exc:
+        raise PromptContractError(f"coding context is missing {field}") from exc
+    if result is None:
+        raise PromptContractError(f"coding context {field} cannot be null")
+    return result
+
+
+def _required_text(value: Any, field: str) -> str:
+    result = _required_attribute(value, field)
+    if not isinstance(result, str) or not result.strip():
+        raise PromptContractError(f"coding context {field} must be non-empty text")
+    return result
+
+
+def _positive_int(value: Any, field: str) -> int:
+    result = _required_attribute(value, field)
+    if isinstance(result, bool) or not isinstance(result, int) or result < 1:
+        raise PromptContractError(f"coding context {field} must be a positive integer")
+    return result
+
+
+def _nonnegative_int(value: Any, field: str) -> int:
+    result = _required_attribute(value, field)
+    if isinstance(result, bool) or not isinstance(result, int) or result < 0:
+        raise PromptContractError(
+            f"coding context {field} must be a non-negative integer"
+        )
+    return result
+
+
+def _standalone_positive_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise PromptContractError(f"{field} must be a positive integer")
+    return value
+
+
+def _validated_sha256(value: str) -> str:
+    if not _SHA256_RE.fullmatch(value):
+        raise PromptContractError("contract_sha256 must be lowercase 64-hex")
+    return value
+
+
+def _validated_object_id(value: str) -> str:
+    if not _OBJECT_ID_RE.fullmatch(value):
+        raise PromptContractError("commit SHA must be a full lowercase object ID")
+    return value
+
+
+def _validated_paths(value: Any, field: str) -> Tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise PromptContractError(f"{field} must be a path sequence")
+    try:
+        paths = tuple(validate_relative_path(path) for path in value)
+    except (TypeError, ValueError) as exc:
+        raise PromptContractError(f"{field} contains an invalid path") from exc
+    if not paths or paths != tuple(dict.fromkeys(paths)):
+        raise PromptContractError(f"{field} must be non-empty and duplicate-free")
+    return paths
+
+
+def _validated_commands(value: Any) -> Tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise PromptContractError("allowed_command_ids must be a sequence")
+    commands = tuple(value)
+    if not commands:
+        raise PromptContractError("allowed_command_ids cannot be empty")
+    if any(not isinstance(item, str) or not _COMMAND_ID_RE.fullmatch(item) for item in commands):
+        raise PromptContractError("allowed_command_ids contains an invalid identifier")
+    if commands != tuple(dict.fromkeys(commands)):
+        raise PromptContractError("allowed_command_ids contains duplicates")
+    return commands
+
+
+def _contains_gate_a_failure(failed_checks: Sequence[Any]) -> bool:
+    """Recognize a pre-acceptance Gate-A failure without inventing a receipt."""
+
+    for check in failed_checks:
+        if isinstance(check, str):
+            name = check
+        elif isinstance(check, Mapping):
+            name = None
+            for field in ("name", "check_id", "check"):
+                candidate = check.get(field)
+                if isinstance(candidate, str):
+                    name = candidate
+                    break
+        else:
+            name = None
+        if isinstance(name, str) and name in _GATE_A_CHECK_NAMES:
+            return True
+    return False
+
+
+def _bullet(name: str, value: Any) -> str:
+    return f"- {name}: `{value}`"
+
+
+def _json_bullet(name: str, value: Any) -> str:
+    return f"- {name}: {json.dumps(value, ensure_ascii=False, allow_nan=False)}"

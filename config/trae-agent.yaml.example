@@ -1,0 +1,29 @@
+# Safe starter configuration for the separately installed Trae worker.
+# Supply OPENAI_API_KEY only through the approved child-process environment.
+agents:
+  trae_agent:
+    enable_lakeview: false
+    model: tacorank_coder
+    max_steps: 20
+    tools:
+      - str_replace_based_edit_tool
+      - task_done
+
+allow_mcp_servers: []
+mcp_servers: {}
+
+model_providers:
+  openai:
+    provider: openai
+    api_key: ""
+
+models:
+  tacorank_coder:
+    model_provider: openai
+    model: gpt-4o-mini
+    max_tokens: 4096
+    temperature: 0
+    top_p: 1
+    top_k: 0
+    max_retries: 3
+    parallel_tool_calls: false

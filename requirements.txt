@@ -8,3 +8,6 @@ pandas>=1.5,<3
 
 # TacoRank shared schemas
 pydantic>=2,<3
+
+# Strict parsing of the reviewed Trae execution-surface configuration
+PyYAML>=6,<7
