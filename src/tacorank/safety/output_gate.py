@@ -26,6 +26,8 @@ from typing import (
     Tuple,
 )
 
+from tacorank.run_layout import experiment_artifact_prefix
+
 from .path_policy import (
     PolicyViolation,
     ViolationCode,
@@ -444,7 +446,7 @@ class OutputGate:
             attempt = _field(run_result, "attempt")
             if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
                 raise ValueError("attempt must be a positive integer")
-            expected_output_roots = tuple(
+            expected_output_roots = {
                 "{}/{}/{}/attempt_{}/outputs".format(
                     root,
                     run_id,
@@ -452,7 +454,16 @@ class OutputGate:
                     attempt,
                 )
                 for root in self.artifact_roots
-            )
+            }
+            if "runs" in self.artifact_roots:
+                expected_output_roots.add(
+                    experiment_artifact_prefix(
+                        run_id,
+                        experiment_id,
+                        attempt=attempt,
+                    )
+                    + "/outputs"
+                )
         except ValueError:
             findings.append(
                 PolicyViolation(

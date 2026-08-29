@@ -74,15 +74,18 @@ def check_csv(
     tamper_after_reference: bool = False,
     artifact_attempt: int = 1,
     max_prediction_bytes: int = 1024 * 1024,
+    relative: Optional[str] = None,
+    artifact_roots: tuple[str, ...] = ("artifacts",),
     execution_seal_verifier: Optional[
         Callable[..., Mapping[str, Any]]
     ] = None,
 ):
-    relative = (
-        "artifacts/run_1/exp_1/attempt_{}/outputs/predictions.csv".format(
-            artifact_attempt
+    if relative is None:
+        relative = (
+            "artifacts/run_1/exp_1/attempt_{}/outputs/predictions.csv".format(
+                artifact_attempt
+            )
         )
-    )
     target = root / relative
     target.parent.mkdir(parents=True, exist_ok=True)
     encoded = csv_text.encode("utf-8")
@@ -101,6 +104,7 @@ def check_csv(
         repository_root=root,
         contract=make_contract(),
         factories=FACTORIES,
+        artifact_roots=artifact_roots,
         max_prediction_bytes=max_prediction_bytes,
         execution_seal_verifier=(
             execution_seal_verifier or accepting_execution_seal
@@ -139,6 +143,20 @@ def test_gate_b_accepts_exact_official_order_and_duplicate_rows(tmp_path: Path) 
         "maximum": 0.3,
         "mean": pytest.approx(0.2),
     }
+
+
+def test_gate_b_accepts_canonical_run_artifact_layout(tmp_path: Path) -> None:
+    result = check_csv(
+        tmp_path,
+        VALID_CSV,
+        relative=(
+            "runs/run_1/artifacts/exp_1/attempt_001/outputs/predictions.csv"
+        ),
+        artifact_roots=("artifacts", "runs"),
+    )
+
+    assert result.accepted
+    assert result.violations == []
 
 
 def test_gate_b_default_verifier_requires_exact_execution_sidecar(
