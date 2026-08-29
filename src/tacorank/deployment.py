@@ -562,9 +562,12 @@ def _install_trae_tools(
             label="Trae tool extraction",
         )
         _validate_trae_tools(staging)
-        if destination.is_symlink() or not destination.is_dir():
+        if destination.is_symlink() or (
+            destination.exists() and not destination.is_dir()
+        ):
             raise DeploymentError("installed Trae tool directory is invalid")
-        shutil.rmtree(destination)
+        if destination.exists():
+            shutil.rmtree(destination)
         os.replace(staging, destination)
     finally:
         _run(
