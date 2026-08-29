@@ -1,0 +1,29 @@
+{
+  "adapter_mode": "fake",
+  "artifact_roots": ["artifacts", "runs"],
+  "allowed_runtime_adjustments": {},
+  "baseline_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "baseline_metrics": {
+    "gauc": 0.6674,
+    "ndcg@5": 0.5357,
+    "primary": 0.60155
+  },
+  "command_ids": ["run_smoke", "run_proxy", "run_full"],
+  "context_token_limit": 6000,
+  "contract_path": "contract/COMPETITION.md",
+  "convergence_epsilon": 0.002,
+  "convergence_patience": 3,
+  "data_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "evaluator_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "max_confirmation_attempts": 2,
+  "max_experiments": 50,
+  "max_repairs_per_experiment": 2,
+  "metric_names": ["gauc", "ndcg@5", "primary"],
+  "primary_metric_name": "primary",
+  "protected_paths_path": "PROTECTED_PATHS.md",
+  "repository_root": ".",
+  "run_id": "run_001",
+  "schema_version": "1.0",
+  "seed_schedule": [11, 22, 33, 44, 55],
+  "wall_time_limit_seconds": 21600
+}

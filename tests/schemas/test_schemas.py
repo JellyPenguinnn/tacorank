@@ -1,4 +1,5 @@
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -55,39 +56,33 @@ def metric_set():
 
 
 def run_started_values():
+    payload = {
+        "type": "run.started",
+        "config_sha256": HASH_C,
+        "contract_sha256": HASH_A,
+        "protected_paths_sha256": HASH_B,
+        "max_experiments": 50,
+        "wall_time_limit_seconds": 21600,
+        "seed_schedule": [0, 1, 2],
+    }
+    input_hash = hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     return {
         "schema_version": "1.0",
         "seq": 1,
         "event_id": "evt_000001",
         "timestamp": "2026-08-29T03:14:15.123Z",
         "run_id": RUN_ID,
-        "experiment_id": None,
-        "attempt": None,
         "event_type": "run.started",
-        "producer": "orchestrator",
-        "evidence_status": "verified",
         "causation_event_id": None,
-        "idempotency_key": "%s:run_started" % RUN_ID,
-        "payload": {
-            "sequential": True,
-            "contract_path": "contract/COMPETITION.md",
-            "contract_sha256": HASH_A,
-            "protected_paths_sha256": HASH_B,
-            "source_commit": COMMIT,
-            "budgets": {
-                "max_experiments": 50,
-                "max_full_evaluations": 12,
-                "max_agent_wall_time_seconds": 21600,
-                "max_llm_tokens": None,
-                "max_gpu_seconds": None,
-            },
-            "convergence": {
-                "epsilon": 0.002,
-                "patience": 3,
-                "population": "public_validation",
-            },
-        },
-        "artifacts": [],
+        "idempotency_key": "%s:run:start:0:%s" % (RUN_ID, input_hash),
+        "payload": payload,
+        "artifact_refs": [],
         "resource_delta": ResourceDelta().model_dump(mode="json"),
         "prev_event_hash": "0" * 64,
     }
@@ -112,7 +107,7 @@ class SharedSchemaTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ResourceDelta(unexpected=1)
         with self.assertRaises(ValidationError):
-            ResourceDelta(llm_input_tokens=1, token_measurement="none")
+            ResourceDelta(llm_input_tokens=-1)
 
     def test_metric_contract_registry_is_enforced(self):
         metrics = metric_set()
@@ -171,9 +166,10 @@ class SharedSchemaTests(unittest.TestCase):
         self.assertIsNone(blocked.spec)
 
     def test_unbiased_audit_is_isolated(self):
-        payload = EvaluationCompletedPayload(
-            output_checked_event_id="evt_000032",
-            prediction_artifact_id="art_0123abcd",
+        result = EvaluationResult(
+            run_id=RUN_ID,
+            experiment_id=EXP_ID,
+            attempt=1,
             population="unbiased_audit",
             fidelity="full",
             seed=0,
@@ -195,16 +191,18 @@ class SharedSchemaTests(unittest.TestCase):
                 "flags": [],
             },
         )
-        self.assertEqual(payload.population, Population.UNBIASED_AUDIT)
+        payload = EvaluationCompletedPayload(result=result)
+        self.assertEqual(payload.result.population, Population.UNBIASED_AUDIT)
+        values = payload.model_dump()
+        values["result"]["public_query_index"] = 1
         with self.assertRaises(ValidationError):
-            payload.model_copy(update={"public_query_index": 1}).model_validate(
-                {**payload.model_dump(), "public_query_index": 1}
-            )
+            EvaluationCompletedPayload.model_validate(values)
 
     def test_confirmed_seed_count_matches_evidence_events(self):
-        payload = EvaluationCompletedPayload(
-            output_checked_event_id="evt_000032",
-            prediction_artifact_id="art_0123abcd",
+        result = EvaluationResult(
+            run_id=RUN_ID,
+            experiment_id=EXP_ID,
+            attempt=3,
             population="public_validation",
             fidelity="full",
             seed=3,
@@ -231,9 +229,10 @@ class SharedSchemaTests(unittest.TestCase):
             },
             seed_evidence_event_ids=["evt_000010", "evt_000011"],
         )
-        self.assertEqual(payload.trust.seed_count, 3)
+        payload = EvaluationCompletedPayload(result=result)
+        self.assertEqual(payload.result.trust.seed_count, 3)
         values = payload.model_dump()
-        values["seed_evidence_event_ids"] = ["evt_000010"]
+        values["result"]["seed_evidence_event_ids"] = ["evt_000010"]
         with self.assertRaisesRegex(ValidationError, "seed_count"):
             EvaluationCompletedPayload.model_validate(values)
 

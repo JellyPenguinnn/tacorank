@@ -4,9 +4,12 @@
 
 # Local context and secrets
 /context/
+/eesyuen-agents/
 .env
 .env.*
 !.env.example
+/CLAUDE.md
+/.claude/
 
 # Python environments and caches
 .venv/
