@@ -19,12 +19,12 @@ KuaiRand-specific adapters live in `benchmarks/kuairand_pure/`. The official sta
 ## Harness Operations
 The contract and protected-path files must be frozen, all placeholder hashes in copies of `config.example.json` and `live-adapters.example.json` must be replaced, and the live worktree/data/runtime prerequisites must pass preflight before starting a production run.
 
-- `tacorank run --config run-config.json --live-config live-adapters.json`: start one production experiment using the hash-bound live adapters. The command fails closed before creating ledger state when prerequisites are missing.
-- `tacorank resume --run-id run_001 --repository-root .`: repair a truncated ledger tail if necessary and print the phase from which orchestration can be resumed; it does not yet restart adapter execution.
+- `tacorank run --config .tacorank/deployment/run-config.json --live-config .tacorank/deployment/live-adapters.json`: start the complete sequential production loop using the hash-bound live adapters and finalize automatically after a frozen stop rule matches. The command fails closed before creating ledger state when prerequisites are missing.
+- `tacorank resume --config .tacorank/deployment/run-config.json --live-config .tacorank/deployment/live-adapters.json`: repair an incomplete final ledger fragment, verify the frozen run identity, and continue from a durable planning checkpoint. Ambiguous mid-adapter phases fail closed for operator review.
 - `tacorank status --run-id run_001 --repository-root .`: print the current projected run state.
 - `tacorank validate-ledger --run-id run_001 --repository-root .`: validate schema, sequence, hashes, transitions, and referenced artifacts.
 - `tacorank rebuild-views --run-id run_001 --repository-root .`: regenerate `state.json`, `STATUS.md`, `lessons/`, `experiment-graph/`, and `reports/` from the ledger.
-- `tacorank finalize --run-id run_001 --repository-root .`: validate that the run is stopped, then fail closed because the standalone reproduction/final-selection command is not implemented yet.
+- `tacorank finalize --config .tacorank/deployment/run-config.json --live-config .tacorank/deployment/live-adapters.json`: reproduce and select the validation best from a stopped run, run label-free test inference, and check the final submission. An already finalized run is idempotent.
 
 ## Coding Style & Naming
 Support Python 3.9+. Follow PEP 8 with four-space indentation, `snake_case` modules/functions, `PascalCase` classes, and uppercase constants. Add type hints to public APIs and prefer immutable dataclasses or Pydantic models for structured state. Keep decision, trust, and metric logic deterministic; avoid hidden global state and unnecessary dependencies.
