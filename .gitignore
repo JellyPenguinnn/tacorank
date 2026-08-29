@@ -1,3 +1,5 @@
 /KuaiRand-Pure/data/
 /KuaiRand-Pure.tar.gz
 context/
+__pycache__/
+*.py[cod]
