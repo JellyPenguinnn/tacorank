@@ -13,9 +13,10 @@ import pytest
 from tacorank.artifacts import ArtifactStore
 from tacorank.execution import CanonicalArtifactStoreAdapter
 from tacorank.execution.commands import CommandProfile, CommandRegistry, ExpectedArtifact
-from tacorank.execution.artifacts import verify_execution_seal
+from tacorank.execution.artifacts import RunArtifactManager, verify_execution_seal
 from tacorank.execution.interfaces import default_model_factory
 from tacorank.execution.runner import InvalidRunRequest
+from tacorank.run_layout import run_artifact_root
 from tacorank.schemas import RunResult, TelemetrySample
 
 from .conftest import (
@@ -81,6 +82,45 @@ def test_successful_run_is_sealed_observed_and_hash_addressed(
     )
     assert seal_payload["prediction"]["sha256"] == result.prediction_artifact.sha256
     assert seal_payload["patch_receipt_sha256"] == "c" * 64
+
+
+def test_canonical_run_layout_execution_seal_verifies(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    store = CanonicalArtifactStoreAdapter(
+        ArtifactStore(repository),
+        artifact_root=run_artifact_root("run_001"),
+        include_run_id=False,
+    )
+    manager = RunArtifactManager(store, "run_001", "exp_0001", 1)
+    prediction_path = manager.output_directory / "predictions.csv"
+    prediction_path.write_text("row_id,score\n0,0.5\n", encoding="utf-8")
+    prediction = store.reference(
+        prediction_path,
+        kind="predictions",
+        content_type="text/csv",
+    )
+    manager.write_execution_seal(
+        request=request(),
+        command=SimpleNamespace(command_id="candidate_smoke"),
+        prediction_artifact=prediction,
+        receipt_sha256="c" * 64,
+    )
+
+    seal = verify_execution_seal(
+        repository,
+        prediction,
+        run_id="run_001",
+        experiment_id="exp_0001",
+        execution_attempt=1,
+        producer_commit_sha="a" * 40,
+        command_id="candidate_smoke",
+        data_manifest_sha256="b" * 64,
+        patch_receipt_id="receipt_001",
+        patch_receipt_sha256="c" * 64,
+    )
+
+    assert seal["prediction"]["path"] == prediction.path
 
 
 def test_runner_emits_person2_canonical_models(
