@@ -96,7 +96,7 @@ the other adapters, so an omitted field cannot silently fall back to the fake pl
   "deepseek_base_url": "https://api.deepseek.com",
   "deepseek_api_key_env": "DEEPSEEK_API_KEY",
   "deepseek_timeout_seconds": 120,
-  "deepseek_max_output_tokens": 2000,
+  "deepseek_max_output_tokens": 8192,
   "deepseek_thinking_enabled": true,
   "deepseek_reasoning_effort": "high"
 }

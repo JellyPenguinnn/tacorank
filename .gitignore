@@ -33,6 +33,7 @@ dist/
 !/runs/.gitkeep
 /artifacts/*
 !/artifacts/.gitkeep
+/.tacorank/
 
 # Generated benchmark submissions
 /submission*.csv

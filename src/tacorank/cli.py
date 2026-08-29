@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -155,12 +156,15 @@ def _runtime(
             "evaluator": built.evaluator,
         }
         baseline = built.baseline
+    planner = _planner_for(config)
+    if config.adapter_mode == "live":
+        planner.provider.preflight()
     harness = Harness(
         config=config,
         verified_contract=verified,
         event_store=store,
         context_builder=ContextBuilder(config, verified, artifacts),
-        planner=_planner_for(config),
+        planner=planner,
         **adapters,
     )
     return harness, baseline
@@ -201,6 +205,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tacorank")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    setup_live = commands.add_parser(
+        "setup-live",
+        help="prepare a hash-bound production deployment from a clean clone",
+    )
+    setup_live.add_argument("--repository-root", type=Path, default=Path.cwd())
+    setup_live.add_argument(
+        "--deployment-dir", type=Path, default=Path(".tacorank/deployment")
+    )
+    setup_live.add_argument("--runtime-dir", type=Path)
+    setup_live.add_argument(
+        "--data-dir", type=Path, default=Path("KuaiRand-Pure/data")
+    )
+    setup_live.add_argument("--python312", type=Path)
+    setup_live.add_argument("--docker", type=Path)
+    setup_live.add_argument("--run-id", default="run_001")
+    setup_live.add_argument("--download-data", action="store_true")
+
     run = commands.add_parser("run", help="start a frozen run")
     run.add_argument("--config", type=Path, required=True)
     run.add_argument(
@@ -214,6 +235,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicitly permit deterministic fake adapters for tests only",
     )
 
+    preflight = commands.add_parser(
+        "preflight", help="verify every production prerequisite without creating a run"
+    )
+    preflight.add_argument("--config", type=Path, required=True)
+    preflight.add_argument("--live-config", type=Path, required=True)
+
     for name in ("resume", "status", "validate-ledger", "rebuild-views", "finalize"):
         command = commands.add_parser(name)
         command.add_argument("--run-id", required=True)
@@ -224,13 +251,55 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if args.command == "run":
+        if args.command == "setup-live":
+            from .deployment import setup_live_deployment
+
+            root = args.repository_root.resolve(strict=True)
+            python312 = args.python312 or Path(shutil.which("python3.12") or "python3.12")
+            docker = args.docker or Path(shutil.which("docker") or "docker")
+            runtime = args.runtime_dir or (
+                Path(".tacorank-runtime") / root.name
+            )
+            result = setup_live_deployment(
+                repository_root=root,
+                deployment_directory=args.deployment_dir,
+                runtime_directory=runtime,
+                data_directory=args.data_dir,
+                python312=python312,
+                docker_executable=docker,
+                run_id=args.run_id,
+                download_data=args.download_data,
+            )
+            print(json.dumps(result, sort_keys=True))
+            return 0
+
+        if args.command in {"run", "preflight"}:
             config = RunConfig.load(args.config)
+            if args.command == "preflight" and config.adapter_mode != "live":
+                raise ContractError("preflight accepts production live configuration only")
             harness, baseline = _runtime(
                 config,
                 live_config_path=args.live_config,
-                allow_test_adapters=args.allow_test_adapters,
+                allow_test_adapters=(
+                    args.allow_test_adapters if args.command == "run" else False
+                ),
             )
+            if args.command == "preflight":
+                print(
+                    json.dumps(
+                        {
+                            "run_id": config.run_id,
+                            "status": "passed",
+                            "adapter_mode": "live",
+                            "research_provider": config.research_provider,
+                            "baseline_primary": baseline.metric_set.primary_score,
+                            "ledger_created": False,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                del harness
+                return 0
             harness.bootstrap(baseline)
             asyncio.run(harness.run_one_experiment())
             events = harness.events()

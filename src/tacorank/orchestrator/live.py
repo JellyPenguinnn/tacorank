@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -29,6 +30,7 @@ from ..evaluation import (
     MetricSet as DomainMetricSet,
     OutputGateEvidence,
 )
+from ..evaluation.adapter import PopulationManifest, ordered_row_identity_sha256
 from ..evaluation.comparisons import compare_metric_sets
 from ..evaluation.types import (
     EvaluationResult as DomainEvaluationResult,
@@ -39,7 +41,6 @@ from ..execution import (
     CanonicalArtifactStoreAdapter,
     ContainerMountPolicy,
     ContainerReadOnlyMount,
-    DedicatedFilesystemQuotaVerifier,
     DockerSandbox,
     ExecutionRunner,
     PipelineCommandInputs,
@@ -92,6 +93,14 @@ _INPUT_COMMAND_IDS = frozenset(
     }
 )
 _POPULATION_KEYS = frozenset({"smoke", "proxy", "full"})
+_TRAE_PATH_KEYS = (
+    "config_file",
+    "docker_executable",
+    "trae_install_root",
+    "trae_install_identity_file",
+    "trae_runtime_root",
+    "python_dotenv_metadata_file",
+)
 
 
 class LiveAdapterConfig(StrictModel):
@@ -109,11 +118,13 @@ class LiveAdapterConfig(StrictModel):
     python_executable: Path
     container_python_executable: str
     docker_executable: Path
+    docker_host: str
     docker_image: str
     docker_image_environment_sha256: str
     docker_cpu_count: float = Field(default=2.0, gt=0)
     docker_tmpfs_size_mb: int = Field(default=256, gt=0)
     output_quota_max_bytes: int = Field(default=2 * 1024 * 1024 * 1024, gt=0)
+    data_manifest_path: Path
     population_csvs: Dict[str, Path]
     baseline_prediction_csvs: Dict[str, Path]
     candidate_allowed_columns: List[str] = Field(default_factory=list)
@@ -156,6 +167,7 @@ class LiveAdapterConfig(StrictModel):
             "contract_root",
             "python_executable",
             "docker_executable",
+            "data_manifest_path",
         ):
             raw[key] = str(_resolve_config_path(base, raw[key]))
         for mapping_name in (
@@ -196,6 +208,31 @@ class LiveAdapters:
     output_gate: Any
     evaluator: Any
     baseline: EvaluationResult
+
+
+def _trae_config_from_mapping(values: Mapping[str, Any]) -> TraeConfig:
+    """Normalize JSON-shaped live values at the Trae dataclass boundary."""
+
+    normalized = dict(values)
+    try:
+        normalized["command_prefix"] = tuple(normalized["command_prefix"])
+        for key in _TRAE_PATH_KEYS:
+            if normalized.get(key) is not None:
+                normalized[key] = Path(normalized[key])
+        for key in (
+            "repair_allowed_command_ids",
+            "approved_environment_names",
+            "credential_environment_names",
+        ):
+            if key in normalized:
+                normalized[key] = tuple(normalized[key])
+        if "credential_environment_aliases" in normalized:
+            normalized["credential_environment_aliases"] = tuple(
+                tuple(item) for item in normalized["credential_environment_aliases"]
+            )
+        return TraeConfig(**normalized)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ContractError("live Trae configuration has invalid field types") from error
 
 
 @dataclass(frozen=True)
@@ -720,13 +757,17 @@ def build_live_adapters(
     """Build every production port or fail before the run is bootstrapped."""
 
     root = config.repository_root.resolve(strict=True)
+    _require_clean_baseline(root, config.baseline_commit_sha)
     _require_live_files(config, live)
+    _verify_data_manifest(config, live)
     populations = {
         key: _load_population(path) for key, path in live.population_csvs.items()
     }
+    population_manifests = _protected_population_manifests(populations)
     worktrees = WorktreeManager(
         root, live.worktree_root, required_submodules=live.required_submodules
     )
+    worktrees.preflight(config.baseline_commit_sha)
     manifest = ProtectedManifest.from_markdown(
         root / config.protected_paths_path,
         root,
@@ -748,21 +789,13 @@ def build_live_adapters(
         hidden_path_tokens=tuple(live.hidden_path_tokens),
         future_column_patterns=tuple(live.future_column_patterns),
     )
-    trae_values = dict(live.trae)
-    trae_values["command_prefix"] = tuple(trae_values["command_prefix"])
-    for tuple_key in (
-        "repair_allowed_command_ids",
-        "approved_environment_names",
-        "credential_environment_names",
-    ):
-        if tuple_key in trae_values:
-            trae_values[tuple_key] = tuple(trae_values[tuple_key])
     coding_worker = TraeCodingWorker(
         worktrees=worktrees,
         artifact_repository_root=root,
-        config=TraeConfig(**trae_values),
+        config=_trae_config_from_mapping(live.trae),
         identity_resolver=LedgerCandidateIdentityResolver(event_store),
     )
+    coding_worker.preflight()
     patch_gate = WorktreePatchGate(
         worktrees=worktrees,
         repository_root=root,
@@ -805,13 +838,15 @@ def build_live_adapters(
         ),
         image=live.docker_image,
         docker_executable=live.docker_executable,
+        docker_host=live.docker_host,
         cpu_count=live.docker_cpu_count,
         tmpfs_size_mb=live.docker_tmpfs_size_mb,
         mount_policies=_mount_policies(config, live),
         output_quota_max_bytes=live.output_quota_max_bytes,
-        output_quota_verifier=DedicatedFilesystemQuotaVerifier(),
+        output_quota_verifier=None,
         image_environment_sha256=live.docker_image_environment_sha256,
     )
+    sandbox.preflight(execution_artifacts.artifact_root)
     runner = ExecutionRunner(
         repository_root=root,
         artifacts=execution_artifacts,
@@ -833,6 +868,7 @@ def build_live_adapters(
         expected_evaluator_sha256=config.evaluator_sha256,
         expected_contract_sha256=verified.contract_sha256,
         expected_data_manifest_sha256=config.data_manifest_sha256,
+        population_manifests=population_manifests,
     )
     evaluator = ProtectedEvaluationBridge(
         config=config,
@@ -887,6 +923,28 @@ def _load_population(path: Path) -> _PopulationData:
     if not rows:
         raise ContractError("population CSV must not be empty")
     return _PopulationData(tuple(rows), tuple(labels))
+
+
+def _protected_population_manifests(
+    populations: Mapping[str, _PopulationData],
+) -> Mapping[Population, PopulationManifest]:
+    """Bind evaluable populations to their protected row order and identity."""
+
+    manifests: Dict[Population, PopulationManifest] = {}
+    for population, key in (
+        (Population.INTERNAL_PROXY, "proxy"),
+        (Population.PUBLIC_VALIDATION, "full"),
+    ):
+        rows = populations[key].rows
+        manifests[population] = PopulationManifest(
+            rows=len(rows),
+            ordered_row_identity_sha256=ordered_row_identity_sha256(
+                tuple(row["row_id"] for row in rows),
+                tuple(row["user_id"] for row in rows),
+                tuple(row["video_id"] for row in rows),
+            ),
+        )
+    return manifests
 
 
 def _output_contract(rows: Sequence[Mapping[str, Any]]) -> OutputContract:
@@ -955,6 +1013,7 @@ def _require_live_files(config: RunConfig, live: LiveAdapterConfig) -> None:
         ("contract_root", live.contract_root),
         ("python_executable", live.python_executable),
         ("docker_executable", live.docker_executable),
+        ("data_manifest_path", live.data_manifest_path),
         *[("input root", value) for value in live.input_roots.values()],
         *[("population CSV", value) for value in live.population_csvs.values()],
         *[("baseline prediction", value) for value in live.baseline_prediction_csvs.values()],
@@ -975,6 +1034,8 @@ def _require_live_files(config: RunConfig, live: LiveAdapterConfig) -> None:
     trae_docker = live.trae.get("docker_executable")
     if trae_docker is None or Path(str(trae_docker)).resolve() != live.docker_executable.resolve():
         raise ContractError("coding and execution must use the same Docker executable")
+    if live.trae.get("docker_host") != live.docker_host:
+        raise ContractError("coding and execution must use the same Docker host socket")
     for field, configured in (
         ("max_steps_cap", config.coding_step_limit),
         ("max_token_cap", config.coding_token_limit),
@@ -982,6 +1043,107 @@ def _require_live_files(config: RunConfig, live: LiveAdapterConfig) -> None:
     ):
         if int(live.trae.get(field, 0)) < configured:
             raise ContractError("run coding limit exceeds the reviewed Trae %s" % field)
+
+
+def _require_clean_baseline(root: Path, baseline_commit_sha: str) -> None:
+    def git(*args: str) -> subprocess.CompletedProcess[bytes]:
+        try:
+            return subprocess.run(
+                ["git", *args],
+                cwd=str(root),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                shell=False,
+                close_fds=True,
+                timeout=15.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ContractError("Git baseline preflight failed") from error
+
+    head = git("rev-parse", "--verify", "HEAD^{commit}")
+    baseline = git("rev-parse", "--verify", baseline_commit_sha + "^{commit}")
+    if (
+        head.returncode != 0
+        or baseline.returncode != 0
+        or head.stdout.strip() != baseline.stdout.strip()
+    ):
+        raise ContractError("baseline_commit_sha must equal the production checkout HEAD")
+    tracked = git("status", "--porcelain=v1", "--untracked-files=no")
+    if tracked.returncode != 0 or tracked.stdout:
+        raise ContractError("production checkout has uncommitted tracked changes")
+
+
+def _verify_data_manifest(config: RunConfig, live: LiveAdapterConfig) -> None:
+    raw = live.data_manifest_path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != config.data_manifest_sha256:
+        raise ContractError("data manifest bytes do not match data_manifest_sha256")
+    try:
+        document = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ContractError("data manifest is not valid UTF-8 JSON") from error
+    if not isinstance(document, dict) or set(document) != {"schema_version", "files"}:
+        raise ContractError("data manifest has an invalid schema")
+    if document.get("schema_version") != "1.0" or not isinstance(
+        document.get("files"), list
+    ):
+        raise ContractError("data manifest has an invalid schema")
+
+    root = config.repository_root.resolve(strict=True)
+    attested = set()
+    for record in document["files"]:
+        if not isinstance(record, dict) or set(record) != {"path", "sha256", "size_bytes"}:
+            raise ContractError("data manifest file record is invalid")
+        try:
+            relative = normalize_relative_path(record["path"])
+        except (TypeError, ValueError) as error:
+            raise ContractError("data manifest contains an invalid path") from error
+        if relative in attested:
+            raise ContractError("data manifest contains duplicate paths")
+        expected_hash = record["sha256"]
+        expected_size = record["size_bytes"]
+        if (
+            not isinstance(expected_hash, str)
+            or len(expected_hash) != 64
+            or any(character not in "0123456789abcdef" for character in expected_hash)
+            or isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+        ):
+            raise ContractError("data manifest file identity is invalid")
+        target = root.joinpath(*relative.split("/"))
+        if target.is_symlink() or not target.is_file():
+            raise ContractError("data manifest file is missing: %s" % relative)
+        resolved = target.resolve(strict=True)
+        try:
+            resolved.relative_to(root)
+        except ValueError as error:
+            raise ContractError("data manifest file escaped the repository") from error
+        if (
+            resolved != target
+            or target.stat().st_size != expected_size
+            or _sha256_file(target) != expected_hash
+        ):
+            raise ContractError("data manifest file identity changed: %s" % relative)
+        attested.add(relative)
+
+    required_files = set()
+    for directory in live.input_roots.values():
+        for path in directory.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                required_files.add(path.resolve(strict=True))
+    required_files.update(path.resolve(strict=True) for path in live.population_csvs.values())
+    required_files.update(
+        path.resolve(strict=True) for path in live.baseline_prediction_csvs.values()
+    )
+    for path in required_files:
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError as error:
+            raise ContractError("all production data must be inside repository_root") from error
+        if relative not in attested:
+            raise ContractError("production data is not attested by the manifest: %s" % relative)
 
 
 def _resolve_config_path(base: Path, value: Any) -> Path:

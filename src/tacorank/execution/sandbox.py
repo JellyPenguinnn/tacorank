@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -270,7 +271,19 @@ class RuntimeCleanupSpec:
     cwd: Path
     environment: Mapping[str, str]
     state_argv: Optional[Tuple[str, ...]] = None
+    output_extraction: Optional["RuntimeOutputExtractionSpec"] = None
     timeout_seconds: float = 10.0
+
+
+@dataclass(frozen=True)
+class RuntimeOutputExtractionSpec:
+    """Stream a stopped container's bounded tmpfs outputs into trusted storage."""
+
+    argv: Tuple[str, ...]
+    destination: Path
+    allowed_relative_paths: Tuple[str, ...]
+    max_bytes: int
+    timeout_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -373,7 +386,7 @@ class DockerSandbox:
     rejected before launch until a concrete hard GPU backend is added.
     """
 
-    _IMAGE = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
+    _IMAGE = re.compile(r"^(?:[^@\s]+@)?sha256:[0-9a-f]{64}$")
     _NETWORK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
     _USER = re.compile(r"^[0-9]+:[0-9]+$")
 
@@ -391,6 +404,7 @@ class DockerSandbox:
         output_quota_max_bytes: Optional[int] = None,
         output_quota_verifier: Optional[OutputQuotaVerifier] = None,
         image_environment_sha256: Optional[str] = None,
+        docker_host: Optional[str] = None,
     ) -> None:
         if not self._IMAGE.fullmatch(image):
             raise SandboxPolicyError("container image must be pinned by sha256 digest")
@@ -409,9 +423,9 @@ class DockerSandbox:
             raise SandboxPolicyError(
                 "Docker network configured while network is forbidden"
             )
-        if (output_quota_max_bytes is None) != (output_quota_verifier is None):
+        if output_quota_max_bytes is None and output_quota_verifier is not None:
             raise SandboxPolicyError(
-                "hard output quota limit and verifier must be configured together"
+                "hard output quota verifier requires a configured limit"
             )
         if output_quota_max_bytes is not None and (
             isinstance(output_quota_max_bytes, bool)
@@ -441,12 +455,47 @@ class DockerSandbox:
         self.output_quota_max_bytes = output_quota_max_bytes
         self.output_quota_verifier = output_quota_verifier
         self.image_environment_sha256 = image_environment_sha256
+        self.docker_host = _validated_docker_host(docker_host)
         identities = [
             (item.command_id, item.fidelity, item.data_manifest_sha256)
             for item in self.mount_policies
         ]
         if len(identities) != len(set(identities)):
             raise SandboxPolicyError("duplicate container mount policy")
+
+    def preflight(self, working_directory: Path) -> ImageEnvironmentProof:
+        """Verify the Docker daemon and exact image without launching candidate code."""
+
+        directory = Path(working_directory).resolve(strict=True)
+        if not directory.is_dir():
+            raise SandboxPolicyError("Docker preflight directory is not a directory")
+        docker = self._resolved_docker_executable()
+        host_environment = dict(
+            _minimal_host_environment(self.policy, {}, directory)
+        )
+        if self.docker_host is not None:
+            host_environment["DOCKER_HOST"] = self.docker_host
+        try:
+            health = subprocess.run(
+                [str(docker), "info", "--format", "{{.ServerVersion}}"],
+                cwd=str(directory),
+                env=dict(host_environment),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                shell=False,
+                close_fds=True,
+                timeout=10.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise SandboxPolicyError("Docker daemon preflight failed") from error
+        if health.returncode != 0 or not health.stdout.strip():
+            raise SandboxPolicyError("Docker daemon preflight failed")
+        proof = self._verify_image_environment(docker, host_environment, directory)
+        self._verify_runtime_probe(docker, host_environment, directory)
+        return proof
 
     def prepare(
         self, command: ResolvedCommand, configuration: SandboxConfig
@@ -456,20 +505,12 @@ class DockerSandbox:
         )
         _validate_network_policy(self.policy, command, configuration)
         output_quota = self._verify_output_quota(artifact_directory)
-        docker_candidate = self.docker_executable
-        if docker_candidate.is_symlink():
-            raise SandboxPolicyError("Docker runtime executable cannot be a symlink")
-        try:
-            docker = docker_candidate.resolve(strict=True)
-        except OSError as error:
-            raise SandboxPolicyError(
-                "Docker runtime executable is unavailable"
-            ) from error
-        if not docker.is_file() or not os.access(str(docker), os.X_OK):
-            raise SandboxPolicyError("Docker runtime executable is unavailable")
-        host_environment = _minimal_host_environment(
-            self.policy, {}, temporary_directory
+        docker = self._resolved_docker_executable()
+        host_environment = dict(
+            _minimal_host_environment(self.policy, {}, temporary_directory)
         )
+        if self.docker_host is not None:
+            host_environment["DOCKER_HOST"] = self.docker_host
         image_environment = self._verify_image_environment(
             docker, host_environment, artifact_directory
         )
@@ -554,9 +595,24 @@ class DockerSandbox:
             "/tmp:rw,nosuid,nodev,noexec,size={0}m".format(self.tmpfs_size_mb),
             "--mount",
             _bind_mount(workspace, "/workspace", read_only=True),
-            "--mount",
-            _bind_mount(artifact_directory, "/artifacts", read_only=False),
         ]
+        portable_tmpfs = self.output_quota_verifier is None
+        if portable_tmpfs:
+            argv.extend(
+                (
+                    "--tmpfs",
+                    "/artifacts:rw,nosuid,nodev,noexec,mode=1777,size={0}".format(
+                        output_quota.enforced_max_bytes
+                    ),
+                )
+            )
+        else:
+            argv.extend(
+                (
+                    "--mount",
+                    _bind_mount(artifact_directory, "/artifacts", read_only=False),
+                )
+            )
         for source, target in mounts:
             argv.extend(("--mount", _bind_mount(source, target, read_only=True)))
         argv.extend(("--workdir", container_cwd))
@@ -569,6 +625,16 @@ class DockerSandbox:
         argv.extend(("--entrypoint", container_executable, self.image))
         argv.extend(container_arguments)
 
+        extraction = None
+        if portable_tmpfs:
+            extraction = RuntimeOutputExtractionSpec(
+                argv=(str(docker), "cp", name + ":/artifacts/.", "-"),
+                destination=artifact_directory,
+                allowed_relative_paths=tuple(
+                    sorted(item.relative_path for item in command.expected_artifacts)
+                ),
+                max_bytes=output_quota.enforced_max_bytes,
+            )
         cleanup = RuntimeCleanupSpec(
             terminate_argv=(str(docker), "rm", "--force", name),
             inspect_argv=(
@@ -598,6 +664,7 @@ class DockerSandbox:
                 "{{json .State}}",
                 name,
             ),
+            output_extraction=extraction,
         )
         metrics = RuntimeMetricsSpec(
             argv=(
@@ -633,6 +700,131 @@ class DockerSandbox:
             output_quota=output_quota,
             image_environment=image_environment,
         )
+
+    def _resolved_docker_executable(self) -> Path:
+        docker_candidate = self.docker_executable
+        if docker_candidate.is_symlink():
+            raise SandboxPolicyError("Docker runtime executable cannot be a symlink")
+        try:
+            docker = docker_candidate.resolve(strict=True)
+        except OSError as error:
+            raise SandboxPolicyError(
+                "Docker runtime executable is unavailable"
+            ) from error
+        if not docker.is_file() or not os.access(str(docker), os.X_OK):
+            raise SandboxPolicyError("Docker runtime executable is unavailable")
+        return docker
+
+    def _verify_runtime_probe(
+        self,
+        docker: Path,
+        host_environment: Mapping[str, str],
+        working_directory: Path,
+    ) -> None:
+        quota = self.output_quota_max_bytes
+        if quota is None:
+            raise SandboxPolicyError(
+                "production Docker execution requires a hard output disk quota limit"
+            )
+        name = "tacorank-preflight-{0}".format(secrets.token_hex(12))
+        script = (
+            "import json,os;"
+            "import tacorank.execution.solution_cli;"
+            "import benchmarks.kuairand_pure.pipeline;"
+            "s=os.statvfs('/artifacts');"
+            "p='/artifacts/preflight';"
+            "open(p,'wb').write(b'ok');os.unlink(p);"
+            "print(json.dumps({'capacity':s.f_frsize*s.f_blocks}))"
+        )
+        command = [
+            str(docker),
+            "run",
+            "--name",
+            name,
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--pids-limit",
+            "32",
+            "--memory",
+            str(256 * 1024 * 1024),
+            "--memory-swap",
+            str(256 * 1024 * 1024),
+            "--cpus",
+            "1",
+            "--user",
+            self.container_user,
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=32m",
+            "--tmpfs",
+            "/artifacts:rw,nosuid,nodev,noexec,mode=1777,size={0}".format(quota),
+            "--entrypoint",
+            "/usr/local/bin/python3",
+            self.image,
+            "-c",
+            script,
+        ]
+        cleanup_completed: Optional[subprocess.CompletedProcess[str]] = None
+        cleanup_error: Optional[BaseException] = None
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(working_directory),
+                env=dict(host_environment),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                shell=False,
+                close_fds=True,
+                timeout=30.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise SandboxPolicyError("Docker runtime capability probe failed") from error
+        finally:
+            try:
+                cleanup_completed = subprocess.run(
+                    [str(docker), "rm", "--force", name],
+                    cwd=str(working_directory),
+                    env=dict(host_environment),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    shell=False,
+                    close_fds=True,
+                    timeout=10.0,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                cleanup_error = error
+        if (
+            cleanup_error is not None
+            or cleanup_completed is None
+            or cleanup_completed.returncode != 0
+        ):
+            raise SandboxPolicyError("Docker preflight container cleanup failed")
+        if completed.returncode != 0:
+            raise SandboxPolicyError("Docker runtime capability probe failed")
+        try:
+            payload = json.loads(completed.stdout)
+            capacity = payload["capacity"]
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise SandboxPolicyError("Docker runtime capability probe is malformed") from error
+        if (
+            isinstance(capacity, bool)
+            or not isinstance(capacity, int)
+            or capacity < 1
+            or capacity > quota
+        ):
+            raise SandboxPolicyError("Docker tmpfs quota probe does not match policy")
 
     def _verify_image_environment(
         self,
@@ -712,9 +904,15 @@ class DockerSandbox:
     def _verify_output_quota(self, artifact_directory: Path) -> OutputQuotaProof:
         verifier = self.output_quota_verifier
         configured_max_bytes = self.output_quota_max_bytes
-        if verifier is None or configured_max_bytes is None:
+        if configured_max_bytes is None:
             raise SandboxPolicyError(
-                "production Docker execution requires a hard output disk quota verifier"
+                "production Docker execution requires a hard output disk quota limit"
+            )
+        if verifier is None:
+            return OutputQuotaProof(
+                artifact_directory=artifact_directory.resolve(strict=True),
+                enforced_max_bytes=configured_max_bytes,
+                mechanism="container_tmpfs",
             )
         if getattr(verifier, "production_capable", False) is not True:
             raise SandboxPolicyError(
@@ -981,10 +1179,10 @@ def _container_environment(
             environment[key] = _translate_value(value, translations)
     environment.update(
         {
-            "HOME": "/artifacts/tmp",
-            "TMPDIR": "/artifacts/tmp",
-            "TMP": "/artifacts/tmp",
-            "TEMP": "/artifacts/tmp",
+            "HOME": "/tmp",
+            "TMPDIR": "/tmp",
+            "TMP": "/tmp",
+            "TEMP": "/tmp",
             "PYTHONNOUSERSITE": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONHASHSEED": environment.get("PYTHONHASHSEED", "0"),
@@ -1169,6 +1367,24 @@ def _credential_shaped(key: str) -> bool:
             "CREDENTIAL",
         )
     )
+
+
+def _validated_docker_host(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.startswith("unix://") or "\x00" in value:
+        raise SandboxPolicyError("Docker host must be a local Unix socket")
+    path = Path(value[len("unix://") :])
+    if not path.is_absolute() or path.is_symlink():
+        raise SandboxPolicyError("Docker host must be a canonical local Unix socket")
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as error:
+        raise SandboxPolicyError("Docker host socket is unavailable") from error
+    if resolved != path or not stat.S_ISSOCK(metadata.st_mode):
+        raise SandboxPolicyError("Docker host must be a canonical local Unix socket")
+    return "unix://" + str(resolved)
 
 
 def _reject_symlink_components(path: Path, label: str) -> None:

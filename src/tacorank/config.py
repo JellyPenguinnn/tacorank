@@ -64,7 +64,7 @@ class RunConfig(StrictModel):
     deepseek_base_url: NonEmptyStr = "https://api.deepseek.com"
     deepseek_api_key_env: NonEmptyStr = "DEEPSEEK_API_KEY"
     deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
-    deepseek_max_output_tokens: int = Field(default=2_000, gt=0)
+    deepseek_max_output_tokens: int = Field(default=8_192, gt=0)
     deepseek_thinking_enabled: bool = True
     deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
     baseline_metrics: Optional[Dict[str, float]] = None

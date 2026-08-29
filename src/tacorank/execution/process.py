@@ -10,10 +10,11 @@ import re
 import signal
 import stat
 import subprocess
+import tarfile
 import threading
 import time
 from collections import deque
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Deque, Mapping, Optional, TextIO, Tuple
 
 from tacorank.execution.sandbox import (
@@ -21,6 +22,7 @@ from tacorank.execution.sandbox import (
     ResourceLimits,
     RuntimeCleanupSpec,
     RuntimeMetricsSpec,
+    RuntimeOutputExtractionSpec,
 )
 
 
@@ -176,6 +178,11 @@ class ManagedProcess:
             self._capture_external_runtime_state()
         except ProcessLaunchError as error:
             state_error = error
+        extraction_error: Optional[ProcessLaunchError] = None
+        try:
+            self._extract_external_runtime_outputs()
+        except ProcessLaunchError as error:
+            extraction_error = error
         cleanup_error: Optional[ProcessLaunchError] = None
         try:
             if self._runtime_cleanup is not None:
@@ -185,6 +192,8 @@ class ManagedProcess:
             cleanup_error = error
         if cleanup_error is not None:
             raise cleanup_error
+        if extraction_error is not None:
+            raise extraction_error
         if state_error is not None:
             raise state_error
         return return_code
@@ -232,6 +241,12 @@ class ManagedProcess:
         completed = self._run_cleanup_command(cleanup.terminate_argv)
         if completed.returncode != 0 and not self._external_runtime_absent():
             raise ProcessLaunchError("container runtime cleanup failed")
+
+    def _extract_external_runtime_outputs(self) -> None:
+        cleanup = self._runtime_cleanup
+        if cleanup is None or cleanup.output_extraction is None:
+            return
+        _extract_bounded_tar(cleanup.output_extraction, cleanup.environment)
 
     def _require_external_runtime_absent(self) -> None:
         if self._runtime_cleanup is None:
@@ -476,6 +491,185 @@ def _force_cleanup_after_launch_failure(cleanup: RuntimeCleanupSpec) -> None:
         raise ProcessLaunchError("post-launch runtime absence probe failed")
     if inspected.stdout.strip():
         raise ProcessLaunchError("runtime object survived post-launch cleanup")
+
+
+def _extract_bounded_tar(
+    specification: RuntimeOutputExtractionSpec,
+    environment: Mapping[str, str],
+) -> None:
+    """Extract only reviewed regular files from a bounded Docker tar stream."""
+
+    destination = Path(specification.destination)
+    if not destination.is_absolute():
+        raise ProcessLaunchError("container output destination must be absolute")
+    _reject_symlink_components(destination)
+    try:
+        resolved_destination = destination.resolve(strict=True)
+    except OSError as error:
+        raise ProcessLaunchError(
+            "container output destination is unavailable"
+        ) from error
+    if resolved_destination != destination or not destination.is_dir():
+        raise ProcessLaunchError("container output destination must be canonical")
+    if specification.max_bytes < 1 or specification.timeout_seconds <= 0:
+        raise ProcessLaunchError("container output extraction bounds are invalid")
+
+    allowed = {
+        _normalize_output_relative_path(value)
+        for value in specification.allowed_relative_paths
+    }
+    if len(allowed) != len(specification.allowed_relative_paths):
+        raise ProcessLaunchError("container output allowlist contains duplicates")
+    allowed_directories = {
+        parent.as_posix()
+        for relative in allowed
+        for parent in PurePosixPath(relative).parents
+        if parent != PurePosixPath(".")
+    }
+    created_files: list[Path] = []
+    extraction_errors: list[BaseException] = []
+    try:
+        process = subprocess.Popen(
+            list(specification.argv),
+            cwd=str(destination),
+            env=dict(environment),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            close_fds=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ProcessLaunchError("container output extraction failed") from error
+
+    def consume() -> None:
+        total_bytes = 0
+        seen: set[str] = set()
+        try:
+            if process.stdout is None:
+                raise ProcessLaunchError("container output stream is unavailable")
+            with tarfile.open(fileobj=process.stdout, mode="r|*") as archive:
+                for member in archive:
+                    relative = _normalize_tar_member(member.name)
+                    if relative is None:
+                        if member.isdir():
+                            continue
+                        raise ProcessLaunchError(
+                            "container output archive contains an invalid root member"
+                        )
+                    if member.isdir():
+                        if relative not in allowed_directories:
+                            raise ProcessLaunchError(
+                                "container output archive contains an unexpected directory"
+                            )
+                        continue
+                    if not member.isfile() or relative not in allowed:
+                        raise ProcessLaunchError(
+                            "container output archive contains an unexpected member"
+                        )
+                    if relative in seen:
+                        raise ProcessLaunchError(
+                            "container output archive contains a duplicate member"
+                        )
+                    if member.size < 0 or total_bytes + member.size > specification.max_bytes:
+                        raise ProcessLaunchError(
+                            "container output archive exceeds the hard byte limit"
+                        )
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise ProcessLaunchError(
+                            "container output archive member is unreadable"
+                        )
+                    target = destination.joinpath(*PurePosixPath(relative).parts)
+                    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    _reject_symlink_components(target.parent)
+                    if target.parent.resolve(strict=True) != target.parent:
+                        raise ProcessLaunchError(
+                            "container output parent must be canonical"
+                        )
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    flags |= getattr(os, "O_CLOEXEC", 0)
+                    flags |= getattr(os, "O_NOFOLLOW", 0)
+                    descriptor = os.open(str(target), flags, 0o600)
+                    created_files.append(target)
+                    written = 0
+                    try:
+                        output = os.fdopen(descriptor, "wb")
+                    except BaseException:
+                        os.close(descriptor)
+                        raise
+                    try:
+                        with output:
+                            while written < member.size:
+                                block = source.read(min(1024 * 1024, member.size - written))
+                                if not block:
+                                    raise ProcessLaunchError(
+                                        "container output archive member is truncated"
+                                    )
+                                output.write(block)
+                                written += len(block)
+                            output.flush()
+                            os.fsync(output.fileno())
+                    except BaseException:
+                        raise
+                    total_bytes += written
+                    seen.add(relative)
+        except BaseException as error:
+            extraction_errors.append(error)
+
+    worker = threading.Thread(
+        target=consume,
+        name="tacorank-container-output",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=specification.timeout_seconds)
+    if worker.is_alive():
+        process.kill()
+        worker.join(timeout=2.0)
+        extraction_errors.append(
+            ProcessLaunchError("container output extraction timed out")
+        )
+    try:
+        return_code = process.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        return_code = -1
+    if return_code != 0:
+        extraction_errors.append(
+            ProcessLaunchError("container output copy command failed")
+        )
+    if extraction_errors:
+        for created in reversed(created_files):
+            try:
+                created.unlink()
+            except FileNotFoundError:
+                pass
+        raise ProcessLaunchError("container output extraction failed") from extraction_errors[0]
+
+
+def _normalize_output_relative_path(value: str) -> str:
+    if not value or "\\" in value or "\x00" in value:
+        raise ProcessLaunchError("container output allowlist path is invalid")
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ProcessLaunchError("container output allowlist path is invalid")
+    return path.as_posix()
+
+
+def _normalize_tar_member(value: str) -> Optional[str]:
+    if not value or "\\" in value or "\x00" in value:
+        raise ProcessLaunchError("container output archive path is invalid")
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part == ".." for part in path.parts):
+        raise ProcessLaunchError("container output archive path is invalid")
+    parts = [part for part in path.parts if part not in {"", "."}]
+    if parts and parts[0] == "artifacts":
+        parts = parts[1:]
+    if not parts:
+        return None
+    return PurePosixPath(*parts).as_posix()
 
 
 def _open_exclusive_log(

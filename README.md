@@ -4,7 +4,7 @@ TacoRank is a deterministic, evidence-tracked harness for autonomous recommender
 
 The repository is organized for five developers with one canonical schema and explicit typed handoffs. The controller owns orchestration; role components return values and never compete for control.
 
-> **Current main status:** All five role implementations are merged and the production CLI composes the real Trae, Gate A, Docker execution, SRE/recovery, Gate B, and protected-evaluation adapters. Deterministic fakes require an explicit test-only mode. The integrated test suite is green, while live autonomous training remains fail-closed until humans freeze the contract, protected paths, data, baseline predictions, runtime identities, credentials, and output-quota filesystem.
+> **Current main status:** The production CLI composes DeepSeek planning, the pinned Trae coding worker, Gate A, Docker execution, SRE/recovery, Gate B, and protected evaluation. `tacorank setup-live` derives and hash-binds the machine-specific runtime, data views, official baseline, and configuration; `tacorank preflight` verifies them before any ledger event is created.
 
 ## System architecture
 
@@ -108,22 +108,15 @@ python -m pytest tests/sre tests/recovery tests/integration/test_recovery_lifecy
 python -m pytest tests/evaluation tests/reflection tests/reporting
 ```
 
-### Provider keys and Trae coding worker
+### Provider key and Trae coding worker
 
-No API key is needed for the test suite or a fully fake run. Provider keys are never stored in configuration files:
-
-- `research_provider: "fake"` uses the deterministic Person 1 test planner and needs no key.
-- `research_provider: "deepseek"` makes only Person 1 planning real and requires `DEEPSEEK_API_KEY` in the process environment.
-- `adapter_mode: "live"` selects the reviewed Trae configuration and requires the provider credential names explicitly approved by `live-adapters.json`.
-
-For live integration, install the pinned Trae worker in a separate Python 3.12+ environment:
+Production uses one environment variable for both roles:
 
 ```bash
-python3.12 -m venv .venv-trae
-.venv-trae/bin/python -m pip install -r requirements-trae.txt
+export DEEPSEEK_API_KEY='your-key'
 ```
 
-Start from `config/trae-agent.yaml.example`, select a reviewed provider/model, and keep the final credential-free configuration outside Git. Bind the configuration, executable, installation, runtime manifest, and Docker image identities in `live-adapters.json`. The example uses OpenAI and expects `OPENAI_API_KEY` only through the approved process environment. Never place credentials in this repository, YAML, prompts, logs, trajectories, fixtures, or artifacts.
+Planning calls DeepSeek directly. The pinned Trae version uses an OpenAI-compatible client, so TacoRank maps the same key to that child process and fixes its base URL to DeepSeek. The key is never written to YAML, JSON, prompts, logs, trajectories, fixtures, or artifacts.
 
 ## KuaiRand-Pure starter kit and data
 
@@ -131,14 +124,33 @@ Starter resources are tracked in `KuaiRand-Pure/` and through the `kuairand-star
 
 Do not change the protected evaluator, split logic, submission checker, or published baseline evidence from candidate code.
 
-## Running the harness
+## Fresh-clone production run
 
-The checked-in `contract/COMPETITION.md` and `PROTECTED_PATHS.md` are intentionally empty and fail closed. Before any run, humans must resolve the competition discrepancy, populate and freeze both files, verify the data/evaluator hashes, and copy both `config.example.json` and `live-adapters.example.json` to run-specific configurations.
-
-Production mode requires the live adapter configuration whose SHA-256 is frozen in the run configuration:
+Prerequisites are Git, Docker with a running daemon, Python 3.9+ for TacoRank, Python 3.12 for the pinned Trae worker, and a DeepSeek API key. From a clean clone:
 
 ```bash
-tacorank run --config run-config.json --live-config live-adapters.json
+git submodule update --init --recursive
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pip install --no-deps -e .
+
+export DEEPSEEK_API_KEY='your-key'
+.venv/bin/tacorank setup-live --download-data
+.venv/bin/tacorank preflight \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
+.venv/bin/tacorank run \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
+```
+
+If Python 3.12 or Docker is not on `PATH`, pass canonical executables with `--python312` and `--docker`. If the data is already present, omit `--download-data` and use `--data-dir` when needed. Setup requires a clean tracked checkout because the generated Docker image, Git baseline, contract, and protected manifest must all describe the same commit.
+
+Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, pinned Trae install/config/runtime, credential presence and DeepSeek model access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
+
+After a run starts, inspect or rebuild its state with:
+
+```bash
 tacorank resume --run-id run_001 --repository-root .
 tacorank status --run-id run_001 --repository-root .
 tacorank validate-ledger --run-id run_001 --repository-root .
@@ -146,7 +158,7 @@ tacorank rebuild-views --run-id run_001 --repository-root .
 tacorank finalize --run-id run_001 --repository-root .
 ```
 
-For deterministic tests only, set `adapter_mode` to `fake` and pass `--allow-test-adapters`; production mode never falls back to it. `resume` currently validates/repairs the ledger tail and reports the recovery phase without restarting adapter execution. `finalize` deliberately refuses to fabricate success because the standalone clean-reproduction/final-selection command is not implemented yet.
+Production never falls back to fake adapters. Deterministic fakes remain behind the explicit test-only flag. `resume` currently validates/repairs the ledger tail and reports the recovery phase without restarting adapter execution. `finalize` still refuses to fabricate success because standalone clean reproduction/final selection is not implemented yet.
 
 ## Core guarantees
 
@@ -171,11 +183,9 @@ For deterministic tests only, set `adapter_mode` to `fake` and pass `--allow-tes
 
 ## Current limitations
 
-- `solution/` does not yet contain the real candidate training pipeline.
-- Live Trae, production Docker, GPU and full-data runs cannot be validated until the human-owned deployment inputs are frozen and available.
-- GPU commands fail closed until the execution backend can prove a hard per-container GPU-memory limit.
-- Human-owned contract, protected-path, data-manifest, evaluator and command-profile inputs must be finalized before live execution.
-- The standalone `resume` and `finalize` commands do not yet restart adapter execution or perform clean-reproduction final selection.
+- Candidate execution is CPU-only; GPU commands fail closed until a hard per-container GPU-memory limit is available.
+- `resume` reports the verified restart phase but does not yet restart adapter execution.
+- `finalize` does not yet perform standalone clean reproduction and final selection.
 
 ## Further documentation
 

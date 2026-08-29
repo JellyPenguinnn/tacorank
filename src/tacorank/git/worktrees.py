@@ -129,6 +129,14 @@ class WorktreeManager:
         os.chmod(locks_root, 0o700)
         self._locks_root = locks_root
 
+    def preflight(self, baseline_commit_sha: str) -> str:
+        """Verify the baseline and required submodules without creating a worktree."""
+
+        baseline = resolve_commit(self.repository, baseline_commit_sha)
+        self._submodule_declarations(baseline)
+        self._verify_submodules(self.repository, baseline)
+        return baseline
+
     def path_for(self, run_id: str, experiment_id: str) -> Path:
         """Return the deterministic path for a validated experiment identity."""
 
