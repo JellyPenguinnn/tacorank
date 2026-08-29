@@ -32,13 +32,15 @@ The three authorities are:
 - dynamic evidence in the append-only `runs/<run_id>/events.jsonl` ledger; and
 - exact code lineage in Git.
 
-Generated status, lesson, summary, context, and chart files are derived views—not independent sources of truth.
+Generated state, status, lesson, summary, resource, and graph files are derived
+views—not independent sources of truth. Context and artifact files are immutable
+evidence referenced by ledger events.
 
 ## Ownership and implementation status
 
 | Role | Responsibility | Main paths | Current state |
 | --- | --- | --- | --- |
-| Person 1 | Evidence-grounded experiment planning and deterministic search policy | `src/tacorank/agents/`, `src/tacorank/research/`, `src/tacorank/providers/`, `research/` | Implemented with fake and DeepSeek providers |
+| Person 1 | Evidence-grounded experiment planning and deterministic search policy | `src/tacorank/agents/`, `src/tacorank/research/`, `src/tacorank/providers/`, `research/` | Implemented with the production DeepSeek provider and isolated test doubles |
 | Person 2 | Shared schemas, append-only memory, contexts, orchestration, budgets, replay, resume and CLI | `src/tacorank/schemas.py`, `memory/`, `context/`, `orchestrator/`, `artifacts.py`, `cli.py` | Canonical harness and production composition implemented |
 | Person 3 | Trae coding worker, Git worktrees, Gate A, sandboxed execution, telemetry, artifacts and Gate B | `src/tacorank/coding/`, `git/`, `safety/`, `execution/` | Implemented and wired into production mode |
 | Person 4 | SRE monitoring, failure classification, bounded recovery and operational reflection | `src/tacorank/sre/`, `src/tacorank/recovery/` | Implemented and failure-injection tested |
@@ -51,7 +53,7 @@ Only Person 2 appends events or changes controller state. Person 1 chooses resea
 ```text
 src/tacorank/
   agents/            Person 1 planner adapter
-  providers/         fake/provider-specific research model clients
+  providers/         production research-model client and provider contracts
   research/          search policy, experiment graph and method portfolio
   memory/            append-only event store and replay
   context/           bounded role-specific context construction
@@ -69,8 +71,8 @@ solution/             only candidate area intended for coding-agent edits
 research/methods/     reviewed experiment method cards
 tests/                unit, integration and failure-injection coverage
 contract/             human-frozen competition contract
-runs/                 ignored run evidence and derived views
-artifacts/            ignored content-addressed run artifacts
+runs/                 ignored per-run evidence, artifacts, state, graph and reports
+artifacts/            ignored legacy/shared artifact root retained for compatibility
 kuairand-starter-kit/ starter-kit Git submodule
 ```
 
@@ -158,7 +160,21 @@ tacorank rebuild-views --run-id run_001 --repository-root .
 tacorank finalize --run-id run_001 --repository-root .
 ```
 
-Production never falls back to fake adapters. Deterministic fakes remain behind the explicit test-only flag. `resume` currently validates/repairs the ledger tail and reports the recovery phase without restarting adapter execution. `finalize` still refuses to fabricate success because standalone clean reproduction/final selection is not implemented yet.
+The CLI has no fake execution mode: `tacorank run` requires the hash-bound live configuration and production provider. Deterministic test doubles are instantiated only by the automated test suite. `resume` currently validates/repairs the ledger tail and reports the recovery phase without restarting adapter execution. `finalize` still refuses to fabricate success because standalone clean reproduction/final selection is not implemented yet.
+
+Each new run is organized as follows:
+
+```text
+runs/<run_id>/
+  events.jsonl                 authoritative append-only evidence
+  state.json                  overwriteable state projection
+  STATUS.md                   human-readable current state
+  contexts/                   immutable role contexts
+  lessons/                    per-lesson and index projections
+  experiment-graph/           graph JSON, overview and direction views
+  artifacts/                  immutable run/experiment/attempt evidence
+  reports/                    summary and resource projections
+```
 
 ## Core guarantees
 

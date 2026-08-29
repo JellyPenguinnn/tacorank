@@ -52,7 +52,7 @@ class RunConfig(StrictModel):
     max_confirmation_attempts: int = Field(default=2, ge=0)
     seed_schedule: List[int]
     context_token_limit: int = Field(default=6_000, gt=0)
-    adapter_mode: Literal["live", "fake"] = "live"
+    adapter_mode: Literal["live"] = "live"
     live_adapter_config_sha256: Optional[str] = None
     editable_roots: List[str] = Field(default_factory=lambda: ["solution"])
     allowed_research_families: List[NonEmptyStr] = Field(
@@ -92,7 +92,7 @@ class RunConfig(StrictModel):
     # token gate. Provider/model request limits remain independently enforced.
     coding_token_limit: Optional[int] = Field(default=None, gt=0)
     coding_wall_time_limit_seconds: int = Field(default=900, gt=0)
-    research_provider: Literal["fake", "deepseek"]
+    research_provider: Literal["deepseek"] = "deepseek"
     deepseek_model: NonEmptyStr = "deepseek-v4-flash"
     deepseek_base_url: NonEmptyStr = "https://api.deepseek.com"
     deepseek_api_key_env: NonEmptyStr = "DEEPSEEK_API_KEY"
@@ -100,7 +100,6 @@ class RunConfig(StrictModel):
     deepseek_max_output_tokens: int = Field(default=8_192, gt=0)
     deepseek_thinking_enabled: bool = True
     deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
-    baseline_metrics: Optional[Dict[str, float]] = None
 
     @field_validator("run_id")
     @classmethod
@@ -210,16 +209,6 @@ class RunConfig(StrictModel):
             for name, seconds in self.timeout_profiles.items()
         ):
             raise ValueError("timeout profiles must have positive named durations")
-        if self.baseline_metrics is not None:
-            expected_baseline_names = set(self.metric_names) | {
-                self.primary_metric_name
-            }
-            if set(self.baseline_metrics) != expected_baseline_names:
-                raise ValueError(
-                    "baseline_metrics must contain the metric names and primary metric"
-                )
-            if self.primary_metric_name not in self.baseline_metrics:
-                raise ValueError("baseline_metrics is missing the primary metric")
         return self
 
     @classmethod

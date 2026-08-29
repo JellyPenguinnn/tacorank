@@ -11,6 +11,8 @@ from ..memory.canonical_json import canonical_sha256
 from ..memory.event_store import DuplicateIdempotencyKey, EventStore
 from ..memory.projections import project
 from ..recovery.fingerprints import fingerprint_result
+from ..reporting import rebuild_views
+from ..run_layout import RunLayout
 from ..schemas import (
     BaselineVerifiedPayload,
     BestUpdatedPayload,
@@ -112,7 +114,7 @@ class Harness:
     ) -> Event:
         key = self._key(experiment_id, stage, attempt, payload)
         try:
-            return self.event_store.append(
+            event = self.event_store.append(
                 run_id=self.config.run_id,
                 payload=payload,
                 idempotency_key=key,
@@ -121,7 +123,16 @@ class Harness:
             )
         except DuplicateIdempotencyKey as duplicate:
             # The immutable input hash proves this is the same acknowledged action.
-            return duplicate.event
+            event = duplicate.event
+        events = self.event_store.read_events()
+        rebuild_views(
+            RunLayout(
+                self.config.repository_root,
+                self.config.run_id,
+            ).run_directory,
+            events,
+        )
+        return event
 
     def events(self) -> Sequence[Event]:
         return self.event_store.read_events(repair_tail=True)

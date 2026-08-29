@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
-from typing import Dict, Optional
 
 from ..artifacts import ArtifactStore
 from ..evaluation.adapter import (
@@ -35,7 +34,6 @@ from ..schemas import (
     PlannerAction,
     PlannerContext,
     PlannerOutput,
-    Population,
     PredictionChange,
     RecoveryAction,
     RecoveryContext,
@@ -51,6 +49,7 @@ from ..schemas import (
     TrustAssessment,
     TrustVerdict,
 )
+from ..run_layout import experiment_artifact_prefix
 
 
 FAKE_SHA = hashlib.sha256(b"fake").hexdigest()
@@ -107,17 +106,20 @@ class FakeCodingWorker:
     async def create_patch(self, context: CoderContext, spec: ExperimentSpec) -> PatchCandidate:
         diff = b"diff --git a/solution/model.py b/solution/model.py\n+feature_cross = True\n"
         trajectory = b"fake coding trajectory\n"
+        prefix = experiment_artifact_prefix(
+            spec.run_id, spec.experiment_id, attempt=1
+        )
         diff_ref = self.artifacts.write(
             artifact_id="diff_%s_1" % spec.experiment_id,
             kind=ArtifactKind.DIFF,
-            relative_path="artifacts/%s/attempt_1.diff" % spec.experiment_id,
+            relative_path=prefix + "/patch.diff",
             content=diff,
             content_type="text/x-diff",
         )
         trajectory_ref = self.artifacts.write(
             artifact_id="trajectory_%s_1" % spec.experiment_id,
             kind=ArtifactKind.TRAJECTORY,
-            relative_path="artifacts/%s/attempt_1_trajectory.txt" % spec.experiment_id,
+            relative_path=prefix + "/trajectory.txt",
             content=trajectory,
             content_type="text/plain",
         )
@@ -157,11 +159,13 @@ class FakePatchGate:
         self.artifacts = artifacts
 
     async def check(self, candidate: PatchCandidate) -> PatchCheckResult:
+        prefix = experiment_artifact_prefix(
+            candidate.run_id, candidate.experiment_id, attempt=candidate.attempt
+        )
         receipt = self.artifacts.write(
             artifact_id="receipt_%s_%d" % (candidate.experiment_id, candidate.attempt),
             kind=ArtifactKind.VERIFICATION_RECEIPT,
-            relative_path="artifacts/%s/attempt_%d_receipt.json"
-            % (candidate.experiment_id, candidate.attempt),
+            relative_path=prefix + "/patch-receipt.json",
             content=b'{"accepted":true}\n',
             content_type="application/json",
         )
@@ -205,31 +209,34 @@ class FakeExecutionRunner:
         )
         assert directive.action == MonitorAction.CONTINUE
         suffix = "%s_%d_%s" % (request.experiment_id, request.attempt, request.fidelity.value)
+        prefix = experiment_artifact_prefix(
+            request.run_id, request.experiment_id, attempt=request.attempt
+        )
         log = self.artifacts.write(
             artifact_id="log_" + suffix,
             kind=ArtifactKind.LOG,
-            relative_path="artifacts/%s/%s.log" % (request.experiment_id, suffix),
+            relative_path=prefix + "/%s-training.log" % request.fidelity.value,
             content=b"fake execution completed\n",
             content_type="text/plain",
         )
         telemetry = self.artifacts.write(
             artifact_id="telemetry_" + suffix,
             kind=ArtifactKind.LOG,
-            relative_path="artifacts/%s/%s_telemetry.json" % (request.experiment_id, suffix),
+            relative_path=prefix + "/%s-telemetry.json" % request.fidelity.value,
             content=b'{"healthy":true}\n',
             content_type="application/json",
         )
         predictions = self.artifacts.write(
             artifact_id="predictions_" + suffix,
             kind=ArtifactKind.PREDICTIONS,
-            relative_path="artifacts/%s/%s_predictions.csv" % (request.experiment_id, suffix),
+            relative_path=prefix + "/%s-predictions.csv" % request.fidelity.value,
             content=b"row_id,user_id,video_id,score\n0,u0,v0,0.5\n",
             content_type="text/csv",
         )
         checkpoint = self.artifacts.write(
             artifact_id="checkpoint_" + suffix,
             kind=ArtifactKind.CHECKPOINT,
-            relative_path="artifacts/%s/%s_checkpoint.bin" % (request.experiment_id, suffix),
+            relative_path=prefix + "/%s-checkpoint.bin" % request.fidelity.value,
             content=b"fake checkpoint",
             content_type="application/octet-stream",
         )

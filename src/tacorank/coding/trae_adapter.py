@@ -33,6 +33,7 @@ from tacorank.git.patches import (
 )
 from tacorank.git.refs import GitOperationError, require_ancestor, resolve_commit
 from tacorank.git.worktrees import WorktreeManager, WorktreeRecord
+from tacorank.run_layout import experiment_artifact_prefix
 
 from .output_parser import ParsedTrajectory, TrajectoryParseError, parse_trajectory_file
 from .prompts import build_coding_prompt, build_repair_prompt, prompt_sha256
@@ -581,9 +582,10 @@ class TraeCodingWorker:
         except GitOperationError as exc:
             raise CodingWorkerError(exc.code, str(exc)) from exc
 
-        artifact_prefix = (
-            f"artifacts/{record.run_id}/{record.experiment_id}/"
-            f"attempt_{identity.attempt}"
+        artifact_prefix = experiment_artifact_prefix(
+            record.run_id,
+            record.experiment_id,
+            attempt=identity.attempt,
         )
         try:
             diff_written = write_artifact(

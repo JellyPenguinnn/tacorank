@@ -97,7 +97,13 @@ class ExecutionArtifactStore(Protocol):
 class CanonicalArtifactStoreAdapter:
     """Adapt Person 2's canonical ``ArtifactStore`` to the execution port."""
 
-    def __init__(self, store: Any, artifact_root: str = "artifacts") -> None:
+    def __init__(
+        self,
+        store: Any,
+        artifact_root: str = "artifacts",
+        *,
+        include_run_id: bool = True,
+    ) -> None:
         repository_root = Path(getattr(store, "repository_root")).resolve(strict=True)
         root_relative = _normalized_relative(artifact_root)
         root = repository_root.joinpath(*root_relative.parts)
@@ -107,6 +113,7 @@ class CanonicalArtifactStoreAdapter:
         self.store = store
         self.repository_root = repository_root
         self.artifact_root = root.resolve(strict=True)
+        self.include_run_id = include_run_id
         _require_within(self.artifact_root, repository_root)
 
     def attempt_directory(
@@ -114,8 +121,18 @@ class CanonicalArtifactStoreAdapter:
     ) -> Path:
         if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
             raise ValueError("attempt must be a positive integer")
-        path = self.artifact_root / _identifier(run_id) / _identifier(experiment_id)
-        path = path / "attempt_{0}".format(attempt)
+        path = self.artifact_root
+        if self.include_run_id:
+            path /= _identifier(run_id)
+        else:
+            _identifier(run_id)
+        path /= _identifier(experiment_id)
+        attempt_directory = (
+            "attempt_{0}".format(attempt)
+            if self.include_run_id
+            else "attempt_{0:03d}".format(attempt)
+        )
+        path /= attempt_directory
         _require_within(path.resolve(strict=False), self.artifact_root)
         _reject_symlink_components(path)
         path.mkdir(parents=True, exist_ok=True)

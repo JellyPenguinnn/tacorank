@@ -82,7 +82,7 @@ Production Docker execution requires an attested credential-free image environme
 Attempt-local evidence is stored below:
 
 ```text
-artifacts/<run_id>/<experiment_id>/attempt_<n>/
+runs/<run_id>/artifacts/<experiment_id>/attempt_<nnn>/
 ```
 
 Every returned artifact reference contains a normalized relative path, lowercase SHA-256, byte size, and content type. Full logs and telemetry stay in artifacts; typed handoffs carry only bounded summaries.

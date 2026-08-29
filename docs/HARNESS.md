@@ -22,7 +22,7 @@ recovery, or evaluator implementations owned by the other team members.
   applies stable ordering, enforces hard token budgets, and persists immutable context
   artifacts with inclusion/exclusion manifests.
 - Deterministic convergence and resource stop checks.
-- Replaceable adapter protocols and deterministic fakes that complete one full lifecycle.
+- Replaceable adapter protocols with deterministic test doubles exercised only by tests.
 - A DeepSeek research-provider adapter that receives the bounded planner context, uses
   JSON output, preserves deterministic parent/family policy, and records provider token usage.
 - Operator commands for run, resume inspection, status, ledger validation, view rebuild,
@@ -48,8 +48,10 @@ Human contract (read only)       Git (code lineage)
         Planner / Coder / Recovery adapters
 ```
 
-Only the harness receives raw adapter values and appends events. `STATUS.md`,
-`LESSONS.md`, `SUMMARY.md`, and files under `contexts/` are derived artifacts.
+Only the harness receives raw adapter values and appends events. `state.json`,
+`STATUS.md`, files under `lessons/` and `experiment-graph/`, and files under
+`reports/` are derived artifacts. Files under `contexts/` and `artifacts/` are
+immutable evidence referenced by ledger events.
 
 ## State transitions
 
@@ -86,8 +88,8 @@ The editable install exposes the `tacorank` command.
 
 ## DeepSeek research planner
 
-The required `research_provider` field selects the research planner independently from
-the other adapters, so an omitted field cannot silently fall back to the fake planner:
+The production `research_provider` is DeepSeek; the strict configuration rejects fake
+or unknown provider values:
 
 ```json
 {
@@ -109,20 +111,20 @@ export DEEPSEEK_API_KEY="your-key"
 tacorank run --config run-config.json --live-config live-adapters.json
 ```
 
-`research_provider: fake` retains the deterministic test planner. In DeepSeek mode,
 `SearchPolicy` still chooses the authoritative parent, family, phase, and required method
 card. DeepSeek proposes one atomic implementation plan inside those constraints, after
 which `PlanValidator` either accepts it, requests one bounded repair, or blocks it.
 
-`adapter_mode: live` composes the real Trae worker, per-worktree Gate A, receipt-sealed
+The fixed `adapter_mode: live` production runtime composes the real Trae worker,
+per-worktree Gate A, receipt-sealed
 Docker execution, live SRE observer, deterministic recovery policy, execution-sealed
 Gate B, and protected KuaiRand evaluator. The operator-owned paths and runtime hashes
 are supplied separately with `--live-config`; see `live-adapters.example.json`. The
 exact file hash must be frozen as `live_adapter_config_sha256` in the run config, so
 adapter identities cannot change without changing the ledger-bound config hash.
 
-`adapter_mode: fake` is test-only and the CLI refuses it unless
-`--allow-test-adapters` is passed explicitly.
+The CLI exposes no fake runtime flag. Test doubles are injected directly by the test
+suite and cannot be selected from a run configuration.
 
 ## Contract gate
 

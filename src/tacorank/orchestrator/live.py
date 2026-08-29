@@ -54,6 +54,7 @@ from ..git import WorktreeManager
 from ..memory.event_store import EventStore
 from ..memory.projections import project
 from ..recovery import RecoveryManager
+from ..run_layout import run_artifact_root
 from ..safety import (
     DataAccessPolicy,
     DataViewPolicy,
@@ -775,7 +776,12 @@ def build_live_adapters(
         data_manifest_sha256=config.data_manifest_sha256,
         expected_manifest_sha256=verified.protected_paths_sha256,
     )
-    receipts = ReceiptStore(root)
+    artifact_root = run_artifact_root(config.run_id)
+    receipts = ReceiptStore(
+        root,
+        artifact_root=artifact_root,
+        include_run_id=False,
+    )
     data_policy = DataAccessPolicy(
         views=tuple(
             DataViewPolicy(
@@ -822,7 +828,11 @@ def build_live_adapters(
         python_executable=str(live.python_executable),
         container_python_executable=live.container_python_executable,
     )
-    execution_artifacts = CanonicalArtifactStoreAdapter(artifact_store)
+    execution_artifacts = CanonicalArtifactStoreAdapter(
+        artifact_store,
+        artifact_root=artifact_root,
+        include_run_id=False,
+    )
     read_only_roots = tuple(
         dict.fromkeys(
             [live.contract_root.resolve(strict=True)]
