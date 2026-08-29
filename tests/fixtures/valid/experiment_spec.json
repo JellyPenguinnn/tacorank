@@ -1,0 +1,26 @@
+{
+  "change_summary": "Add a bounded feature cross.",
+  "context_id": "ctx_1",
+  "duplicate_key": "feature_cross:v1",
+  "estimated_cost": {
+    "cost_tier": "low",
+    "gpu_seconds_upper_bound": 0,
+    "llm_tokens_upper_bound": 100,
+    "wall_time_seconds_upper_bound": 60
+  },
+  "evidence_event_ids": [],
+  "expected_mechanism": "The cross captures an interaction.",
+  "experiment_id": "exp_1",
+  "falsification_condition": "No improvement on verified evaluation.",
+  "family": "feature_cross",
+  "fidelity_plan": ["smoke", "proxy", "full"],
+  "hypothesis": "A user-item cross improves ranking.",
+  "method_card_ids": [],
+  "parent_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "parent_experiment_id": "baseline",
+  "run_id": "run_1",
+  "schema_version": "1.0",
+  "success_criteria": "Primary score improves.",
+  "target_files": ["solution/model.py"],
+  "target_stage": "feature_engineering"
+}
