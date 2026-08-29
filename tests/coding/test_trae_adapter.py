@@ -115,6 +115,7 @@ _FAKE_DOCKER = r'''from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 root = Path(__file__).resolve().parent
@@ -130,7 +131,9 @@ with log_path.open("a", encoding="utf-8") as handle:
 
 command = sys.argv[1] if len(sys.argv) > 1 else ""
 container_id = "d" * 64
-if command == "create":
+if command == "image":
+    print("sha256:" + "a" * 64)
+elif command == "create":
     if behavior == "fail_create":
         print("create rejected", file=sys.stderr)
         raise SystemExit(2)
@@ -146,9 +149,6 @@ elif command == "start":
         raise SystemExit(2)
 elif command == "stop":
     pass
-elif command == "cp":
-    if behavior == "sleep_cp":
-        time.sleep(30)
 elif command == "rm":
     if behavior == "fail_remove":
         print("remove rejected", file=sys.stderr)
@@ -668,8 +668,11 @@ def test_production_docker_boundary_has_exact_lifecycle_and_cli(
         "128",
         "--tmpfs",
         "/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777",
-        "--tmpfs",
-        "/agent_tools:rw,exec,nosuid,nodev,size=64m,mode=0755",
+        "--mount",
+        (
+            f"type=bind,src={parts.config.trae_runtime_root / 'trae_agent' / 'dist'},"
+            "dst=/agent_tools,readonly,bind-propagation=rprivate"
+        ),
         "--mount",
         f"type=bind,src={worktree},dst=/workspace,bind-propagation=rprivate",
         "--mount",
@@ -695,11 +698,6 @@ def test_production_docker_boundary_has_exact_lifecycle_and_cli(
     assert [call["argv"] for call in calls] == [
         expected_create,
         ["start", container_id],
-        [
-            "cp",
-            str(parts.config.trae_runtime_root / "trae_agent" / "dist") + "/.",
-            container_id + ":/agent_tools",
-        ],
         ["stop", "--time", "1", container_id],
         ["rm", "--force", "--volumes", container_id],
         ["inspect", "--type", "container", container_id],
@@ -735,6 +733,53 @@ def test_production_docker_boundary_has_exact_lifecycle_and_cli(
     assert trajectory["fake_environment"]["PATH"] == f"{docker.parent}:/usr/bin:/bin"
 
 
+def test_production_preflight_executes_read_only_mounted_tool(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    worker, docker = _production_worker(parts)
+
+    worker.preflight()
+
+    calls = [
+        json.loads(line)["argv"]
+        for line in docker.with_name("docker.log").read_text().splitlines()
+    ]
+    container_id = "d" * 64
+    assert [call[0] for call in calls] == [
+        "image",
+        "create",
+        "start",
+        "stop",
+        "rm",
+        "inspect",
+    ]
+    assert (
+        "type=bind,src=%s,dst=/agent_tools,readonly,bind-propagation=rprivate"
+        % (parts.config.trae_runtime_root / "trae_agent" / "dist")
+    ) in calls[1]
+    assert calls[2] == ["start", "--attach", container_id]
+
+
+def test_production_preflight_mount_failure_removes_probe(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    worker, docker = _production_worker(parts)
+    docker.with_name("docker.behavior").write_text("fail_start", encoding="utf-8")
+
+    with pytest.raises(CodingWorkerError) as failure:
+        worker.preflight()
+
+    assert failure.value.code == "TRAE_ISOLATION_SETUP_FAILED"
+    assert not docker.with_name("docker.state").exists()
+    calls = [
+        json.loads(line)["argv"][0]
+        for line in docker.with_name("docker.log").read_text().splitlines()
+    ]
+    assert calls == ["image", "create", "start", "stop", "rm", "inspect"]
+
+
 def test_isolation_setup_failure_prevents_host_trae_launch(
     adapter_parts: SimpleNamespace,
 ) -> None:
@@ -751,15 +796,15 @@ def test_isolation_setup_failure_prevents_host_trae_launch(
     assert calls[0][0] == "create"
 
 
-@pytest.mark.parametrize("behavior", ("create_then_sleep", "sleep_cp"))
 def test_isolation_setup_timeout_removes_any_created_container(
     adapter_parts: SimpleNamespace,
-    behavior: str,
 ) -> None:
     parts = adapter_parts
     _, docker = _production_worker(parts)
     parts.config = replace(parts.config, docker_cli_timeout_seconds=1)
-    docker.with_name("docker.behavior").write_text(behavior, encoding="utf-8")
+    docker.with_name("docker.behavior").write_text(
+        "create_then_sleep", encoding="utf-8"
+    )
     marker = Path(parts.environment["FAKE_TRAE_RUN_MARKER"])
     with pytest.raises(CodingWorkerError) as failure:
         asyncio.run(_worker(parts).create_patch(parts.context, parts.spec))
@@ -770,10 +815,7 @@ def test_isolation_setup_timeout_removes_any_created_container(
         json.loads(line)["argv"][0]
         for line in docker.with_name("docker.log").read_text().splitlines()
     ]
-    if behavior == "create_then_sleep":
-        assert calls == ["create", "stop", "rm", "inspect"]
-    else:
-        assert calls == ["create", "start", "cp", "stop", "rm", "inspect"]
+    assert calls == ["create", "stop", "rm", "inspect"]
 
 
 def test_isolation_is_removed_after_trae_timeout(adapter_parts: SimpleNamespace) -> None:
@@ -785,7 +827,7 @@ def test_isolation_is_removed_after_trae_timeout(adapter_parts: SimpleNamespace)
         asyncio.run(worker.create_patch(parts.context, parts.spec))
     assert failure.value.code == "TRAE_TIMEOUT"
     calls = [json.loads(line)["argv"][0] for line in docker.with_name("docker.log").read_text().splitlines()]
-    assert calls == ["create", "start", "cp", "stop", "rm", "inspect"]
+    assert calls == ["create", "start", "stop", "rm", "inspect"]
 
 
 def test_config_execution_surface_and_patch_size_fail_closed(

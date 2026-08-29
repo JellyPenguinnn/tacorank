@@ -162,3 +162,33 @@ def test_validate_trae_tools_rejects_symlinked_asset(tmp_path: Path) -> None:
 
     with pytest.raises(deployment_module.DeploymentError, match="cannot contain symlinks"):
         deployment_module._validate_trae_tools(tools)
+
+
+def test_patch_trae_read_only_attach_reuses_pre_mounted_tools(
+    tmp_path: Path, monkeypatch
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    docker_manager = site_packages / "trae_agent/agent/docker_manager.py"
+    docker_manager.parent.mkdir(parents=True)
+    docker_manager.write_text(
+        '''class DockerManager:
+    CONTAINER_TOOLS_PATH = "/agent_tools"
+
+    def _copy_tools_to_container(self):
+        print(
+            f"Copying tools from '{self.tools_dir}' to container path '{self.CONTAINER_TOOLS_PATH}'..."
+        )
+''',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        deployment_module, "_trae_site_packages", lambda runtime: site_packages
+    )
+
+    deployment_module._patch_trae_read_only_attach(tmp_path / "runtime")
+
+    patched = docker_manager.read_text(encoding="utf-8")
+    assert deployment_module.TRAE_READ_ONLY_TOOL_MARKER in patched
+    assert "test -x /agent_tools/edit_tool" in patched
+    assert "test -x /agent_tools/json_edit_tool" in patched
+    compile(patched, str(docker_manager), "exec")

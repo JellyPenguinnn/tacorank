@@ -20,6 +20,7 @@ from .evaluation.proxy import split_validation_indices
 
 
 TRAE_SOURCE_REVISION = "e839e559ac61bdd0e057c375dd1dee391fee797d"
+TRAE_READ_ONLY_TOOL_MARKER = "TacoRank: use manifest-verified pre-mounted tools"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-v4-pro"
 DATA_URL = "https://zenodo.org/records/10439422/files/KuaiRand-Pure.tar.gz"
@@ -72,6 +73,7 @@ def setup_live_deployment(
     runtime.mkdir(parents=True, exist_ok=False)
     deployment.mkdir(parents=True, exist_ok=False)
     _install_trae(python, runtime, root)
+    _patch_trae_read_only_attach(runtime)
     image, image_environment_sha256 = _build_runtime_image(root, docker)
     _install_trae_tools(runtime, docker, image, root)
     runtime_identity = _trae_identity(runtime)
@@ -470,6 +472,51 @@ def _install_trae(python: Path, runtime: Path, root: Path) -> None:
         cwd=root,
         label="pinned Trae installation",
     )
+
+
+def _patch_trae_read_only_attach(runtime: Path) -> None:
+    """Make pinned Trae reuse tools mounted by TacoRank's read-only container."""
+
+    docker_manager = (
+        _trae_site_packages(runtime) / "trae_agent" / "agent" / "docker_manager.py"
+    )
+    try:
+        if (
+            docker_manager.is_symlink()
+            or not docker_manager.is_file()
+            or docker_manager.resolve(strict=True) != docker_manager
+        ):
+            raise DeploymentError("Trae Docker manager is not a canonical source file")
+        original = docker_manager.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DeploymentError("Trae Docker manager could not be read") from exc
+    anchor = '''        print(
+            f"Copying tools from '{self.tools_dir}' to container path '{self.CONTAINER_TOOLS_PATH}'..."
+        )
+'''
+    if original.count(anchor) != 1 or TRAE_READ_ONLY_TOOL_MARKER in original:
+        raise DeploymentError("pinned Trae read-only attach patch does not apply cleanly")
+    pre_mounted_probe = f'''        # {TRAE_READ_ONLY_TOOL_MARKER}.
+        if self.container_id and self.container is not None:
+            probe = self.container.exec_run(
+                [
+                    "/bin/sh",
+                    "-c",
+                    "test -x /agent_tools/edit_tool && "
+                    "test -x /agent_tools/json_edit_tool",
+                ]
+            )
+            if probe.exit_code == 0:
+                print("Using pre-mounted tools in '/agent_tools'.")
+                return
+
+'''
+    patched = original.replace(anchor, pre_mounted_probe + anchor)
+    try:
+        compile(patched, str(docker_manager), "exec")
+        docker_manager.write_text(patched, encoding="utf-8")
+    except (OSError, SyntaxError) as exc:
+        raise DeploymentError("pinned Trae read-only attach patch is invalid") from exc
 
 
 def _install_trae_tools(

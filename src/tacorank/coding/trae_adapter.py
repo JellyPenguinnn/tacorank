@@ -186,7 +186,7 @@ class TraeConfig:
     docker_pids_limit: int = 128
     docker_cpu_limit: float = 2.0
     docker_tmpfs_limit_mb: int = 256
-    docker_agent_tools_tmpfs_limit_mb: int = 64
+    docker_agent_tools_size_limit_mb: int = 64
     docker_cli_timeout_seconds: int = 30
     version_timeout_seconds: int = 10
     termination_grace_seconds: int = 5
@@ -289,11 +289,16 @@ class TraeCodingWorker:
                 docker_config_root=docker_config_root,
                 check=True,
             )
-        image_id = inspected.stdout.decode("ascii", errors="ignore").strip()
-        if image_id != "sha256:" + match.group(1):
-            raise CodingWorkerError(
-                "TRAE_IMAGE_IDENTITY_MISMATCH",
-                "Docker resolved a different image than the reviewed digest",
+            image_id = inspected.stdout.decode("ascii", errors="ignore").strip()
+            if image_id != "sha256:" + match.group(1):
+                raise CodingWorkerError(
+                    "TRAE_IMAGE_IDENTITY_MISMATCH",
+                    "Docker resolved a different image than the reviewed digest",
+                )
+            self._preflight_tool_mount(
+                runtime_root,
+                image,
+                docker_config_root=docker_config_root,
             )
 
     async def create_patch(self, context: Any, spec: Any) -> Any:
@@ -772,6 +777,7 @@ class TraeCodingWorker:
             raise CodingWorkerError(
                 "TRAE_CONFIG_INVALID", "Docker image is not pinned by an exact digest"
             )
+        asset_source = self._reviewed_tool_mount_source()
 
         worktree = record.path.resolve(strict=True)
         if any(character in str(worktree) for character in (",", "\n", "\r", "\x00")):
@@ -839,10 +845,10 @@ class TraeCodingWorker:
                 "/tmp:rw,noexec,nosuid,nodev,"
                 f"size={self.config.docker_tmpfs_limit_mb}m,mode=1777"
             ),
-            "--tmpfs",
+            "--mount",
             (
-                "/agent_tools:rw,exec,nosuid,nodev,"
-                f"size={self.config.docker_agent_tools_tmpfs_limit_mb}m,mode=0755"
+                f"type=bind,src={asset_source},dst=/agent_tools,"
+                "readonly,bind-propagation=rprivate"
             ),
             "--mount",
             (
@@ -958,43 +964,154 @@ class TraeCodingWorker:
                 "TRAE_ISOLATION_SETUP_FAILED",
                 "hardened Docker container failed to start",
             )
-        runtime_root = self.config.trae_runtime_root
-        if runtime_root is None:
+        return session
+
+    def _reviewed_tool_mount_source(
+        self, runtime_root: Optional[Path] = None
+    ) -> Path:
+        configured_root = runtime_root or self.config.trae_runtime_root
+        if configured_root is None:
             raise CodingWorkerError(
                 "TRAE_ISOLATION_SETUP_FAILED", "Trae runtime assets are unavailable"
             )
-        asset_source = str(runtime_root / "trae_agent" / "dist") + os.sep + "."
         try:
-            copied = self._run_docker_cli(
-                ("cp", asset_source, f"{raw_id}:/agent_tools"),
+            source = (
+                Path(configured_root) / "trae_agent" / "dist"
+            ).resolve(strict=True)
+        except OSError as exc:
+            raise CodingWorkerError(
+                "TRAE_ISOLATION_SETUP_FAILED", "Trae runtime assets are unavailable"
+            ) from exc
+        if not source.is_dir() or any(
+            character in str(source) for character in (",", "\n", "\r", "\x00")
+        ):
+            raise CodingWorkerError(
+                "TRAE_ISOLATION_SETUP_FAILED",
+                "Trae tool path cannot be represented by the reviewed Docker mount",
+            )
+        return source
+
+    def _preflight_tool_mount(
+        self,
+        runtime_root: Path,
+        image: str,
+        *,
+        docker_config_root: Path,
+    ) -> None:
+        """Execute a reviewed tool through the production read-only mount."""
+
+        source = self._reviewed_tool_mount_source(runtime_root)
+        cidfile = docker_config_root / "tool-mount.cid"
+        suffix = hashlib.sha256(str(docker_config_root).encode("utf-8")).hexdigest()[:20]
+        name = "tacorank-trae-preflight-" + suffix
+        create_args = (
+            "create",
+            "--cidfile",
+            str(cidfile),
+            "--name",
+            name,
+            "--label",
+            "com.tacorank.owner=coding-worker-preflight",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--memory",
+            "256m",
+            "--memory-swap",
+            "256m",
+            "--cpus",
+            "1",
+            "--pids-limit",
+            "32",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+            "--mount",
+            (
+                f"type=bind,src={source},dst=/agent_tools,"
+                "readonly,bind-propagation=rprivate"
+            ),
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "--pull",
+            "never",
+            "--entrypoint",
+            "/agent_tools/edit_tool",
+            image,
+            "--help",
+        )
+        try:
+            created = self._run_docker_cli(
+                create_args,
                 docker_config_root=docker_config_root,
                 check=False,
             )
         except CodingWorkerError as exc:
-            try:
-                self._close_isolation(
-                    session,
-                    docker_config_root=docker_config_root,
-                )
-            except CodingWorkerError as cleanup_error:
-                raise cleanup_error from exc
+            container_id = self._read_container_id(cidfile)
+            if container_id is not None:
+                try:
+                    self._close_isolation(
+                        _IsolationSession(
+                            mode="preflight",
+                            container_id=container_id,
+                            image=image,
+                            image_digest=None,
+                        ),
+                        docker_config_root=docker_config_root,
+                    )
+                except CodingWorkerError as cleanup_error:
+                    raise cleanup_error from exc
             raise CodingWorkerError(
                 "TRAE_ISOLATION_SETUP_FAILED",
-                "manifest-verified Trae tools could not be staged in the container",
+                "reviewed Trae tool mount could not be created",
             ) from exc
-        if copied.returncode != 0:
-            try:
+        raw_id = created.stdout.decode("ascii", errors="ignore").strip()
+        cidfile_id = self._read_container_id(cidfile) or ""
+        usable_id = cidfile_id if _CONTAINER_ID_RE.fullmatch(cidfile_id) else raw_id
+        if (
+            created.returncode != 0
+            or _CONTAINER_ID_RE.fullmatch(raw_id) is None
+            or raw_id != cidfile_id
+        ):
+            if _CONTAINER_ID_RE.fullmatch(usable_id):
                 self._close_isolation(
-                    session,
+                    _IsolationSession(
+                        mode="preflight",
+                        container_id=usable_id,
+                        image=image,
+                        image_digest=None,
+                    ),
                     docker_config_root=docker_config_root,
                 )
-            except CodingWorkerError as cleanup_error:
-                raise cleanup_error
             raise CodingWorkerError(
                 "TRAE_ISOLATION_SETUP_FAILED",
-                "manifest-verified Trae tools could not be staged in the container",
+                "reviewed Trae tool mount could not be created",
             )
-        return session
+        session = _IsolationSession(
+            mode="preflight",
+            container_id=raw_id,
+            image=image,
+            image_digest=None,
+        )
+        try:
+            executed = self._run_docker_cli(
+                ("start", "--attach", raw_id),
+                docker_config_root=docker_config_root,
+                check=False,
+            )
+            if executed.returncode != 0:
+                raise CodingWorkerError(
+                    "TRAE_ISOLATION_SETUP_FAILED",
+                    "reviewed Trae tools are not executable in the Docker boundary",
+                )
+        finally:
+            self._close_isolation(
+                session,
+                docker_config_root=docker_config_root,
+            )
 
     def _close_isolation(
         self,
@@ -1448,7 +1565,7 @@ class TraeCodingWorker:
             "docker_memory_limit_mb",
             "docker_pids_limit",
             "docker_tmpfs_limit_mb",
-            "docker_agent_tools_tmpfs_limit_mb",
+            "docker_agent_tools_size_limit_mb",
             "docker_cli_timeout_seconds",
         )
         for field in docker_integer_fields:
@@ -1617,11 +1734,10 @@ class TraeCodingWorker:
                 "Trae Docker tool assets differ from the reviewed manifest",
             )
         asset_bytes = _trae_runtime_asset_bytes(root)
-        required_bytes = 2 * asset_bytes + 1024 * 1024
-        if required_bytes > self.config.docker_agent_tools_tmpfs_limit_mb * 1024 * 1024:
+        if asset_bytes > self.config.docker_agent_tools_size_limit_mb * 1024 * 1024:
             raise CodingWorkerError(
                 "TRAE_RUNTIME_IDENTITY_MISMATCH",
-                "agent-tools tmpfs is too small for reviewed and upstream copies",
+                "reviewed agent-tools bundle exceeds the Docker mount size limit",
             )
         _reject_dotenv_candidates(root)
         return root, {
