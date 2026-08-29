@@ -60,6 +60,10 @@ def repository(tmp_path: Path) -> Path:
         tmp_path / "research/CURRENT_RUN_IMPROVEMENT_PLAN.md",
     )
     shutil.copytree(source_research / "methods", tmp_path / "research/methods")
+    (tmp_path / "solution").mkdir()
+    (tmp_path / "solution/candidate.py").write_text(
+        "def run(invocation):\n    return None\n", encoding="utf-8"
+    )
     (tmp_path / "artifacts").mkdir()
     (tmp_path / "runs").mkdir()
     return tmp_path

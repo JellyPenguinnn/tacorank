@@ -18,3 +18,4 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
     )
     assert set(card.allowed_data) == {"train_interactions", "user_id", "long_view"}
     assert card.prohibition_conditions == ("evaluator_or_split_change_required",)
+    assert card.implementation_targets == ("solution/candidate.py",)

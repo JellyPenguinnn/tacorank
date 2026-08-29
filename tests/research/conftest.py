@@ -111,6 +111,11 @@ def planner_context():
         method_cards=load_method_cards(
             Path(__file__).parents[2] / "research" / "methods"
         ).cards,
+        target_interface_excerpts={
+            "solution/candidate.py": (
+                "Required candidate entrypoint: def run(invocation) -> None"
+            )
+        },
         remaining_budget=SimpleNamespace(
             remaining_llm_tokens=10_000,
             remaining_wall_time_seconds=10_000,

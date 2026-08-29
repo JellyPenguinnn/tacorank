@@ -32,7 +32,7 @@ def make_spec(context, choice):
         "family": choice.family,
         "change_summary": "Replace pointwise loss with pairwise BPR.",
         "target_stage": "objective",
-        "target_files": ["solution/loss.py"],
+        "target_files": ["solution/candidate.py"],
         "fidelity_plan": ["smoke", "proxy", "full"],
         "expected_mechanism": "Improve within-user ordering.",
         "success_criteria": type("Criteria", (), {"full_parent_delta_min": 0.002})(),

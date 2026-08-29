@@ -31,6 +31,12 @@ def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_e
     )
     assert "within_user_positive_negative_pairs" in pairwise.prerequisites
     assert "train_interactions" in pairwise.allowed_data
+    assert pairwise.implementation_targets == ["solution/candidate.py"]
+    assert first.target_interface_excerpts == {
+        "solution/candidate.py": harness.config.target_interface_excerpts[
+            "solution/candidate.py"
+        ]
+    }
 
 
 def test_planner_history_preserves_complete_evaluation_evidence(
@@ -58,6 +64,16 @@ def test_mandatory_context_cannot_be_silently_truncated(harness, baseline_evalua
     harness.bootstrap(baseline_evaluation)
     with pytest.raises(ContextBuildError, match="mandatory"):
         harness.context_builder.build_planner(harness.events(), max_tokens=1)
+
+
+def test_planner_context_rejects_missing_configured_entrypoint(
+    harness, baseline_evaluation
+):
+    harness.bootstrap(baseline_evaluation)
+    (harness.config.repository_root / "solution/candidate.py").unlink()
+
+    with pytest.raises(ContextBuildError, match="target interface file is unavailable"):
+        harness.context_builder.build_planner(harness.events())
 
 
 def test_secret_redaction():

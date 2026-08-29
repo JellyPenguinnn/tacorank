@@ -197,6 +197,31 @@ class PlanValidator:
             if not any(_path_is_within(path, root) for root in editable_roots):
                 errors.append("TARGET_OUTSIDE_EDITABLE_PATHS")
 
+        raw_interfaces = get_value(context, "target_interface_excerpts", None)
+        try:
+            interface_items = list(dict(raw_interfaces or {}).items())
+        except (TypeError, ValueError):
+            interface_items = []
+            errors.append("INVALID_TARGET_INTERFACES")
+        interface_paths: set[str] = set()
+        if not interface_items:
+            errors.append("TARGET_INTERFACES_MISSING")
+        for raw_path, excerpt in interface_items:
+            path = _normalized_path(raw_path)
+            if path is None or not _nonempty(excerpt):
+                errors.append("INVALID_TARGET_INTERFACE")
+                continue
+            interface_paths.add(path)
+        normalized_target_set = {
+            path for path in normalized_files if path is not None
+        }
+        if (
+            normalized_target_set
+            and interface_paths
+            and normalized_target_set.isdisjoint(interface_paths)
+        ):
+            errors.append("TARGET_INTERFACE_NOT_TOUCHED")
+
         fidelity_plan = [
             _normalized_enum(item)
             for item in as_list(get_value(spec, "fidelity_plan", None))
@@ -240,6 +265,22 @@ class PlanValidator:
                 continue
             eligibility = evaluate_method_card(card, context, family=family)
             errors.extend(eligibility.reasons)
+            implementation_targets = [
+                _normalized_path(item)
+                for item in as_list(
+                    get_value(card, "implementation_targets", None)
+                )
+            ]
+            if any(item is None for item in implementation_targets):
+                errors.append("METHOD_IMPLEMENTATION_TARGET_INVALID")
+                continue
+            required_targets = {
+                item for item in implementation_targets if item is not None
+            }
+            if required_targets and not required_targets.issubset(interface_paths):
+                errors.append("METHOD_IMPLEMENTATION_TARGET_UNAUTHORIZED")
+            if required_targets and normalized_target_set.isdisjoint(required_targets):
+                errors.append("METHOD_IMPLEMENTATION_TARGET_NOT_TOUCHED")
 
         source_events = set(map(str, as_list(get_value(context, "source_event_ids", None))))
         if any(not EVENT_ID_PATTERN.fullmatch(event_id) for event_id in source_events):

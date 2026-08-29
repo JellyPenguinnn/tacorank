@@ -231,8 +231,9 @@ def setup_live_deployment(
         "active_research_prohibitions": [],
         "prediction_change_no_op_threshold": 0.001,
         "target_interface_excerpts": {
-            "candidate": (
-                "def run(invocation: PipelineInvocation) -> None; read only "
+            "solution/candidate.py": (
+                "Required candidate entrypoint: def run(invocation: "
+                "PipelineInvocation) -> None; include this file in target_files; read only "
                 "invocation.input_root and write exactly invocation.output_path as "
                 "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
                 "invocation.seed; return None"
