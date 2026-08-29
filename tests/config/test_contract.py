@@ -17,3 +17,27 @@ def test_unresolved_contract_is_a_hard_stop(config, repository):
     )
     with pytest.raises(ContractError, match="unresolved"):
         verify_contract(config)
+
+
+def test_negated_frozen_status_is_rejected(config, repository):
+    path = repository / config.contract_path
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "Contract status: FROZEN", "NOT Contract status: FROZEN"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ContractError, match="exact line"):
+        verify_contract(config)
+
+
+def test_commands_and_artifact_roots_must_match_frozen_contract(config):
+    config.command_ids = ["run_smoke", "unreviewed_command"]
+    with pytest.raises(ContractError, match="command_ids"):
+        verify_contract(config)
+
+    config.command_ids = ["run_smoke", "run_proxy", "run_full"]
+    config.artifact_roots = ["artifacts"]
+    with pytest.raises(ContractError, match="artifact_roots"):
+        verify_contract(config)

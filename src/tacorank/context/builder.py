@@ -67,16 +67,16 @@ class ContextBuilder:
         role: str,
         events: Sequence[Event],
         experiment_id: Optional[str],
-        discriminator: str,
+        build_inputs: object,
     ) -> str:
-        source = "|".join(
-            [
-                self.config.run_id,
-                role,
-                experiment_id or "-",
-                events[-1].event_hash if events else "genesis",
-                discriminator,
-            ]
+        source = compact_json(
+            {
+                "run_id": self.config.run_id,
+                "role": role,
+                "experiment_id": experiment_id,
+                "snapshot_hash": events[-1].event_hash if events else "genesis",
+                "build_inputs": build_inputs,
+            }
         )
         return "ctx_" + hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
 
@@ -184,7 +184,10 @@ class ContextBuilder:
     ) -> PlannerContext:
         visible = visible_development_events(events)
         state = project(visible)
-        context_id = self._identity("planner", visible, None, family or "all")
+        normalized_tags = sorted({tag.lower() for tag in tags})
+        effective_max_tokens = (
+            max_tokens if max_tokens is not None else self.config.context_token_limit
+        )
         mandatory = [
             ("Frozen contract", self._contract_digest()),
             (
@@ -231,18 +234,31 @@ class ContextBuilder:
         history = verified_experiment_history(visible, family=family, limit=10)
         for event in history:
             optional.append((event.event_id, "Verified experiment history", self._event_card(event)))
-        for event in active_lessons(visible, tags=tags, limit=5):
+        for event in active_lessons(visible, tags=normalized_tags, limit=5):
             optional.append((event.event_id, "Applicable active lesson", self._event_card(event)))
         for path in sorted((self.config.repository_root / "research/methods").glob("*.md")):
             relative = path.relative_to(self.config.repository_root).as_posix()
             optional.append((relative, "Method card", path.read_text(encoding="utf-8")))
+
+        context_id = self._identity(
+            "planner",
+            visible,
+            None,
+            {
+                "family": family,
+                "tags": normalized_tags,
+                "max_tokens": effective_max_tokens,
+                "mandatory": mandatory,
+                "optional": optional,
+            },
+        )
 
         content, included, excluded = self._pack(
             context_id=context_id,
             role="planner",
             mandatory=mandatory,
             optional=optional,
-            max_tokens=max_tokens or self.config.context_token_limit,
+            max_tokens=effective_max_tokens,
         )
         # Explicitly account for sources removed by visibility policy.
         for event in events:
@@ -267,7 +283,6 @@ class ContextBuilder:
         max_tokens: int = 2_500,
     ) -> CoderContext:
         visible = visible_development_events(events)
-        context_id = self._identity("coder", visible, spec.experiment_id, spec.duplicate_key)
         mandatory = [
             (
                 "Coding assignment",
@@ -299,6 +314,16 @@ class ContextBuilder:
                 optional.append((relative, "Selected method card", path.read_text(encoding="utf-8")))
         for event in active_lessons(visible, tags=[spec.family, spec.target_stage], limit=5):
             optional.append((event.event_id, "Applicable lesson", self._event_card(event)))
+        context_id = self._identity(
+            "coder",
+            visible,
+            spec.experiment_id,
+            {
+                "max_tokens": max_tokens,
+                "mandatory": mandatory,
+                "optional": optional,
+            },
+        )
         content, included, excluded = self._pack(
             context_id=context_id,
             role="coder",
@@ -333,9 +358,6 @@ class ContextBuilder:
         chain = failure_chain(visible, experiment_id)
         if not chain:
             raise ContextBuildError("no failure evidence exists for recovery")
-        context_id = self._identity(
-            "recovery", visible, experiment_id, str(remaining_repair_budget)
-        )
         mandatory = [
             (
                 "Recovery authority",
@@ -354,6 +376,17 @@ class ContextBuilder:
         optional = [
             (event.event_id, "Exact failure chain", self._event_card(event)) for event in reversed(chain)
         ]
+        context_id = self._identity(
+            "recovery",
+            visible,
+            experiment_id,
+            {
+                "remaining_repair_budget": remaining_repair_budget,
+                "max_tokens": max_tokens,
+                "mandatory": mandatory,
+                "optional": optional,
+            },
+        )
         content, included, excluded = self._pack(
             context_id=context_id,
             role="recovery",

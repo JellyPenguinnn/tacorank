@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
@@ -121,6 +122,19 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _contract_manifest_values(contract_text: str, label: str) -> List[str]:
+    matches = re.findall(
+        r"(?im)^\s*%s\s*:\s*([^\r\n]+?)\s*$" % re.escape(label),
+        contract_text,
+    )
+    if len(matches) != 1:
+        raise ContractError("contract must contain exactly one '%s:' line" % label)
+    values = [item.strip().strip("`").strip() for item in matches[0].split(",")]
+    if not values or any(not value for value in values) or len(values) != len(set(values)):
+        raise ContractError("contract %s must be a unique comma-separated list" % label)
+    return values
+
+
 def verify_contract(config: RunConfig) -> VerifiedContract:
     """Verify that humans supplied a resolved, explicitly frozen contract.
 
@@ -141,8 +155,8 @@ def verify_contract(config: RunConfig) -> VerifiedContract:
 
     contract_text = contract_bytes.decode("utf-8", errors="strict")
     upper = contract_text.upper()
-    if "CONTRACT STATUS: FROZEN" not in upper:
-        raise ContractError("contract must contain 'Contract status: FROZEN'")
+    if not re.search(r"(?im)^\s*Contract status\s*:\s*FROZEN\s*$", contract_text):
+        raise ContractError("contract must contain the exact line 'Contract status: FROZEN'")
     unresolved_markers = ("TBD", "TODO", "UNRESOLVED", "<<<<<<<", ">>>>>>>")
     present = [marker for marker in unresolved_markers if marker in upper]
     if present:
@@ -152,6 +166,12 @@ def verify_contract(config: RunConfig) -> VerifiedContract:
             raise ContractError("frozen metric %r is not named in the contract" % metric_name)
     if config.primary_metric_name.lower() not in contract_text.lower():
         raise ContractError("frozen primary metric is not named in the contract")
+    allowed_commands = _contract_manifest_values(contract_text, "Allowed command IDs")
+    if allowed_commands != config.command_ids:
+        raise ContractError("configured command_ids do not match the frozen contract")
+    artifact_roots = _contract_manifest_values(contract_text, "Artifact roots")
+    if artifact_roots != config.artifact_roots:
+        raise ContractError("configured artifact_roots do not match the frozen contract")
 
     config_bytes = json.dumps(
         config.canonical_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False

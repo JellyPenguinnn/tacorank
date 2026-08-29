@@ -10,6 +10,7 @@ from tacorank.memory.canonical_json import canonical_dumps, canonical_sha256, ev
 from tacorank.memory.event_store import (
     DuplicateIdempotencyKey,
     EventStore,
+    LedgerError,
     LedgerCorruptionError,
 )
 from tacorank.orchestrator.state_machine import TransitionError, validator
@@ -32,42 +33,54 @@ def started_payload():
     )
 
 
+def event_key(payload, *, experiment_id="run", stage="start", attempt=0):
+    return "r:%s:%s:%d:%s" % (
+        experiment_id,
+        stage,
+        attempt,
+        canonical_sha256(payload),
+    )
+
+
 def test_hash_chain_and_duplicate_idempotency(repository):
     store = EventStore(
         repository / "runs/r/events.jsonl",
         artifact_store=ArtifactStore(repository),
         transition_validator=validator,
     )
-    event = store.append(
-        run_id="r", payload=started_payload(), idempotency_key="r:run:start:0:hash"
-    )
+    payload = started_payload()
+    event = store.append(run_id="r", payload=payload, idempotency_key=event_key(payload))
     assert event.event_id == "evt_000001"
     assert store.read_events()[0].event_hash == event.event_hash
     with pytest.raises(DuplicateIdempotencyKey):
         store.append(
-            run_id="r", payload=started_payload(), idempotency_key="r:run:start:0:hash"
+            run_id="r", payload=payload, idempotency_key=event_key(payload)
         )
     with pytest.raises(TransitionError):
         store.append(
-            run_id="r", payload=started_payload(), idempotency_key="r:run:start:0:other"
+            run_id="r",
+            payload=payload,
+            idempotency_key=event_key(payload, stage="start_again"),
         )
 
 
 def test_complete_line_tampering_is_detected(repository):
     path = repository / "runs/r/events.jsonl"
     store = EventStore(path, transition_validator=validator)
-    store.append(run_id="r", payload=started_payload(), idempotency_key="key")
+    payload = started_payload()
+    store.append(run_id="r", payload=payload, idempotency_key=event_key(payload))
     data = json.loads(path.read_text().strip())
     data["payload"]["max_experiments"] = 999
     path.write_text(json.dumps(data, separators=(",", ":"), sort_keys=True) + "\n")
-    with pytest.raises(LedgerCorruptionError, match="event_hash mismatch"):
+    with pytest.raises(LedgerCorruptionError, match="idempotency key|event_hash mismatch"):
         store.read_events()
 
 
 def test_only_incomplete_tail_is_truncated(repository):
     path = repository / "runs/r/events.jsonl"
     store = EventStore(path, transition_validator=validator)
-    first = store.append(run_id="r", payload=started_payload(), idempotency_key="key")
+    payload = started_payload()
+    first = store.append(run_id="r", payload=payload, idempotency_key=event_key(payload))
     with path.open("ab") as handle:
         handle.write(b'{"partial":')
     with pytest.raises(LedgerCorruptionError, match="incomplete"):
@@ -111,14 +124,15 @@ def test_nested_payload_artifacts_cannot_be_removed_from_envelope(repository):
         size_bytes=10,
     )
     store = EventStore(path)
+    payload = SubmissionCheckedPayload(
+        accepted=True,
+        submission_artifact=artifact,
+        checks=[],
+    )
     store.append(
         run_id="r",
-        payload=SubmissionCheckedPayload(
-            accepted=True,
-            submission_artifact=artifact,
-            checks=[],
-        ),
-        idempotency_key="submission",
+        payload=payload,
+        idempotency_key=event_key(payload, stage="submission"),
     )
 
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -129,4 +143,26 @@ def test_nested_payload_artifacts_cannot_be_removed_from_envelope(repository):
     path.write_text(canonical_dumps(data) + "\n", encoding="utf-8")
 
     with pytest.raises(LedgerCorruptionError, match="artifact_refs must exactly match"):
+        store.read_events()
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["arbitrary", "r:run:start:0:%s" % ("0" * 64)],
+)
+def test_arbitrary_idempotency_keys_are_rejected(repository, key):
+    store = EventStore(repository / "runs/r/events.jsonl")
+    with pytest.raises(LedgerError, match="idempotency key input hash"):
+        store.append(run_id="r", payload=started_payload(), idempotency_key=key)
+
+
+def test_noncanonical_jsonl_is_rejected(repository):
+    path = repository / "runs/r/events.jsonl"
+    payload = started_payload()
+    store = EventStore(path)
+    store.append(run_id="r", payload=payload, idempotency_key=event_key(payload))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps(data, sort_keys=False) + "\n", encoding="utf-8")
+
+    with pytest.raises(LedgerCorruptionError, match="not canonical JSON"):
         store.read_events()

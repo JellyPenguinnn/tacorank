@@ -15,7 +15,10 @@ def test_views_are_derived_and_cli_validates(harness, baseline_evaluation, capsy
     )
     rebuild_views(run_directory, harness.events())
 
-    assert "exp_001" in (run_directory / "SUMMARY.md").read_text()
+    summary = (run_directory / "SUMMARY.md").read_text()
+    assert "exp_001" in summary
+    assert "Unmeasured tokens:" in summary
+    assert "Total reported tokens:" in summary
     assert "No active lessons" in (run_directory / "LESSONS.md").read_text()
     assert '"best_experiment_id": "exp_001"' in (
         run_directory / "STATUS.md"

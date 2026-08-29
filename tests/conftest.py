@@ -44,6 +44,8 @@ def repository(tmp_path: Path) -> Path:
         "# Competition contract\n\n"
         "Contract status: FROZEN\n\n"
         "Metrics: gauc, ndcg@5, primary. Primary is the mean.\n"
+        "Allowed command IDs: run_smoke, run_proxy, run_full\n"
+        "Artifact roots: artifacts, runs\n"
         "Development uses public validation; hidden final is exposed once after stop.\n",
         encoding="utf-8",
     )

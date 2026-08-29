@@ -43,7 +43,7 @@ from ..schemas import (
     RunStoppedPayload,
     TrustVerdict,
 )
-from .convergence import StopDecision, stop_decision
+from .convergence import StopDecision, runtime_budget_decision, stop_decision
 from .ports import (
     CodingWorker,
     Evaluator,
@@ -155,6 +155,7 @@ class Harness:
                 primary_metric_name=self.config.primary_metric_name,
                 command_ids=self.config.command_ids,
                 artifact_roots=self.config.artifact_roots,
+                evaluator_sha256=self.config.evaluator_sha256,
             ),
             stage="contract_verified",
             causation_event_id=started.event_id,
@@ -183,6 +184,13 @@ class Harness:
             stage="stopped",
             causation_event_id=self.events()[-1].event_id,
         )
+
+    def _stop_if_runtime_budget_exhausted(self) -> bool:
+        decision = runtime_budget_decision(self.state(), self.config)
+        if not decision.stop:
+            return False
+        self.stop(decision)
+        return True
 
     def _command_for(self, fidelity: Fidelity) -> str:
         preferred = "run_%s" % fidelity.value
@@ -258,6 +266,7 @@ class Harness:
                 causation_event_id=planner_context_event.event_id,
                 resource_delta=planner_output.resource_delta,
             )
+            self._stop_if_runtime_budget_exhausted()
             return self.state()
 
         spec = planner_output.spec
@@ -271,6 +280,8 @@ class Harness:
             causation_event_id=planner_context_event.event_id,
             resource_delta=planner_output.resource_delta,
         )
+        if self._stop_if_runtime_budget_exhausted():
+            return self.state()
         coder_context = self.context_builder.build_coder(self.events(), spec)
         coder_context_event = self._append(
             ContextCreatedPayload(context=coder_context),
@@ -294,6 +305,8 @@ class Harness:
             causation_event_id=coder_context_event.event_id,
             resource_delta=patch.resource_delta,
         )
+        if self._stop_if_runtime_budget_exhausted():
+            return self.state()
 
         patch_check = await self.patch_gate.check(patch)
         patch_check_event = self._append(
@@ -304,10 +317,14 @@ class Harness:
             causation_event_id=patch_event.event_id,
             resource_delta=patch_check.resource_delta,
         )
+        if self._stop_if_runtime_budget_exhausted():
+            return self.state()
         if not patch_check.accepted:
             action, recovery = await self._recover(
                 patch_check_event, patch_check, spec.experiment_id
             )
+            if self._stop_if_runtime_budget_exhausted():
+                return self.state()
             if action != RecoveryAction.ABANDON:
                 raise OrchestrationError(
                     "P0 supports successful patches and deterministic abandon; "
@@ -353,8 +370,12 @@ class Harness:
                 causation_event_id=started.event_id,
                 resource_delta=result.resource_delta,
             )
+            if self._stop_if_runtime_budget_exhausted():
+                return self.state()
             if result.outcome != RunOutcome.SUCCESS:
                 action, recovery = await self._recover(finished, result, spec.experiment_id)
+                if self._stop_if_runtime_budget_exhausted():
+                    return self.state()
                 if action == RecoveryAction.RETRY_SAME_COMMIT:
                     stage_queue.appendleft(fidelity)
                     continue
@@ -369,8 +390,12 @@ class Harness:
                 causation_event_id=finished.event_id,
                 resource_delta=output.resource_delta,
             )
+            if self._stop_if_runtime_budget_exhausted():
+                return self.state()
             if not output.accepted:
                 await self._recover(output_event, output, spec.experiment_id)
+                if self._stop_if_runtime_budget_exhausted():
+                    return self.state()
                 return self.state()
 
             if fidelity == Fidelity.SMOKE:
@@ -437,6 +462,8 @@ class Harness:
                 causation_event_id=output_event.event_id,
                 resource_delta=evaluation.resource_delta,
             )
+            if self._stop_if_runtime_budget_exhausted():
+                return self.state()
             decision_context = EvaluationDecisionContext(
                 run_id=self.config.run_id,
                 experiment_id=spec.experiment_id,
@@ -459,6 +486,8 @@ class Harness:
                 causation_event_id=evaluation_event.event_id,
                 resource_delta=decision.resource_delta,
             )
+            if self._stop_if_runtime_budget_exhausted():
+                return self.state()
             if decision.lesson_candidate is not None:
                 lesson_number = 1 + sum(
                     event.payload.type == "lesson.recorded" for event in self.events()

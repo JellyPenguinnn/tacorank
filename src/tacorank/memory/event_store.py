@@ -51,6 +51,11 @@ class DuplicateIdempotencyKey(LedgerError):
         self.event = event
 
 
+def _validate_idempotency_payload_hash(key: str, payload: EventPayload) -> None:
+    if key.rsplit(":", 1)[-1] != canonical_sha256(payload):
+        raise ValueError("idempotency key input hash does not match payload")
+
+
 class EventStore:
     def __init__(
         self,
@@ -126,14 +131,25 @@ class EventStore:
         previous_hash = GENESIS_HASH
         run_id: Optional[str] = None
         idempotency: Dict[str, Event] = {}
-        for line_number, raw_line in enumerate(data.splitlines(), start=1):
+        complete_lines = data[:-1].split(b"\n") if data else []
+        for line_number, raw_line in enumerate(complete_lines, start=1):
             try:
                 decoded = json.loads(raw_line.decode("utf-8"))
                 event = Event.model_validate(decoded)
+                _validate_idempotency_payload_hash(event.idempotency_key, event.payload)
             except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
                 raise LedgerCorruptionError(
                     "invalid complete ledger line %d: %s" % (line_number, exc)
                 ) from exc
+            except ValueError as exc:
+                raise LedgerCorruptionError(
+                    "invalid complete ledger line %d: %s" % (line_number, exc)
+                ) from exc
+
+            if raw_line != canonical_dumps(event).encode("utf-8"):
+                raise LedgerCorruptionError(
+                    "ledger line %d is not canonical JSON" % line_number
+                )
 
             expected_seq = len(events) + 1
             if event.seq != expected_seq:
@@ -184,6 +200,10 @@ class EventStore:
         timestamp: Optional[datetime] = None,
     ) -> Event:
         with self._locked():
+            try:
+                _validate_idempotency_payload_hash(idempotency_key, payload)
+            except ValueError as exc:
+                raise LedgerError(str(exc)) from exc
             self._repair_incomplete_tail_locked()
             events = self._read_locked()
             for existing in events:

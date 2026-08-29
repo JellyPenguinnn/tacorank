@@ -88,10 +88,18 @@ The checked-in `contract/COMPETITION.md` and `PROTECTED_PATHS.md` are intentiona
 empty scaffolds. The harness will not edit them and will refuse to start until humans:
 
 1. resolve the label and metric conflict;
-2. list the protected paths and allowed commands;
+2. add exact comma-separated `Allowed command IDs:` and `Artifact roots:` lines;
 3. add the exact line `Contract status: FROZEN`;
 4. replace the two placeholder hashes in `config.example.json`; and
 5. copy the example to a run-specific configuration file.
+
+For example:
+
+```text
+Allowed command IDs: run_smoke, run_proxy, run_full
+Artifact roots: artifacts, runs
+Contract status: FROZEN
+```
 
 This is deliberate. A prompt or adapter cannot waive the contract gate.
 

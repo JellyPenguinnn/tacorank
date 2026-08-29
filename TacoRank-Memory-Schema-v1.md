@@ -47,6 +47,9 @@ prev_event_hash: lowercase SHA-256, zero hash for genesis
 event_hash: SHA-256 of canonical envelope with event_hash omitted
 ```
 
+When an adapter result carries a nested `resource_delta`, it must exactly match the
+event-envelope value. Replay rejects disagreement instead of choosing one authority.
+
 The idempotency key format is:
 
 ```text

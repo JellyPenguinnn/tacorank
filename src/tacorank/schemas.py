@@ -410,6 +410,8 @@ class PatchCheckResult(StrictModel):
             raise ValueError("accepted patch checks require a receipt and artifact")
         if not self.accepted and (self.receipt_id or self.receipt_artifact):
             raise ValueError("rejected patch checks cannot issue a receipt")
+        if self.accepted and any(check.status == CheckStatus.FAIL for check in self.checks):
+            raise ValueError("accepted patch checks cannot contain failed checks")
         return self
 
 
@@ -503,6 +505,12 @@ class OutputCheckResult(StrictModel):
     violations: List[Violation] = Field(default_factory=list)
     resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
 
+    @model_validator(mode="after")
+    def validate_acceptance(self) -> "OutputCheckResult":
+        if self.accepted and any(status == CheckStatus.FAIL for status in self.checks.values()):
+            raise ValueError("accepted output checks cannot contain failed checks")
+        return self
+
 
 class RecoveryDecision(StrictModel):
     run_id: NonEmptyStr
@@ -568,6 +576,13 @@ class EvaluationResult(StrictModel):
     trust: TrustAssessment
     metrics_artifact: Optional[ArtifactRef] = None
     resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
+
+    @field_validator("evaluator_sha256", "contract_sha256")
+    @classmethod
+    def validate_evaluation_hashes(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("evaluation hashes must be lowercase sha256")
+        return value
 
 
 class ExperimentDecision(StrictModel):
@@ -686,8 +701,9 @@ class ContractVerifiedPayload(StrictModel):
     primary_metric_name: NonEmptyStr
     command_ids: List[NonEmptyStr]
     artifact_roots: List[str]
+    evaluator_sha256: str
 
-    @field_validator("contract_sha256", "protected_paths_sha256")
+    @field_validator("contract_sha256", "protected_paths_sha256", "evaluator_sha256")
     @classmethod
     def validate_contract_hashes(cls, value: str) -> str:
         if not SHA256_RE.fullmatch(value):
@@ -816,6 +832,12 @@ class SubmissionCheckedPayload(StrictModel):
     submission_artifact: ArtifactRef
     checks: List[CheckResult]
 
+    @model_validator(mode="after")
+    def validate_acceptance(self) -> "SubmissionCheckedPayload":
+        if self.accepted and any(check.status == CheckStatus.FAIL for check in self.checks):
+            raise ValueError("accepted submissions cannot contain failed checks")
+        return self
+
 
 EventPayload = Annotated[
     Union[
@@ -894,12 +916,30 @@ class Event(StrictModel):
             raise ValueError("event_id must match seq")
         if self.event_type.value != self.payload.type:
             raise ValueError("event_type must match payload discriminator")
+        key_parts = self.idempotency_key.split(":")
+        if (
+            len(key_parts) != 5
+            or key_parts[0] != self.run_id
+            or not ID_RE.fullmatch(key_parts[1])
+            or not ID_RE.fullmatch(key_parts[2])
+            or not key_parts[3].isdigit()
+            or str(int(key_parts[3])) != key_parts[3]
+            or not SHA256_RE.fullmatch(key_parts[4])
+        ):
+            raise ValueError(
+                "idempotency_key must be run:experiment:stage:attempt:input_sha256"
+            )
         if self.causation_event_id and int(self.causation_event_id.split("_")[1]) >= self.seq:
             raise ValueError("causation_event_id must refer to an earlier event")
         expected_artifacts = payload_artifacts(self.payload)
         if self.artifact_refs != expected_artifacts:
             raise ValueError(
                 "artifact_refs must exactly match the canonical artifacts nested in payload"
+            )
+        nested_deltas = payload_resource_deltas(self.payload)
+        if any(delta != self.resource_delta for delta in nested_deltas):
+            raise ValueError(
+                "resource_delta must match every resource delta nested in payload"
             )
         return self
 
@@ -930,3 +970,25 @@ def payload_artifacts(payload: EventPayload) -> List[ArtifactRef]:
             raise ValueError("conflicting payload artifacts share artifact_id %r" % item.artifact_id)
         unique[item.artifact_id] = item
     return [unique[key] for key in sorted(unique)]
+
+
+def payload_resource_deltas(payload: EventPayload) -> List[ResourceDelta]:
+    """Collect action-local resource measurements nested in a payload."""
+
+    found: List[ResourceDelta] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, ResourceDelta):
+            found.append(value)
+        elif isinstance(value, BaseModel):
+            for item in value.__dict__.values():
+                visit(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                visit(item)
+
+    visit(payload)
+    return found

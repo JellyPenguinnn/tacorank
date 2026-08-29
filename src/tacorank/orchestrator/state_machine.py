@@ -11,6 +11,7 @@ from ..schemas import (
     EventType,
     ExperimentDecisionKind,
     Fidelity,
+    Integrity,
     Population,
     RecoveryAction,
     RunOutcome,
@@ -52,6 +53,44 @@ def _require(condition: bool, message: str) -> None:
         raise TransitionError(message)
 
 
+def _latest_recoverable_failure(events: List[Event], experiment_id: str) -> Optional[Event]:
+    for event in reversed(events):
+        if event.event_type == EventType.PATCH_CHECKED:
+            result = event.payload.result
+            if result.experiment_id == experiment_id and not result.accepted:
+                return event
+        elif event.event_type == EventType.EXECUTION_FINISHED:
+            result = event.payload.result
+            if result.experiment_id == experiment_id and result.outcome != RunOutcome.SUCCESS:
+                return event
+        elif event.event_type == EventType.OUTPUT_CHECKED:
+            result = event.payload.result
+            if result.experiment_id == experiment_id and not result.accepted:
+                return event
+    return None
+
+
+def _evaluation_request(events: List[Event], result) -> object:
+    output = _last_for_experiment(events, EventType.OUTPUT_CHECKED, result.experiment_id)
+    _require(output is not None and output.payload.result.accepted, "evaluation requires accepted output")
+    _require(output.payload.result.attempt == result.attempt, "evaluation attempt does not match output")
+    finished = _last_for_experiment(events, EventType.EXECUTION_FINISHED, result.experiment_id)
+    _require(
+        finished is not None and finished.payload.result.outcome == RunOutcome.SUCCESS,
+        "evaluation requires a successful execution",
+    )
+    started = _last_for_experiment(events, EventType.EXECUTION_STARTED, result.experiment_id)
+    _require(started is not None, "evaluation has no execution request")
+    request = started.payload.request
+    _require(
+        finished.payload.result.attempt == request.attempt == result.attempt
+        and finished.payload.result.fidelity == request.fidelity
+        and finished.payload.result.patch_commit_sha == request.patch_commit_sha,
+        "evaluation source execution identity mismatch",
+    )
+    return request
+
+
 def validate_transition(events: List[Event], payload: EventPayload) -> None:
     """Reject a payload that cannot legally follow the existing event prefix."""
 
@@ -64,6 +103,21 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
     state = project(events)
     if state.status in (RunStatus.FINALIZED, RunStatus.FAILED):
         raise TransitionError("no events may follow a finalized run")
+    if state.status == RunStatus.STOPPED:
+        _require(
+            event_type in (EventType.EVALUATION_COMPLETED, EventType.FINAL_SELECTED),
+            "only hidden-final evaluation or final selection may follow run.stopped",
+        )
+        if event_type == EventType.EVALUATION_COMPLETED:
+            _require(
+                payload.result.population == Population.HIDDEN_FINAL,
+                "only hidden-final evaluation may follow run.stopped",
+            )
+    if state.status == RunStatus.FINALIZING:
+        _require(
+            event_type == EventType.SUBMISSION_CHECKED,
+            "only submission checking may follow final selection",
+        )
 
     if event_type == EventType.CONTRACT_VERIFIED:
         _require(
@@ -78,6 +132,12 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         _require(
             not _events_of(events, EventType.BASELINE_VERIFIED),
             "baseline may be verified only once",
+        )
+        contract = _events_of(events, EventType.CONTRACT_VERIFIED)[-1].payload
+        _require(
+            payload.evaluation.contract_sha256 == contract.contract_sha256
+            and payload.evaluation.evaluator_sha256 == contract.evaluator_sha256,
+            "baseline evaluation hashes do not match the frozen contract",
         )
     elif event_type == EventType.CONTEXT_CREATED:
         _require(
@@ -184,8 +244,14 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         node = state.experiments.get(decision.experiment_id)
         _require(node is not None and node.status == ExperimentStatus.RECOVERING, "nothing is recoverable")
         _require(
-            decision.repair_attempt <= state.max_repairs_per_experiment,
-            "repair budget exceeded",
+            decision.repair_attempt == node.repair_count + 1
+            and decision.repair_attempt <= state.max_repairs_per_experiment,
+            "repair attempt is not the next available budget slot",
+        )
+        failure = _latest_recoverable_failure(events, decision.experiment_id)
+        _require(
+            failure is not None and decision.failure_event_id == failure.event_id,
+            "recovery decision must reference the latest failure",
         )
         _require(
             decision.remaining_repair_budget
@@ -203,18 +269,63 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             == result.prediction_artifact.artifact_id,
             "Gate B checked a different prediction",
         )
+        _require(
+            finished.payload.result.attempt == result.attempt,
+            "Gate B attempt does not match execution",
+        )
     elif event_type == EventType.EVALUATION_COMPLETED:
         result = payload.result
         if result.experiment_id == "baseline":
             raise TransitionError("baseline evaluation is recorded only inside baseline.verified")
         node = state.experiments.get(result.experiment_id)
-        _require(node is not None and node.status == ExperimentStatus.OUTPUT_VERIFIED, "evaluation requires Gate B")
-        output = _last_for_experiment(events, EventType.OUTPUT_CHECKED, result.experiment_id)
-        _require(output is not None and output.payload.result.accepted, "evaluation requires accepted output")
+        if result.population == Population.HIDDEN_FINAL:
+            _require(
+                node is not None
+                and result.experiment_id == state.best_experiment_id
+                and node.status in (ExperimentStatus.ACCEPTED, ExperimentStatus.OUTPUT_VERIFIED),
+                "hidden-final evaluation requires the selected development best",
+            )
+        else:
+            _require(
+                node is not None and node.status == ExperimentStatus.OUTPUT_VERIFIED,
+                "evaluation requires Gate B",
+            )
+        request = _evaluation_request(events, result)
+        _require(
+            (result.attempt, result.fidelity, result.seed)
+            == (request.attempt, request.fidelity, request.seed),
+            "evaluation result does not match its execution request",
+        )
+        contract = _events_of(events, EventType.CONTRACT_VERIFIED)[-1].payload
+        _require(
+            result.contract_sha256 == contract.contract_sha256
+            and result.evaluator_sha256 == contract.evaluator_sha256,
+            "evaluation hashes do not match the frozen contract",
+        )
         if result.population == Population.HIDDEN_FINAL:
             _require(state.status == RunStatus.STOPPED, "hidden-final is available only after stop")
+            _require(result.fidelity == Fidelity.FULL, "hidden-final requires full fidelity")
         else:
             _require(state.status != RunStatus.STOPPED, "development evaluation cannot occur after stop")
+            expected_population = (
+                Population.INTERNAL_PROXY
+                if request.fidelity == Fidelity.PROXY
+                else Population.PUBLIC_VALIDATION
+            )
+            _require(request.fidelity != Fidelity.SMOKE, "smoke output cannot be evaluated")
+            _require(
+                result.population == expected_population,
+                "evaluation population does not match requested fidelity",
+            )
+        expected_query_index = (
+            state.public_validation_queries + 1
+            if result.population == Population.PUBLIC_VALIDATION
+            else None
+        )
+        _require(
+            result.public_query_index == expected_query_index,
+            "evaluation public query index is not the next frozen index",
+        )
     elif event_type == EventType.EXPERIMENT_DECIDED:
         decision = payload.decision
         node = state.experiments.get(decision.experiment_id)
@@ -229,6 +340,10 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
                 evaluation is not None and evaluation.event_id == decision.evaluation_event_id,
                 "decision cites the wrong evaluation",
             )
+            _require(
+                decision.fidelity_completed == evaluation.payload.result.fidelity,
+                "decision fidelity does not match evaluation",
+            )
             if decision.best_eligible:
                 result = evaluation.payload.result
                 _require(
@@ -236,6 +351,10 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
                     and result.population == Population.PUBLIC_VALIDATION
                     and result.trust.verdict == TrustVerdict.ACCEPTED,
                     "best eligibility requires trusted public full evaluation",
+                )
+                _require(
+                    decision.decision == ExperimentDecisionKind.ACCEPT,
+                    "only an accepted experiment can be best eligible",
                 )
         if decision.decision == ExperimentDecisionKind.PROMOTE:
             _require(decision.next_fidelity is not None, "promotion requires next fidelity")
@@ -245,9 +364,21 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
                     node.confirmation_count < state.max_confirmation_attempts,
                     "confirmation budget exceeded",
                 )
+            else:
+                fidelity_order = {Fidelity.SMOKE: 0, Fidelity.PROXY: 1, Fidelity.FULL: 2}
+                _require(
+                    fidelity_order[decision.next_fidelity]
+                    > fidelity_order[decision.fidelity_completed],
+                    "promotion must move to a higher fidelity",
+                )
     elif event_type == EventType.BEST_UPDATED:
         node = state.experiments.get(payload.experiment_id)
-        _require(node is not None and node.best_eligible, "experiment is not best eligible")
+        _require(
+            node is not None
+            and node.status == ExperimentStatus.ACCEPTED
+            and node.best_eligible,
+            "experiment is not an accepted best-eligible candidate",
+        )
         decision = next(
             (
                 event
@@ -257,12 +388,27 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             ),
             None,
         )
-        _require(decision is not None and decision.payload.decision.best_eligible, "invalid decision reference")
+        _require(
+            decision is not None
+            and decision.event_id == node.terminal_event_id
+            and decision.payload.decision.experiment_id == payload.experiment_id
+            and decision.payload.decision.decision == ExperimentDecisionKind.ACCEPT
+            and decision.payload.decision.best_eligible,
+            "invalid decision reference",
+        )
+        _require(
+            payload.commit_sha == node.latest_commit_sha,
+            "best commit does not match the accepted patch",
+        )
         _require(
             node.metric_set is not None
             and node.metric_set.primary_metric_name == payload.primary_metric_name
             and node.metric_set.primary_score == payload.primary_score,
             "best score does not match evaluation",
+        )
+        _require(
+            state.best_primary_score is None or payload.primary_score > state.best_primary_score,
+            "best update must strictly improve the incumbent",
         )
     elif event_type == EventType.LESSON_RECORDED:
         _require(payload.lesson_id not in state.lessons, "duplicate lesson_id")
@@ -279,6 +425,33 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
     elif event_type == EventType.FINAL_SELECTED:
         _require(state.status == RunStatus.STOPPED, "final selection requires stopped run")
         _require(payload.experiment_id == state.best_experiment_id, "must select latest verified best")
+        _require(payload.commit_sha == state.best_commit_sha, "final commit must match verified best")
+        reproduction = next(
+            (
+                event
+                for event in events
+                if event.event_id == payload.reproduction_evaluation_event_id
+                and event.event_type == EventType.EVALUATION_COMPLETED
+            ),
+            None,
+        )
+        _require(reproduction is not None, "final selection cites unknown reproduction evidence")
+        result = reproduction.payload.result
+        _require(
+            result.experiment_id == payload.experiment_id
+            and result.fidelity == Fidelity.FULL
+            and result.population == Population.PUBLIC_VALIDATION
+            and result.trust.verdict == TrustVerdict.ACCEPTED
+            and result.trust.integrity == Integrity.CLEAN
+            and result.metric_set.primary_score == state.best_primary_score,
+            "final reproduction is not trusted evidence for the verified best",
+        )
+        reproduction_index = events.index(reproduction)
+        request = _evaluation_request(events[:reproduction_index], result)
+        _require(
+            request.patch_commit_sha == payload.commit_sha,
+            "final reproduction did not evaluate the selected commit",
+        )
     elif event_type == EventType.SUBMISSION_CHECKED:
         _require(state.status == RunStatus.FINALIZING, "submission check requires final selection")
 
