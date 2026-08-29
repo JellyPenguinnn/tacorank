@@ -3,3 +3,5 @@
 context/
 __pycache__/
 *.py[cod]
+/.claude/
+/CLAUDE.md
