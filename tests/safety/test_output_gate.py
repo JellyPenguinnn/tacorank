@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 import pytest
+from tacorank.schemas import ArtifactRef, OutputCheckResult
 
 from tacorank.safety import (
     ExecutionSealExpectation,
@@ -318,6 +320,46 @@ def test_gate_b_rejects_rows_wider_than_the_exact_header(tmp_path: Path) -> None
     }
 
 
+def test_gate_b_rejection_emits_person2_canonical_models(tmp_path: Path) -> None:
+    relative = "artifacts/run_1/exp_1/attempt_1/outputs/predictions.csv"
+    encoded = (
+        "row_id,user_id,item_id,score\n"
+        "0,u1,i1,nope\n1,u1,i1,nope\n2,u2,i2,nope\n"
+    ).encode("utf-8")
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(encoded)
+    digest = hashlib.sha256(encoded).hexdigest()
+    artifact_ref = ArtifactRef(
+        artifact_id="sha256-" + digest,
+        kind="predictions",
+        path=relative,
+        sha256=digest,
+        size_bytes=len(encoded),
+        content_type="text/csv",
+    )
+    run_result = Record(
+        run_id="run_1",
+        experiment_id="exp_1",
+        attempt=1,
+        patch_commit_sha=COMMIT_SHA,
+        prediction_artifact=artifact_ref,
+    )
+    gate = OutputGate(
+        repository_root=tmp_path,
+        contract=make_contract(),
+        execution_seal_verifier=accepting_execution_seal,
+    )
+
+    result = asyncio.run(
+        gate.check(run_result, expected_execution=seal_expectation())
+    )
+
+    assert isinstance(result, OutputCheckResult)
+    assert not result.accepted
+    assert result.violations
+
+
 def test_gate_b_detects_collapsed_duplicate_population(tmp_path: Path) -> None:
     collapsed = (
         "row_id,user_id,item_id,score\n"
@@ -325,6 +367,8 @@ def test_gate_b_detects_collapsed_duplicate_population(tmp_path: Path) -> None:
         "1,u2,i2,0.3\n"
     )
     result = check_csv(tmp_path, collapsed)
-    failed_checks = {violation.check for violation in result.violations}
+    failed_checks = {
+        name for name, status in result.checks.items() if status == "fail"
+    }
     assert "duplicate_preservation" in failed_checks
     assert "row_count" in failed_checks

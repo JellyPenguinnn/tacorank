@@ -141,6 +141,8 @@ def build_runner(
     process_launcher: Any = None,
     telemetry_collector_factory: Any = None,
     submission_artifact_resolver: Any = None,
+    artifact_store: Any = None,
+    model_factory: Any = stub_model_factory,
     interval: float = 0.02,
     disk_floor_mb: int = 0,
 ) -> tuple[ExecutionRunner, RecordingSealVerifier]:
@@ -156,7 +158,7 @@ def build_runner(
         )
     runner = ExecutionRunner(
         repository_root=layout.repository,
-        artifacts=layout.store,
+        artifacts=artifact_store or layout.store,
         commands=registry,
         sandbox=layout.sandbox,
         workspace_resolver=lambda run_id, experiment_id: layout.workspace,
@@ -167,7 +169,7 @@ def build_runner(
             disk_free_floor_mb=disk_floor_mb,
             allow_trusted_local_backend=True,
         ),
-        model_factory=stub_model_factory,
+        model_factory=model_factory,
         **keyword_arguments,
     )
     return runner, seal

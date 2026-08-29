@@ -85,7 +85,7 @@ def test_container_runtime_stats_drive_candidate_cpu_and_rss_telemetry(
     sample = collector.sample()
 
     assert sample.cpu_percent == 12.5
-    assert sample.rss_mb == 256.0
+    assert sample.rss_mb == 256
     assert collector.last_cpu_seconds == 0.0
     assert calls[0][0] == list(specification.argv)
     assert calls[0][1]["shell"] is False

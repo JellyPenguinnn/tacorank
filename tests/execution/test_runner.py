@@ -10,9 +10,13 @@ from typing import Any, Iterator
 
 import pytest
 
+from tacorank.artifacts import ArtifactStore
+from tacorank.execution import CanonicalArtifactStoreAdapter
 from tacorank.execution.commands import CommandProfile, CommandRegistry, ExpectedArtifact
 from tacorank.execution.artifacts import verify_execution_seal
+from tacorank.execution.interfaces import default_model_factory
 from tacorank.execution.runner import InvalidRunRequest
+from tacorank.schemas import RunResult, TelemetrySample
 
 from .conftest import (
     ContinuingObserver,
@@ -77,6 +81,37 @@ def test_successful_run_is_sealed_observed_and_hash_addressed(
     )
     assert seal_payload["prediction"]["sha256"] == result.prediction_artifact.sha256
     assert seal_payload["patch_receipt_sha256"] == "c" * 64
+
+
+def test_runner_emits_person2_canonical_models(
+    execution_layout: SimpleNamespace,
+) -> None:
+    code = (
+        "from pathlib import Path; import sys; "
+        "Path(sys.argv[1]).write_text('row_id,score\\n0,0.5\\n')"
+    )
+    registry = command_registry(
+        code,
+        expected=(PREDICTION,),
+        extra_arguments=("{prediction_path}",),
+    )
+    store = CanonicalArtifactStoreAdapter(ArtifactStore(execution_layout.repository))
+    runner, _ = build_runner(
+        execution_layout,
+        registry,
+        artifact_store=store,
+        model_factory=default_model_factory,
+    )
+    observer = ContinuingObserver()
+
+    result = runner.run_sync(request(), observer)
+
+    assert isinstance(result, RunResult)
+    assert result.outcome == "success"
+    assert observer.samples and all(
+        isinstance(sample, TelemetrySample) for sample in observer.samples
+    )
+    assert store.verify(result.prediction_artifact).is_file()
 
 
 def test_nonzero_candidate_failure_returns_code_error(
@@ -178,13 +213,13 @@ def test_submission_check_requires_and_uses_verified_prior_prediction(
                     "from pathlib import Path; import sys; assert Path(sys.argv[1]).read_text().startswith('row_id')",
                     "{submission_prediction_path}",
                 ),
-                allowed_fidelities=("final",),
+                allowed_fidelities=("full",),
             ),
         )
     )
     missing, _ = build_runner(execution_layout, registry)
     rejected = missing.run_sync(
-        request(command_id="submission_check", attempt=2, fidelity="final"),
+        request(command_id="submission_check", attempt=2, fidelity="full"),
         ContinuingObserver(),
     )
     assert rejected.outcome == "contract_error"
@@ -202,7 +237,7 @@ def test_submission_check_requires_and_uses_verified_prior_prediction(
         submission_artifact_resolver=Resolver(),
     )
     result = runner.run_sync(
-        request(command_id="submission_check", attempt=3, fidelity="final"),
+        request(command_id="submission_check", attempt=3, fidelity="full"),
         ContinuingObserver(),
     )
     assert result.outcome == "success"

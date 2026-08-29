@@ -85,7 +85,7 @@ def test_default_registry_has_only_symbolic_reviewed_surface(tmp_path: Path) -> 
         "submission_check",
         context(
             tmp_path,
-            fidelity="final",
+            fidelity="full",
             submission_prediction_path=prediction.resolve(),
         ),
         network_enabled=False,
@@ -244,7 +244,7 @@ def test_registry_profiles_drive_generic_solution_contracts(tmp_path: Path) -> N
         "submission_check",
         context(
             tmp_path / "submission",
-            fidelity="final",
+            fidelity="full",
             submission_prediction_path=prior_prediction.resolve(),
         ),
         network_enabled=False,

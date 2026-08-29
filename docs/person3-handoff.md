@@ -14,20 +14,19 @@ Person 3 owns code under:
 
 Person 2 remains the sole owner of `src/tacorank/schemas.py`, orchestration, event persistence, budgets, and final routing. Person 3 does not choose experiments, classify recovery, compute official metrics, update best refs, or append events.
 
-All production adapters resolve Person 2's shared models at their integration boundary. If a required shared model is unavailable, they fail before invoking Trae or starting a score-bearing process. Test-only factories exercise the Person 3 mechanisms without introducing duplicate production records.
+All production adapters resolve Person 2's shared models at their integration boundary. The branch is tested against the canonical models now present in `src/tacorank/schemas.py`; if a required model is unavailable, it fails before invoking Trae or starting a score-bearing process. `CanonicalArtifactStoreAdapter` connects Person 2's `ArtifactStore` to the execution port without duplicating artifact ownership. Test-only factories exercise the Person 3 mechanisms without introducing replacement production records.
 
 For Person 2 orchestration tests, the public packages also export `FakeCodingWorker`, `FakePatchGate`, `FakeExecutionRunner`, and `FakeOutputGate`. They return caller-supplied canonical shared models and record calls; they never define replacement schemas.
 
 ## Required upstream inputs
 
-Before live integration, Person 2 must supply:
+Before live execution, the controller must supply:
 
-1. the shared models named in the five implementation briefs;
-2. a frozen contract and protected-path manifest with verified SHA-256 digests;
-3. a data manifest and legal data views for each fidelity;
-4. controller-assigned `attempt` and `experiment_spec_event_id` values for every coding action;
-5. an allowlisted symbolic command configuration;
-6. a `HealthObserver` implementation from Person 4.
+1. a frozen contract and protected-path manifest with verified SHA-256 digests;
+2. a data manifest and legal data views for each fidelity;
+3. controller-assigned `attempt` and `experiment_spec_event_id` values for every coding action;
+4. an allowlisted symbolic command configuration;
+5. a `HealthObserver` implementation from Person 4.
 
 The Trae executable/version and provider/model identity are deployment configuration. Credentials may enter only through the approved child-process environment and must never be persisted. Install the separately isolated Python 3.12+ worker from `requirements-trae.txt`; it pins the reviewed upstream source commit. Copy `config/trae-agent.yaml.example` outside Git, choose the controller-approved provider/model, hash the final credential-free file, and pass that exact path/hash through `TraeConfig`.
 
@@ -74,7 +73,7 @@ Registry entries resolve immutable argv, working directory, environment allowlis
 
 The controller-owned `tacorank.execution.solution_cli` is the research-neutral fail-closed CLI; it is deliberately outside the Trae-editable `solution/` tree. A reviewed command registry must supply canonical contract/input/artifact roots and callable entrypoints through `PipelineCommandInputs`. Person 1 supplies the approved research specification, Person 2 freezes and routes contract/data identities and reviewed entrypoints, and Person 5 receives predictions only after Person 3's structural gate; the adapter does not guess missing values or compute metrics.
 
-`submission_check` consumes a previously verified prediction through a controller-provided `SubmissionArtifactResolver`; the runner mounts that exact regular file read-only and never assumes a prediction exists in a fresh attempt. Gate B additionally requires an `ExecutionSealExpectation` built from controller-owned run, command, data-manifest, commit, and Gate A receipt identities. Missing or mismatched seal evidence is rejected before evaluation.
+`submission_check` consumes a previously verified prediction through a controller-provided `SubmissionArtifactResolver`; the runner mounts that exact regular file read-only and never assumes a prediction exists in a fresh attempt. `candidate_final_infer` and `submission_check` use the shared `full` RunRequest fidelity while their distinct command IDs retain final-inference semantics. Gate B additionally requires an `ExecutionSealExpectation` built from controller-owned run, command, data-manifest, commit, and Gate A receipt identities. Missing or mismatched seal evidence is rejected before evaluation.
 
 Production Docker execution requires an attested credential-free image environment and a production-capable hard output-quota verifier. The included `DedicatedFilesystemQuotaVerifier` accepts only an exact dedicated output mount whose total filesystem capacity is within the configured byte cap. GPU commands currently fail closed because the Docker backend cannot prove a hard per-container GPU-memory ceiling; enable them only after integrating an enforcement backend that can provide that guarantee. `TrustedLocalProcessSandbox(..., allow_unsafe_for_tests=True)` is strictly a test adapter, not a production fallback.
 
@@ -91,7 +90,8 @@ Every returned artifact reference contains a normalized relative path, lowercase
 ## Development checks
 
 ```bash
-python -m pip install -e '.[dev]'
+python -m pip install -r requirements-dev.txt
+python -m pip install --no-deps -e .
 python -m pytest tests/coding tests/git tests/safety tests/execution tests/failure_injection tests/integration
 ```
 

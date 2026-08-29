@@ -492,7 +492,7 @@ def default_command_registry(
                 "TACORANK_CANDIDATE_ENTRYPOINT",
                 pipeline_inputs.candidate_entrypoint,
             ),
-            allowed_fidelities=("final",),
+            allowed_fidelities=("full",),
             expected_artifacts=(prediction,),
             container_executable=container_python_executable,
         ),
@@ -515,7 +515,7 @@ def default_command_registry(
                     pipeline_inputs.submission_check_entrypoint
                 ),
             },
-            allowed_fidelities=("final",),
+            allowed_fidelities=("full",),
             container_executable=container_python_executable,
         ),
         CommandProfile(

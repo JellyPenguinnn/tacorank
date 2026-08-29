@@ -49,7 +49,7 @@ def write(path: Path, content: str) -> None:
 
 def artifact(path: str, content: bytes, kind: str) -> Record:
     return Record(
-        artifact_id="sha256:{}".format(hashlib.sha256(content).hexdigest()),
+        artifact_id="sha256-{}".format(hashlib.sha256(content).hexdigest()),
         kind=kind,
         path=path,
         sha256=hashlib.sha256(content).hexdigest(),

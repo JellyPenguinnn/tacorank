@@ -766,7 +766,7 @@ class DockerSandbox:
                 )
             if mount.purpose == "hidden_inference_data" and not (
                 command.command_id == "candidate_final_infer"
-                and configuration.fidelity == "final"
+                and configuration.fidelity == "full"
             ):
                 raise SandboxPolicyError(
                     "hidden inference data is restricted to candidate_final_infer"

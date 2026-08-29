@@ -159,7 +159,7 @@ class TelemetryCollector:
             process_alive=self.process.is_alive(),
             last_output_age_ms=self.process.last_output_age_ms(now),
             cpu_percent=max(0.0, usage.cpu_percent),
-            rss_mb=max(0.0, usage.rss_mb),
+            rss_mb=max(0, int(round(usage.rss_mb))),
             gpu_utilization_percent=gpu_utilization,
             gpu_memory_mb=(
                 None if gpu_memory is None else max(0, int(round(gpu_memory)))
@@ -167,7 +167,7 @@ class TelemetryCollector:
             loss=loss,
             gradient_norm=gradient_norm,
             disk_free_mb=disk_free_mb(self.disk_path),
-            recent_output_tail=output_tail or None,
+            recent_output_tail=output_tail or "",
         )
 
 

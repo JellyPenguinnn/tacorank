@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from tacorank.schemas import PatchCheckResult
 
 from tacorank.safety import (
     InterfaceRequirement,
@@ -95,6 +96,29 @@ def test_gate_a_accepts_recomputed_commit_and_writes_verifiable_receipt(
     assert payload["patch_commit_sha"] == candidate.patch_commit_sha
     assert payload["experiment_root_commit_sha"] == root_commit
     assert payload["cumulative_diff_sha256"] == candidate.diff_sha256
+
+
+def test_gate_a_emits_person2_canonical_models(tmp_path: Path) -> None:
+    repository, artifacts, _, manifest = layout(tmp_path)
+    candidate = commit_candidate(
+        repository,
+        {"solution/model.py": "def train(rows):\n    return list(rows)\n"},
+        artifact_repository_root=artifacts,
+    )
+    gate = make_patch_gate(
+        repository,
+        manifest,
+        artifact_repository_root=artifacts,
+        smoke_check=IsolatedSmokeStub(),
+    )
+    gate.factories = None
+    gate.receipt_store.factories = None
+
+    result = run(gate.check(candidate))
+
+    assert isinstance(result, PatchCheckResult)
+    assert result.accepted
+    assert result.receipt_artifact.artifact_id == "sha256-" + result.receipt_id
 
 
 def test_gate_a_separates_candidate_worktree_from_artifact_repository(

@@ -460,6 +460,20 @@ def test_real_adapter_seals_patch_and_redacted_evidence(
     assert cli_arguments[-2:] == ["--console-type", "simple"]
 
 
+def test_real_adapter_emits_person2_canonical_models(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    from tacorank.schemas import PatchCandidate
+
+    parts = adapter_parts
+    parts.factories = SchemaFactories.from_shared_schemas()
+
+    candidate = asyncio.run(_worker(parts).create_patch(parts.context, parts.spec))
+
+    assert isinstance(candidate, PatchCandidate)
+    assert candidate.diff_artifact.artifact_id == "sha256-" + candidate.diff_sha256
+
+
 def test_repair_is_a_direct_commit_on_the_same_branch(
     adapter_parts: SimpleNamespace,
 ) -> None:

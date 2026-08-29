@@ -398,7 +398,7 @@ def test_submission_mounts_only_the_verified_prior_prediction_read_only(
             "TACORANK_SUBMISSION_CHECK_ENTRYPOINT": "approved.submission:check",
         },
     )
-    config = replace(config, fidelity="final")
+    config = replace(config, fidelity="full")
     sandbox = _docker(
         SandboxPolicy(
             allowed_workspace_roots=(worktree,),
@@ -406,7 +406,7 @@ def test_submission_mounts_only_the_verified_prior_prediction_read_only(
             allowed_read_only_roots=(contract_root,),
         ),
         command_id="submission_check",
-        fidelity="final",
+        fidelity="full",
         mounts=(
             ContainerReadOnlyMount(contract_root, "/contracts", "contract"),
             ContainerReadOnlyMount(
@@ -440,7 +440,7 @@ def test_final_inference_can_receive_exact_hidden_view(tmp_path: Path) -> None:
     command, config, worktree, artifacts = _resolved(
         tmp_path,
         command_id="candidate_final_infer",
-        fidelity="final",
+        fidelity="full",
     )
     inputs = tmp_path / "inputs"
     inputs.mkdir()
@@ -454,7 +454,7 @@ def test_final_inference_can_receive_exact_hidden_view(tmp_path: Path) -> None:
     launch = _docker(
         _policy(worktree, artifacts, inputs),
         command_id="candidate_final_infer",
-        fidelity="final",
+        fidelity="full",
         mounts=(mount,),
     ).prepare(command, config)
     assert any("dst=/inputs/hidden.parquet" in value for value in launch.argv)

@@ -588,7 +588,7 @@ class TraeCodingWorker:
 
     def _artifact_ref(self, artifact: WrittenArtifact, kind: str) -> Any:
         return self._schema_factories().artifact_ref(
-            artifact_id=f"sha256:{artifact.sha256}",
+            artifact_id=f"sha256-{artifact.sha256}",
             kind=kind,
             path=artifact.path,
             sha256=artifact.sha256,

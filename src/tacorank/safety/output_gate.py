@@ -714,9 +714,6 @@ def _score_stats(scores: Sequence[float], total_rows: int) -> Mapping[str, Any]:
             "count": total_rows,
             "finite_count": 0,
             "unique_count": 0,
-            "minimum": None,
-            "maximum": None,
-            "mean": None,
         }
     return {
         "count": total_rows,

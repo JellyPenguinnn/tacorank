@@ -18,6 +18,7 @@ from tacorank.execution.artifacts import (
     verify_execution_seal,
 )
 from tacorank.execution.interfaces import (
+    CanonicalArtifactStoreAdapter,
     ExecutionArtifactStore,
     SharedSchemaUnavailable,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "CommandPolicyError",
     "CommandProfile",
     "CommandRegistry",
+    "CanonicalArtifactStoreAdapter",
     "ContainerMountPolicy",
     "ContainerReadOnlyMount",
     "DenyUnverifiedExecution",

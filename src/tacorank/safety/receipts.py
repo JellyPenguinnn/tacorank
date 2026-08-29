@@ -191,7 +191,7 @@ class ReceiptStore:
             if target.read_bytes() != encoded:
                 raise RuntimeError("receipt path exists with different bytes")
         artifact_payload = {
-            "artifact_id": "sha256:{}".format(receipt_id),
+            "artifact_id": "sha256-{}".format(receipt_id),
             "kind": "verification_receipt",
             "path": relative_path,
             "sha256": receipt_id,
@@ -218,7 +218,7 @@ class ReceiptStore:
             raise ValueError("receipt artifact path does not match its exact identity")
         if _read_field(artifact_ref, "kind") != "verification_receipt":
             raise ValueError("receipt artifact kind is invalid")
-        if _read_field(artifact_ref, "artifact_id") != "sha256:{}".format(receipt_id):
+        if _read_field(artifact_ref, "artifact_id") != "sha256-{}".format(receipt_id):
             raise ValueError("receipt artifact id does not match receipt_id")
         target = self._safe_artifact_path(relative_path)
         if target.is_symlink() or not target.is_file():

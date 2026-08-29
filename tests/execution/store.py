@@ -124,7 +124,7 @@ class TestArtifactStore:
         digest = sha256_file(resolved)
         return self.model_factory(
             "ArtifactRef",
-            artifact_id="sha256:{0}".format(digest),
+            artifact_id="sha256-{0}".format(digest),
             kind=kind,
             path=resolved.relative_to(self.repository_root).as_posix(),
             sha256=digest,

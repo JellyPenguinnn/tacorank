@@ -6,6 +6,8 @@ from typing import Any
 
 import pytest
 
+from tacorank.artifacts import ArtifactStore
+from tacorank.execution import CanonicalArtifactStoreAdapter
 from tacorank.execution.interfaces import (
     SharedSchemaUnavailable,
     default_model_factory,
@@ -23,7 +25,7 @@ def test_artifact_is_hash_addressed_and_verified(execution_layout: Any) -> None:
         kind="other",
     )
 
-    assert reference.artifact_id == "sha256:" + reference.sha256
+    assert reference.artifact_id == "sha256-" + reference.sha256
     assert reference.path.startswith("artifacts/")
     assert store.verify(reference).read_text() == "deterministic\n"
 
@@ -67,11 +69,45 @@ def test_artifact_root_rejects_existing_symlink_components(tmp_path: Path) -> No
         )
 
 
-def test_missing_canonical_artifact_schema_fails_explicitly() -> None:
+def test_canonical_person2_artifact_store_adapter(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    adapter = CanonicalArtifactStoreAdapter(ArtifactStore(repository))
+
+    reference = adapter.write_text(
+        "run_001/exp_0001/attempt_1/result.txt",
+        "canonical\n",
+        kind="other",
+    )
+
+    assert reference.artifact_id == "sha256-" + reference.sha256
+    assert adapter.verify(reference).read_text(encoding="utf-8") == "canonical\n"
+
+
+def test_default_factory_builds_the_canonical_artifact_schema() -> None:
+    reference = default_model_factory(
+        "ArtifactRef",
+        artifact_id="sha256-" + "0" * 64,
+        kind="other",
+        path="artifacts/a",
+        sha256="0" * 64,
+        size_bytes=0,
+        content_type=None,
+    )
+
+    assert reference.artifact_id == "sha256-" + reference.sha256
+
+
+def test_missing_canonical_artifact_schema_fails_explicitly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tacorank import schemas
+
+    monkeypatch.delattr(schemas, "ArtifactRef")
     with pytest.raises(SharedSchemaUnavailable, match="ArtifactRef"):
         default_model_factory(
             "ArtifactRef",
-            artifact_id="sha256:" + "0" * 64,
+            artifact_id="sha256-" + "0" * 64,
             kind="other",
             path="artifacts/a",
             sha256="0" * 64,

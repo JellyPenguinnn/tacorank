@@ -58,7 +58,6 @@ class PolicyViolation:
     def as_payload(self) -> dict:
         payload = {
             "code": self.code.value,
-            "check": self.check,
             "message": self.message,
         }
         if self.path is not None:
