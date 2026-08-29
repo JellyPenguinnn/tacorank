@@ -219,7 +219,7 @@ def setup_live_deployment(
         "deepseek_base_url": DEEPSEEK_BASE_URL,
         "deepseek_api_key_env": "DEEPSEEK_API_KEY",
         "deepseek_timeout_seconds": 120,
-        "deepseek_max_output_tokens": 2000,
+        "deepseek_max_output_tokens": 8192,
         "deepseek_thinking_enabled": True,
         "deepseek_reasoning_effort": "high",
     }

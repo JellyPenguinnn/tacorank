@@ -146,7 +146,10 @@ def test_research_planner_requests_one_deepseek_repair(planner_context):
 
 
 def test_deepseek_provider_rejects_truncated_completion(planner_context):
+    calls = []
+
     def transport(url, headers, payload, timeout):
+        calls.append(payload)
         return response(candidate(), finish_reason="length")
 
     provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
@@ -154,6 +157,33 @@ def test_deepseek_provider_rejects_truncated_completion(planner_context):
 
     with pytest.raises(ProviderError, match="did not finish cleanly"):
         asyncio.run(provider.generate(ProviderRequest(planner_context, choice)))
+
+    assert len(calls) == 2
+    assert calls[0]["thinking"] == {"type": "enabled"}
+    assert calls[1]["thinking"] == {"type": "disabled"}
+    assert "compactly" in calls[1]["messages"][0]["content"]
+
+
+def test_deepseek_provider_retries_length_once_without_thinking(planner_context):
+    responses = [
+        response(candidate(), finish_reason="length", completion_tokens=1_000),
+        response(candidate(), completion_tokens=100),
+    ]
+    calls = []
+
+    def transport(url, headers, payload, timeout):
+        calls.append(payload)
+        return responses.pop(0)
+
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    choice = SearchPolicy().choose(planner_context)
+
+    result = asyncio.run(provider.generate(ProviderRequest(planner_context, choice)))
+
+    assert result["experiment_id"] == "exp_0001"
+    assert len(calls) == 2
+    assert calls[1]["thinking"] == {"type": "disabled"}
+    assert provider.resource_delta.llm_output_tokens == 1_100
 
 
 def test_cli_selects_deepseek_without_putting_secret_in_config(config, monkeypatch):

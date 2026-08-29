@@ -54,6 +54,11 @@ Required JSON fields:
 }
 """
 
+COMPACT_RETRY_INSTRUCTION = """The previous completion reached its output-token limit.
+Return the same required JSON object compactly. Do not include analysis, commentary,
+Markdown, optional fields, or more than two short sentences in any string field.
+"""
+
 
 def _jsonable(value: Any) -> Any:
     if isinstance(value, BaseModel):
@@ -148,7 +153,7 @@ class DeepSeekResearchProvider:
         model: str = "deepseek-v4-pro",
         base_url: str = "https://api.deepseek.com",
         timeout_seconds: int = 120,
-        max_output_tokens: int = 2_000,
+        max_output_tokens: int = 8_192,
         thinking_enabled: bool = True,
         reasoning_effort: str = "high",
         transport: Optional[Transport] = None,
@@ -262,22 +267,43 @@ class DeepSeekResearchProvider:
         self,
         request: ProviderRequest,
         validation_errors: Optional[tuple[str, ...]],
+        *,
+        compact_retry: bool = False,
     ) -> Dict[str, Any]:
         max_tokens = self.max_output_tokens
         if request.output_token_limit is not None:
             max_tokens = min(max_tokens, request.output_token_limit)
+        system_prompt = SYSTEM_PROMPT
+        if compact_retry:
+            system_prompt += "\n" + COMPACT_RETRY_INSTRUCTION
         return {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": self._user_prompt(request, validation_errors)},
             ],
             "response_format": {"type": "json_object"},
             "max_tokens": max_tokens,
             "stream": False,
-            "thinking": {"type": "enabled" if self.thinking_enabled else "disabled"},
+            "thinking": {
+                "type": (
+                    "enabled"
+                    if self.thinking_enabled and not compact_retry
+                    else "disabled"
+                )
+            },
             "reasoning_effort": self.reasoning_effort,
         }
+
+    @staticmethod
+    def _finish_reason(response: Mapping[str, Any]) -> Any:
+        choices = response.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1:
+            return None
+        choice = choices[0]
+        if not isinstance(choice, Mapping):
+            return None
+        return choice.get("finish_reason")
 
     def _record_usage(self, response: Mapping[str, Any]) -> None:
         usage = response.get("usage")
@@ -386,7 +412,6 @@ class DeepSeekResearchProvider:
             and int(estimated) > request.input_token_limit
         ):
             raise ProviderError("planner context exceeds the configured DeepSeek input limit")
-        payload = self._request_payload(request, validation_errors)
         headers = {
             "Authorization": "Bearer " + self.api_key,
             "Content-Type": "application/json",
@@ -398,14 +423,28 @@ class DeepSeekResearchProvider:
             get_value(request.context, "context_id", None),
             bool(validation_errors),
         )
-        response = await asyncio.to_thread(
-            self.transport,
-            self.base_url + "/chat/completions",
-            headers,
-            payload,
-            self.timeout_seconds,
-        )
-        self._record_usage(response)
+        response: Mapping[str, Any]
+        for attempt in range(2):
+            payload = self._request_payload(
+                request,
+                validation_errors,
+                compact_retry=attempt == 1,
+            )
+            response = await asyncio.to_thread(
+                self.transport,
+                self.base_url + "/chat/completions",
+                headers,
+                payload,
+                self.timeout_seconds,
+            )
+            self._record_usage(response)
+            if self._finish_reason(response) != "length" or attempt == 1:
+                break
+            logger.warning(
+                "deepseek_planner_length_retry model=%s context_id=%s",
+                self.model,
+                get_value(request.context, "context_id", None),
+            )
         normalized = self._normalize(self._content(response), request)
         self._last_candidate = normalized
         logger.info(

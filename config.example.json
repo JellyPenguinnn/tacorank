@@ -13,7 +13,7 @@
   "evaluator_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "deepseek_api_key_env": "DEEPSEEK_API_KEY",
   "deepseek_base_url": "https://api.deepseek.com",
-  "deepseek_max_output_tokens": 2000,
+  "deepseek_max_output_tokens": 8192,
   "deepseek_model": "deepseek-v4-pro",
   "deepseek_reasoning_effort": "high",
   "deepseek_thinking_enabled": true,
