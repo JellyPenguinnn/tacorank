@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -75,6 +76,28 @@ def test_download_data_uses_certifi_and_extracts_pinned_archive(
         assert (data / name).read_text(encoding="utf-8") == name + "\n"
 
 
+def test_official_split_loader_does_not_dirty_submodule_with_bytecode(
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / "repository").resolve()
+    starter = root / "kuairand-starter-kit"
+    data = root / "KuaiRand-Pure" / "data"
+    starter.mkdir(parents=True)
+    data.mkdir(parents=True)
+    (starter / "data.py").write_text(
+        "def load(path):\n"
+        "    return {'train': [path], 'valid': [path], 'test': [path]}\n",
+        encoding="utf-8",
+    )
+    previous = sys.dont_write_bytecode
+
+    result = deployment_module._load_official_splits(root, data)
+
+    assert result["train"] == [str(data)]
+    assert sys.dont_write_bytecode is previous
+    assert not (starter / "__pycache__").exists()
+
+
 def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -102,7 +125,8 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
 
     def fake_run(args, *, cwd, label, capture_output=False):
         del cwd, label, capture_output
-        baseline = Path(args[2])
+        assert args[1:3] == ("-B", "submit.py")
+        baseline = Path(args[3])
         with baseline.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(("row_id", "user_id", "video_id", "score"))

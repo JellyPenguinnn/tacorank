@@ -435,6 +435,7 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     _run(
         (
             sys.executable,
+            "-B",
             "submit.py",
             str(official_baseline),
             "--data_dir",
@@ -534,7 +535,12 @@ def _load_official_splits(root: Path, data: Path) -> Mapping[str, Any]:
     if specification is None or specification.loader is None:
         raise DeploymentError("official KuaiRand data loader could not be loaded")
     module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        specification.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module.load(str(data))
 
 
