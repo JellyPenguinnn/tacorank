@@ -24,6 +24,34 @@ EVENT_ID_RE = re.compile(r"^evt_[0-9]{6,}$")
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
+_RUNTIME_ADJUSTMENT_KEYS = frozenset(
+    {"batch_size", "num_workers", "mixed_precision", "timeout_profile"}
+)
+
+
+def _runtime_next_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return value.get("next_value", value.get("value"))
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value
+
+
+def _validate_runtime_mapping(values: Dict[str, Any]) -> Dict[str, Any]:
+    if not set(values).issubset(_RUNTIME_ADJUSTMENT_KEYS):
+        raise ValueError("runtime setting is not contract-approved")
+    for name, raw in values.items():
+        value = _runtime_next_value(raw)
+        valid = (
+            (name == "batch_size" and isinstance(value, int) and not isinstance(value, bool) and value > 0)
+            or (name == "num_workers" and isinstance(value, int) and not isinstance(value, bool) and value >= 0)
+            or (name == "mixed_precision" and isinstance(value, bool))
+            or (name == "timeout_profile" and isinstance(value, str) and bool(value.strip()))
+        )
+        if not valid:
+            raise ValueError("invalid value for runtime setting %s" % name)
+    return values
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(
@@ -429,6 +457,7 @@ class RunRequest(StrictModel):
     memory_limit_mb: int = Field(gt=0)
     gpu_memory_limit_mb: int = Field(ge=0)
     network_enabled: bool = False
+    runtime_settings: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("data_manifest_sha256")
     @classmethod
@@ -436,6 +465,11 @@ class RunRequest(StrictModel):
         if not SHA256_RE.fullmatch(value):
             raise ValueError("data_manifest_sha256 must be lowercase sha256")
         return value
+
+    @field_validator("runtime_settings")
+    @classmethod
+    def validate_runtime_settings(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        return _validate_runtime_mapping(values)
 
 
 class TelemetrySample(StrictModel):
@@ -522,8 +556,23 @@ class RecoveryDecision(StrictModel):
     instructions: NonEmptyStr
     same_error_count: int = Field(ge=0)
     remaining_repair_budget: int = Field(ge=0)
+    runtime_adjustments: Dict[str, Any] = Field(default_factory=dict)
     lesson_candidate: Optional[LessonCandidate] = None
     resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
+
+    @field_validator("runtime_adjustments")
+    @classmethod
+    def validate_runtime_adjustments(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        return _validate_runtime_mapping(values)
+
+    @model_validator(mode="after")
+    def validate_action_adjustment(self) -> "RecoveryDecision":
+        has_adjustment = bool(self.runtime_adjustments)
+        if (self.action == RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING) != has_adjustment:
+            raise ValueError("runtime adjustments must match the recovery action")
+        if has_adjustment and len(self.runtime_adjustments) != 1:
+            raise ValueError("exactly one runtime adjustment is allowed")
+        return self
 
 
 class TrustAssessment(StrictModel):
@@ -636,8 +685,29 @@ class RecoveryContext(ContextDocument):
 class RecoveryPolicyContext(StrictModel):
     run_id: NonEmptyStr
     experiment_id: NonEmptyStr
+    original_experiment_spec: ExperimentSpec
+    current_patch_commit_sha: NonEmptyStr
+    failure_event_id: NonEmptyStr
+    attempt_history: List[Dict[str, Any]] = Field(default_factory=list)
+    repair_attempts_used: int = Field(ge=0)
+    max_repair_attempts: int = Field(ge=0, le=2)
+    same_commit_retries_used: int = Field(ge=0, le=1)
     remaining_repair_budget: int = Field(ge=0)
     previous_error_fingerprints: List[NonEmptyStr] = Field(default_factory=list)
+    remaining_run_budget: Dict[str, int] = Field(default_factory=dict)
+    allowed_runtime_adjustments: Dict[str, Any] = Field(default_factory=dict)
+    current_runtime_settings: Dict[str, Any] = Field(default_factory=dict)
+    contract_summary: NonEmptyStr
+
+    @model_validator(mode="after")
+    def validate_repair_budget(self) -> "RecoveryPolicyContext":
+        if self.remaining_repair_budget != (
+            self.max_repair_attempts - self.repair_attempts_used
+        ):
+            raise ValueError("remaining repair budget is inconsistent")
+        _validate_runtime_mapping(self.allowed_runtime_adjustments)
+        _validate_runtime_mapping(self.current_runtime_settings)
+        return self
 
 
 class EvaluationDecisionContext(StrictModel):

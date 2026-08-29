@@ -4,5 +4,7 @@ context/
 .venv/
 __pycache__/
 *.py[cod]
+/.claude/
+/CLAUDE.md
 .pytest_cache/
 *.egg-info/
