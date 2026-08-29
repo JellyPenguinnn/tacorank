@@ -59,7 +59,7 @@ class RunConfig(StrictModel):
     coding_step_limit: int = Field(default=20, gt=0)
     # ``None`` explicitly disables TacoRank's cumulative coding-trajectory
     # token gate. Provider/model request limits remain independently enforced.
-    coding_token_limit: Optional[int] = Field(default=4_096, gt=0)
+    coding_token_limit: Optional[int] = Field(default=None, gt=0)
     coding_wall_time_limit_seconds: int = Field(default=900, gt=0)
     research_provider: Literal["fake", "deepseek"]
     deepseek_model: NonEmptyStr = "deepseek-v4-flash"

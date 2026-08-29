@@ -66,3 +66,12 @@ def test_coding_token_limit_can_be_explicitly_unbounded(config):
     parsed = RunConfig.model_validate(payload)
 
     assert parsed.coding_token_limit is None
+
+
+def test_coding_token_limit_is_unbounded_by_default(config):
+    payload = config.model_dump(mode="python")
+    payload.pop("coding_token_limit")
+
+    parsed = RunConfig.model_validate(payload)
+
+    assert parsed.coding_token_limit is None
