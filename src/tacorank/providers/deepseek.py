@@ -179,6 +179,38 @@ class DeepSeekResearchProvider:
             token_measurement=TokenMeasurement.PROVIDER,
         )
 
+    def preflight(self) -> None:
+        """Authenticate without spending completion tokens and verify the model exists."""
+
+        request = Request(
+            self.base_url + "/models",
+            headers={"Authorization": "Bearer " + self.api_key},
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=min(self.timeout_seconds, 30)) as response:
+                body = response.read(1024 * 1024)
+        except HTTPError as exc:
+            raise ProviderError(
+                "DeepSeek credential preflight failed with HTTP %d" % exc.code
+            ) from exc
+        except (URLError, TimeoutError) as exc:
+            raise ProviderError("DeepSeek credential preflight could not connect") from exc
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProviderError("DeepSeek model preflight returned invalid JSON") from exc
+        models = payload.get("data") if isinstance(payload, Mapping) else None
+        identifiers = {
+            item.get("id")
+            for item in models or ()
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+        }
+        if self.model not in identifiers:
+            raise ProviderError(
+                "DeepSeek model is not available to this API key: %s" % self.model
+            )
+
     def _context_payload(self, context: Any) -> Dict[str, Any]:
         return {
             "schema_version": get_value(context, "schema_version", "1.0"),

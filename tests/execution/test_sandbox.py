@@ -4,7 +4,9 @@ import os
 import sys
 import hashlib
 import json
+import socket
 import subprocess
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -485,7 +487,7 @@ def test_docker_fails_closed_without_production_output_quota(
             ContainerMountPolicy("candidate_smoke", "smoke", MANIFEST_SHA),
         ),
     )
-    with pytest.raises(SandboxPolicyError, match="hard output disk quota verifier"):
+    with pytest.raises(SandboxPolicyError, match="hard output disk quota limit"):
         sandbox.prepare(command, config)
 
     class TestOnlyAttestation:
@@ -507,6 +509,110 @@ def test_docker_fails_closed_without_production_output_quota(
     )
     with pytest.raises(SandboxPolicyError, match="not a production enforcement"):
         sandbox.prepare(command, config)
+
+
+def test_docker_portable_quota_uses_bounded_tmpfs_and_output_copy(
+    tmp_path: Path,
+) -> None:
+    command, config, worktree, artifacts = _resolved(tmp_path)
+    sandbox = DockerSandbox(
+        _policy(worktree, artifacts),
+        image=IMAGE,
+        docker_executable=Path(sys.executable).resolve(),
+        mount_policies=(
+            ContainerMountPolicy("candidate_smoke", "smoke", MANIFEST_SHA),
+        ),
+        output_quota_max_bytes=OUTPUT_QUOTA_BYTES,
+        image_environment_sha256=IMAGE_ENVIRONMENT_SHA256,
+    )
+
+    launch = sandbox.prepare(command, config)
+
+    mount_values = [
+        launch.argv[index + 1]
+        for index, value in enumerate(launch.argv)
+        if value == "--mount"
+    ]
+    tmpfs_values = [
+        launch.argv[index + 1]
+        for index, value in enumerate(launch.argv)
+        if value == "--tmpfs"
+    ]
+    assert not any("dst=/artifacts" in value for value in mount_values)
+    assert any(
+        value
+        == "/artifacts:rw,nosuid,nodev,noexec,mode=1777,size=%d"
+        % OUTPUT_QUOTA_BYTES
+        for value in tmpfs_values
+    )
+    assert launch.output_quota == OutputQuotaProof(
+        artifact_directory=artifacts,
+        enforced_max_bytes=OUTPUT_QUOTA_BYTES,
+        mechanism="container_tmpfs",
+    )
+    assert launch.runtime_cleanup is not None
+    extraction = launch.runtime_cleanup.output_extraction
+    assert extraction is not None
+    assert extraction.argv[1] == "cp"
+    assert extraction.argv[-1] == "-"
+
+
+def test_docker_preflight_launches_and_cleans_exact_capability_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command, config, worktree, artifacts = _resolved(tmp_path)
+    del command, config
+    calls = []
+    environments = []
+    socket_root = Path(tempfile.mkdtemp(prefix="tr-docker-"))
+    socket_path = socket_root / "docker.sock"
+    docker_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    docker_socket.bind(str(socket_path))
+    socket_path = socket_path.resolve(strict=True)
+    socket_root = socket_path.parent
+
+    def docker_cli(argv: list[str], **kwargs: object):
+        calls.append(argv)
+        environments.append(kwargs.get("env"))
+        if argv[1] == "info":
+            return subprocess.CompletedProcess(argv, 0, stdout="29.0\n", stderr="")
+        if argv[1] == "image":
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(IMAGE_ENVIRONMENT) + "\n", stderr=""
+            )
+        if argv[1] == "run":
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps({"capacity": OUTPUT_QUOTA_BYTES}) + "\n",
+                stderr="",
+            )
+        if argv[1] == "rm":
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr("tacorank.execution.sandbox.subprocess.run", docker_cli)
+    sandbox = DockerSandbox(
+        _policy(worktree, artifacts),
+        image=IMAGE,
+        docker_executable=Path(sys.executable).resolve(),
+        docker_host="unix://" + str(socket_path),
+        output_quota_max_bytes=OUTPUT_QUOTA_BYTES,
+        image_environment_sha256=IMAGE_ENVIRONMENT_SHA256,
+    )
+
+    proof = sandbox.preflight(artifacts)
+
+    assert proof.environment_sha256 == IMAGE_ENVIRONMENT_SHA256
+    assert any(argv[1] == "run" and "--read-only" in argv for argv in calls)
+    assert any(argv[1:3] == ["rm", "--force"] for argv in calls)
+    assert all(
+        environment["DOCKER_HOST"] == "unix://" + str(socket_path)
+        for environment in environments
+    )
+    docker_socket.close()
+    socket_path.unlink()
+    socket_root.rmdir()
 
 
 def test_docker_fails_closed_without_exact_safe_image_environment(

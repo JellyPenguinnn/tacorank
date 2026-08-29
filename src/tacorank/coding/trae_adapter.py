@@ -42,7 +42,7 @@ from .redaction import SecretRedactor
 _REVIEWED_TRAE_SOURCE_REVISION = "e839e559ac61bdd0e057c375dd1dee391fee797d"
 _REVIEWED_TRAE_SOURCE_URL = "https://github.com/bytedance/trae-agent.git"
 _REVIEWED_DOTENV_VERSION = "1.2.2"
-_PINNED_IMAGE_RE = re.compile(r"^[^\s@]+@sha256:([0-9a-f]{64})$")
+_PINNED_IMAGE_RE = re.compile(r"^(?:[^\s@]+@)?sha256:([0-9a-f]{64})$")
 _CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _DEFAULT_REVIEWED_TOOLS = (
     "str_replace_based_edit_tool",
@@ -166,6 +166,8 @@ class TraeConfig:
     repair_allowed_command_ids: Tuple[str, ...]
     approved_environment_names: Tuple[str, ...] = ()
     credential_environment_names: Tuple[str, ...] = ()
+    credential_environment_aliases: Tuple[Tuple[str, str], ...] = ()
+    provider_base_url: Optional[str] = None
     trae_source_revision: Optional[str] = None
     trae_install_root: Optional[Path] = None
     trae_install_identity_file: Optional[Path] = None
@@ -177,6 +179,7 @@ class TraeConfig:
     python_dotenv_metadata_sha256: Optional[str] = None
     docker_image: Optional[str] = None
     docker_executable: Optional[Path] = None
+    docker_host: Optional[str] = None
     trusted_test_mode: bool = False
     reviewed_tool_names: Tuple[str, ...] = _DEFAULT_REVIEWED_TOOLS
     docker_memory_limit_mb: int = 4096
@@ -248,6 +251,50 @@ class TraeCodingWorker:
         )
         self._environment = self._sanitized_environment()
         self._verify_config_file()
+
+    def preflight(self) -> None:
+        """Verify all local production capabilities before ledger bootstrap."""
+
+        missing_credentials = [
+            name
+            for name in self.config.credential_environment_names
+            if not self._source_environment.get(name, "").strip()
+        ]
+        if missing_credentials:
+            raise CodingWorkerError(
+                "TRAE_CREDENTIAL_MISSING",
+                "required coding credential environment is missing: "
+                + ", ".join(sorted(missing_credentials)),
+            )
+        self._schema_factories()
+        self._verify_config_file()
+        self._verify_install_identity()
+        runtime_root, _ = self._verify_runtime_root()
+        self._verify_cli_version(runtime_root)
+        image = self.config.docker_image
+        if image is None:
+            raise CodingWorkerError(
+                "TRAE_ISOLATION_REQUIRED", "production Docker image is unavailable"
+            )
+        match = _PINNED_IMAGE_RE.fullmatch(image)
+        if match is None:
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID", "Docker image is not pinned by an exact digest"
+            )
+        with tempfile.TemporaryDirectory(prefix="tacorank-trae-preflight-") as temporary:
+            docker_config_root = Path(temporary) / "docker-config"
+            docker_config_root.mkdir(mode=0o700)
+            inspected = self._run_docker_cli(
+                ("image", "inspect", "--format", "{{.Id}}", image),
+                docker_config_root=docker_config_root,
+                check=True,
+            )
+        image_id = inspected.stdout.decode("ascii", errors="ignore").strip()
+        if image_id != "sha256:" + match.group(1):
+            raise CodingWorkerError(
+                "TRAE_IMAGE_IDENTITY_MISMATCH",
+                "Docker resolved a different image than the reviewed digest",
+            )
 
     async def create_patch(self, context: Any, spec: Any) -> Any:
         """Create an initial patch on a new experiment branch."""
@@ -1035,6 +1082,8 @@ class TraeCodingWorker:
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
         }
+        if self.config.docker_host is not None:
+            environment["DOCKER_HOST"] = self.config.docker_host
         try:
             result = subprocess.run(
                 (str(executable), *args),
@@ -1157,6 +1206,42 @@ class TraeCodingWorker:
                 "TRAE_CONFIG_INVALID",
                 "credential names must be explicitly approved environment names",
             )
+        if any(
+            not isinstance(item, (tuple, list)) or len(item) != 2
+            for item in config.credential_environment_aliases
+        ):
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID", "invalid credential environment alias"
+            )
+        alias_sources = [source for source, _ in config.credential_environment_aliases]
+        alias_targets = [target for _, target in config.credential_environment_aliases]
+        if (
+            len(alias_sources) != len(set(alias_sources))
+            or len(alias_targets) != len(set(alias_targets))
+            or not set(alias_sources).issubset(config.credential_environment_names)
+        ):
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID",
+                "credential environment aliases must be unique approved credentials",
+            )
+        for source, target in config.credential_environment_aliases:
+            if any(
+                not isinstance(name, str)
+                or re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) is None
+                for name in (source, target)
+            ):
+                raise CodingWorkerError(
+                    "TRAE_CONFIG_INVALID", "invalid credential environment alias"
+                )
+        if config.provider_base_url is not None:
+            if (
+                not isinstance(config.provider_base_url, str)
+                or re.fullmatch(r"https://[^\s/?#]+(?::[0-9]+)?", config.provider_base_url)
+                is None
+            ):
+                raise CodingWorkerError(
+                    "TRAE_CONFIG_INVALID", "provider base URL must be an HTTPS origin"
+                )
         if not config.trusted_test_mode:
             forbidden = sorted(
                 name
@@ -1316,6 +1401,32 @@ class TraeCodingWorker:
                     "TRAE_CONFIG_INVALID",
                     "docker_executable must be an absolute executable regular file named docker",
                 )
+            if config.docker_host is not None:
+                if (
+                    not isinstance(config.docker_host, str)
+                    or not config.docker_host.startswith("unix://")
+                    or "\x00" in config.docker_host
+                ):
+                    raise CodingWorkerError(
+                        "TRAE_CONFIG_INVALID", "Docker host must be a local Unix socket"
+                    )
+                socket_path = Path(config.docker_host[len("unix://") :])
+                try:
+                    socket_metadata = socket_path.stat()
+                except OSError as exc:
+                    raise CodingWorkerError(
+                        "TRAE_CONFIG_INVALID", "Docker host socket is unavailable"
+                    ) from exc
+                if (
+                    not socket_path.is_absolute()
+                    or socket_path.is_symlink()
+                    or socket_path.resolve(strict=True) != socket_path
+                    or not stat.S_ISSOCK(socket_metadata.st_mode)
+                ):
+                    raise CodingWorkerError(
+                        "TRAE_CONFIG_INVALID",
+                        "Docker host must be a canonical local Unix socket",
+                    )
         if config.docker_image is not None and _PINNED_IMAGE_RE.fullmatch(
             config.docker_image
         ) is None:
@@ -1680,10 +1791,14 @@ class TraeCodingWorker:
                 "TRAE_CONFIG_INVALID", "Trae provider alias is not uniquely defined"
             )
         provider = providers.get(provider_alias)
+        expected_provider_keys = {"provider", "api_key"}
+        if self.config.provider_base_url is not None:
+            expected_provider_keys.add("base_url")
         if (
             not isinstance(provider, Mapping)
-            or set(provider) != {"provider", "api_key"}
+            or set(provider) != expected_provider_keys
             or provider.get("provider") != self.config.provider
+            or provider.get("base_url") != self.config.provider_base_url
         ):
             raise CodingWorkerError(
                 "TRAE_CONFIG_INVALID", "Trae YAML provider differs from TraeConfig"
@@ -1707,6 +1822,10 @@ class TraeCodingWorker:
                         "TRAE_CONFIG_INVALID", "approved environment value is invalid"
                     )
                 environment[name] = value
+        for source, target in self.config.credential_environment_aliases:
+            value = environment.get(source)
+            if value is not None:
+                environment[target] = value
         environment["LANG"] = "C.UTF-8"
         environment["LC_ALL"] = "C.UTF-8"
         environment["PYTHONUNBUFFERED"] = "1"
@@ -1719,6 +1838,8 @@ class TraeCodingWorker:
                     "TRAE_CONFIG_INVALID", "Docker executable is required in production"
                 )
             environment["PATH"] = f"{docker_executable.parent}:/usr/bin:/bin"
+            if self.config.docker_host is not None:
+                environment["DOCKER_HOST"] = self.config.docker_host
         return environment
 
     def _action_environment(

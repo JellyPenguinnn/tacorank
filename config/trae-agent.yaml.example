@@ -1,5 +1,6 @@
 # Safe starter configuration for the separately installed Trae worker.
-# Supply OPENAI_API_KEY only through the approved child-process environment.
+# TacoRank maps DEEPSEEK_API_KEY to the OpenAI-compatible client only in the
+# isolated child environment. The key is never written here.
 agents:
   trae_agent:
     enable_lakeview: false
@@ -16,11 +17,12 @@ model_providers:
   openai:
     provider: openai
     api_key: ""
+    base_url: https://api.deepseek.com
 
 models:
   tacorank_coder:
     model_provider: openai
-    model: gpt-4o-mini
+    model: deepseek-v4-pro
     max_tokens: 4096
     temperature: 0
     top_p: 1

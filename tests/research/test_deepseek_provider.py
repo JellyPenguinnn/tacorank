@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+from urllib.error import HTTPError
 
 import pytest
 
@@ -171,3 +173,55 @@ def test_cli_fails_closed_when_deepseek_key_is_missing(config, monkeypatch):
 
     with pytest.raises(ProviderError, match=configured.deepseek_api_key_env):
         _planner_for(configured)
+
+
+def test_deepseek_preflight_authenticates_and_requires_configured_model(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        @staticmethod
+        def read(limit):
+            assert limit == 1024 * 1024
+            return json.dumps(
+                {"object": "list", "data": [{"id": "deepseek-v4-pro"}]}
+            ).encode("utf-8")
+
+    requests = []
+
+    def open_request(request, timeout):
+        requests.append((request, timeout))
+        return Response()
+
+    monkeypatch.setattr("tacorank.providers.deepseek.urlopen", open_request)
+    provider = DeepSeekResearchProvider(api_key="secret-key")
+
+    provider.preflight()
+
+    request, timeout = requests[0]
+    assert request.full_url == "https://api.deepseek.com/models"
+    assert request.headers["Authorization"] == "Bearer secret-key"
+    assert timeout == 30
+
+
+def test_deepseek_preflight_redacts_http_failure_detail(monkeypatch):
+    def reject(request, timeout):
+        del request, timeout
+        raise HTTPError(
+            "https://api.deepseek.com/models",
+            401,
+            "bad secret-key",
+            {},
+            io.BytesIO(b'{"error":"secret-key"}'),
+        )
+
+    monkeypatch.setattr("tacorank.providers.deepseek.urlopen", reject)
+    provider = DeepSeekResearchProvider(api_key="secret-key")
+
+    with pytest.raises(ProviderError, match="HTTP 401") as captured:
+        provider.preflight()
+
+    assert "secret-key" not in str(captured.value)
