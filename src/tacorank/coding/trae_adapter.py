@@ -1962,6 +1962,21 @@ class TraeCodingWorker:
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHON_DOTENV_DISABLED"] = "1"
         environment["GIT_TERMINAL_PROMPT"] = "0"
+        if os.name == "nt":
+            # Python's Windows runtime needs these system values to load DLLs
+            # and resolve subprocesses after the rest of the environment is
+            # intentionally reduced to approved names.
+            for name in (
+                "SystemRoot",
+                "WINDIR",
+                "ComSpec",
+                "PATHEXT",
+                "SystemDrive",
+                "ProgramData",
+            ):
+                value = os.environ.get(name)
+                if value:
+                    environment[name] = value
         if not self.config.trusted_test_mode:
             docker_executable = self.config.docker_executable
             if docker_executable is None:
@@ -1994,6 +2009,10 @@ class TraeCodingWorker:
             "XDG_CONFIG_HOME": temporary_root / "xdg-config",
             "XDG_CACHE_HOME": temporary_root / "xdg-cache",
         }
+        if os.name == "nt":
+            # pathlib.Path.home() uses USERPROFILE on Windows and ignores
+            # HOME. Keep Trae's home isolated from the operator's profile.
+            roots["USERPROFILE"] = temporary_root / "home"
         for path in set(roots.values()):
             path.mkdir(mode=0o700)
         selected_docker_config = docker_config_root or temporary_root / "docker-config"
