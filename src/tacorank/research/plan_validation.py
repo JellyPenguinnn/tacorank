@@ -57,6 +57,10 @@ def _normalized_path(path: Any) -> str | None:
     return str(pure)
 
 
+def _path_is_within(path: str, root: str) -> bool:
+    return path == root or path.startswith(root + "/")
+
+
 def _budget_value(budget: Any, *names: str) -> float | None:
     for name in names:
         value = get_value(budget, name, None)
@@ -172,13 +176,21 @@ class PlanValidator:
             str(item).rstrip("/")
             for item in (get_value(contract, "protected_paths", []) or [])
         }
-        editable = get_value(contract, "editable_paths", None)
+        raw_editable = as_list(get_value(contract, "editable_paths", None))
+        editable = [
+            _normalized_path(str(item).rstrip("/")) for item in raw_editable
+        ]
+        if not raw_editable:
+            errors.append("CONTRACT_EDITABLE_PATHS_MISSING")
+        elif any(path is None for path in editable):
+            errors.append("INVALID_EDITABLE_PATH")
+        editable_roots = [path for path in editable if path is not None]
         for path in normalized_files:
             if path is None:
                 continue
-            if any(path == item or path.startswith(f"{item}/") for item in protected):
+            if any(_path_is_within(path, item) for item in protected):
                 errors.append("PROTECTED_TARGET_PATH")
-            if editable and not any(path == item or path.startswith(f"{item.rstrip('/')}/") for item in editable):
+            if not any(_path_is_within(path, root) for root in editable_roots):
                 errors.append("TARGET_OUTSIDE_EDITABLE_PATHS")
 
         fidelity_plan = [

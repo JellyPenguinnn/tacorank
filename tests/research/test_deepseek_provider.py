@@ -145,6 +145,45 @@ def test_research_planner_requests_one_deepseek_repair(planner_context):
     assert result["resource_delta"].llm_output_tokens == 50
 
 
+def test_research_planner_repairs_target_outside_editable_paths(planner_context):
+    responses = [
+        response(
+            candidate(target_files=["src/tacorank/train.py"]),
+            prompt_tokens=100,
+            completion_tokens=20,
+        ),
+        response(candidate(), prompt_tokens=90, completion_tokens=30),
+    ]
+    requests = []
+
+    def transport(url, headers, payload, timeout):
+        requests.append(payload)
+        return responses.pop(0)
+
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    planner = ResearchPlanner(
+        provider,
+        output_factory=output_factory,
+        input_token_limit=2_000,
+        output_token_limit=1_000,
+    )
+
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result["action"] == "propose"
+    assert result["spec"]["target_files"] == ["solution/loss.py"]
+    assert len(requests) == 2
+    repair_prompt = json.loads(requests[1]["messages"][1]["content"])
+    assert (
+        "TARGET_OUTSIDE_EDITABLE_PATHS"
+        in repair_prompt["repair"]["validation_errors"]
+    )
+    assert repair_prompt["context"]["contract"]["editable_paths"] == [
+        "solution",
+        "research",
+    ]
+
+
 def test_deepseek_provider_rejects_truncated_completion(planner_context):
     calls = []
 

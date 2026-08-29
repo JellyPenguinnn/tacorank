@@ -59,6 +59,25 @@ def test_validator_rejects_protected_path_and_unknown_evidence(planner_context):
     assert "EVIDENCE_OUTSIDE_CONTEXT" in result.errors
 
 
+def test_validator_rejects_target_outside_editable_paths(planner_context):
+    spec = make_spec(planner_context, target_files=["src/tacorank/train.py"])
+
+    result = PlanValidator().validate(spec, planner_context)
+
+    assert not result.accepted
+    assert "TARGET_OUTSIDE_EDITABLE_PATHS" in result.errors
+
+
+def test_validator_fails_closed_without_editable_paths(planner_context):
+    planner_context.contract_summary.editable_paths = []
+
+    result = PlanValidator().validate(make_spec(planner_context), planner_context)
+
+    assert not result.accepted
+    assert "CONTRACT_EDITABLE_PATHS_MISSING" in result.errors
+    assert "TARGET_OUTSIDE_EDITABLE_PATHS" in result.errors
+
+
 def test_validator_rejects_unresolved_contract(planner_context):
     planner_context.contract_summary.resolved = False
 
