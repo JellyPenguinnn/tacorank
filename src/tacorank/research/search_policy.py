@@ -1,12 +1,33 @@
-"""Deterministic two-phase AIDE search policy."""
+"""Deterministic, playbook-driven AIDE search policy."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, Sequence
 
 from .graph_view import ExperimentNodeView, GraphView, as_list, enum_value, get_value
-from .portfolio import ALL_FAMILIES, HIGH_VALUE_FAMILIES
+from .method_eligibility import eligible_method_cards, method_card_map
+from .playbook import REQUIRED_RULE_ORDER
+from .portfolio import HIGH_VALUE_FAMILIES
+
+
+DEFAULT_RULE_ORDER = REQUIRED_RULE_ORDER
+DEFAULT_FAMILY_ORDER = HIGH_VALUE_FAMILIES + (
+    "sampling",
+    "ensemble",
+    "evaluation",
+    "other",
+)
+DEFAULT_METHOD_ORDER = {
+    "objective": ("objective_pairwise_bpr", "objective_listwise_user_softmax"),
+    "temporal_history": ("temporal_history_compact",),
+    "multitask": ("multitask_single_auxiliary",),
+    "duration_bias": ("duration_bias_censored_watch_time",),
+    "features": ("temporal_drift_past_only",),
+    "model": ("model_compact_ranker",),
+    "ensemble": ("ensemble_confirmed_members",),
+    "evaluation": ("evaluation_random_exposure_robustness",),
+}
 
 
 @dataclass(frozen=True)
@@ -21,46 +42,15 @@ class PolicyChoice:
     method_card_id: str | None = None
 
 
+LegalChoiceRanker = Callable[[Sequence[PolicyChoice], Any], PolicyChoice]
+
+
 def _score(node: ExperimentNodeView) -> float:
     return float("-inf") if node.primary_score is None else node.primary_score
 
 
-def _allowed_families(context: Any) -> tuple[str, ...]:
-    contract = get_value(context, "contract_summary", None)
-    allowed = get_value(contract, "allowed_families", None) or get_value(
-        contract, "experiment_families", None
-    )
-    if allowed is None:
-        return ALL_FAMILIES
-    return tuple(family for family in ALL_FAMILIES if family in set(map(str, as_list(allowed))))
-
-
-def _family_history(context: Any) -> list[str]:
-    history = as_list(get_value(context, "family_history", None))
-    values = [str(get_value(item, "family", "")) for item in history]
-    return [value for value in values if value]
-
-
 def _normalized(value: Any) -> str:
     return str(enum_value(value) or "").strip().lower()
-
-
-def _metric_delta(summary: Any, *names: str) -> float | None:
-    deltas = get_value(summary, "metric_deltas", None) or {}
-    if not isinstance(deltas, dict):
-        try:
-            deltas = dict(deltas)
-        except (TypeError, ValueError):
-            deltas = {}
-    lowered = {str(key).lower(): value for key, value in deltas.items()}
-    for name in names:
-        value = lowered.get(name.lower())
-        if value is not None:
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return None
-    return None
 
 
 def _number(value: Any) -> float | None:
@@ -70,172 +60,450 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _metric_delta(summary: Any, *names: str) -> float | None:
+    deltas = get_value(summary, "metric_deltas", None) or {}
+    try:
+        lowered = {str(key).lower(): float(value) for key, value in dict(deltas).items()}
+    except (TypeError, ValueError):
+        return None
+    for name in names:
+        if name.lower() in lowered:
+            return lowered[name.lower()]
+    return None
+
+
+def _allowed_families(context: Any) -> tuple[str, ...]:
+    contract = get_value(context, "contract_summary", None)
+    allowed = get_value(contract, "allowed_families", None)
+    if allowed is None:
+        allowed = get_value(contract, "experiment_families", None)
+    if allowed is None:
+        return ()
+    allowed_set = {str(item) for item in as_list(allowed)}
+    return tuple(family for family in _family_order(context) if family in allowed_set)
+
+
+def _family_history(context: Any) -> list[str]:
+    values = [
+        str(get_value(item, "family", ""))
+        for item in as_list(get_value(context, "family_history", None))
+    ]
+    return [value for value in values if value]
+
+
+def _playbook(context: Any) -> Any:
+    return get_value(context, "playbook", None)
+
+
+def _playbook_is_valid(context: Any) -> bool:
+    playbook = _playbook(context)
+    if playbook is None or str(get_value(playbook, "schema_version", "")) != "1.0":
+        return False
+    rules = tuple(
+        str(item) for item in as_list(get_value(playbook, "rule_order", None))
+    )
+    families = tuple(
+        str(item) for item in as_list(get_value(playbook, "family_order", None))
+    )
+    methods = get_value(playbook, "method_order", None)
+    try:
+        objective_methods = tuple(str(item) for item in as_list(methods.get("objective")))
+    except AttributeError:
+        return False
+    return (
+        rules == REQUIRED_RULE_ORDER
+        and bool(families)
+        and len(families) == len(set(families))
+        and bool(objective_methods)
+        and objective_methods[0] == "objective_pairwise_bpr"
+    )
+
+
+def _rule_order(context: Any) -> tuple[str, ...]:
+    configured = tuple(
+        str(item) for item in as_list(get_value(_playbook(context), "rule_order", None))
+    )
+    return configured or DEFAULT_RULE_ORDER
+
+
+def _family_order(context: Any) -> tuple[str, ...]:
+    configured = tuple(
+        str(item) for item in as_list(get_value(_playbook(context), "family_order", None))
+    )
+    return configured or DEFAULT_FAMILY_ORDER
+
+
+def _method_order(context: Any, family: str) -> tuple[str, ...]:
+    configured = get_value(_playbook(context), "method_order", None) or {}
+    try:
+        values = configured.get(family, ())
+    except AttributeError:
+        values = ()
+    result = tuple(str(item) for item in as_list(values))
+    return result or DEFAULT_METHOD_ORDER.get(family, ())
+
+
+def _method_for_family(
+    context: Any,
+    family: str,
+    *,
+    preferred: str | None = None,
+) -> Any | None:
+    eligible = {
+        str(get_value(card, "method_id", "")): card
+        for card in eligible_method_cards(context, family)
+    }
+    if preferred is not None:
+        return eligible.get(preferred)
+    for method_id in _method_order(context, family):
+        if method_id in eligible:
+            return eligible[method_id]
+    return eligible[min(eligible)] if eligible else None
+
+
+def _cost_tier(value: Any) -> str:
+    tier = get_value(value, "cost_tier", value)
+    normalized = _normalized(tier)
+    return normalized if normalized in {"low", "medium", "high"} else "medium"
+
+
+def _proposal(
+    *,
+    parent: ExperimentNodeView,
+    family: str,
+    card: Any,
+    phase: str,
+    reason_code: str,
+    reason: str,
+) -> PolicyChoice:
+    return PolicyChoice(
+        action="propose",
+        parent=parent,
+        family=family,
+        cost_tier=_cost_tier(get_value(card, "cost_tier", None)),
+        phase=phase,
+        reason_code=reason_code,
+        reason=reason,
+        method_card_id=str(get_value(card, "method_id", "")),
+    )
+
+
+def _blocked(reason_code: str, reason: str, *, phase: str = "playbook_gate") -> PolicyChoice:
+    return PolicyChoice(
+        action="blocked",
+        parent=None,
+        family=None,
+        cost_tier="low",
+        phase=phase,
+        reason_code=reason_code,
+        reason=reason,
+    )
+
+
+def _best_parent(eligible: Sequence[ExperimentNodeView]) -> ExperimentNodeView:
+    return sorted(
+        eligible,
+        key=lambda node: (-_score(node), node.child_count, node.experiment_id),
+    )[0]
+
+
+def _latest_parent(
+    latest: Any, eligible: Sequence[ExperimentNodeView]
+) -> ExperimentNodeView:
+    latest_id = str(get_value(latest, "experiment_id", ""))
+    return next(
+        (node for node in eligible if node.experiment_id == latest_id),
+        _best_parent(eligible),
+    )
+
+
+def _next_independent_choice(
+    context: Any,
+    eligible: Sequence[ExperimentNodeView],
+    allowed: tuple[str, ...],
+    latest_family: str,
+    *,
+    reason_code: str,
+    reason: str,
+) -> PolicyChoice | None:
+    tried = set(_family_history(context))
+    ordered = [
+        family
+        for family in _family_order(context)
+        if family in allowed and family != latest_family
+    ]
+    ordered.sort(key=lambda family: (family in tried, _family_order(context).index(family)))
+    for family in ordered:
+        card = _method_for_family(context, family)
+        if card is not None:
+            return _proposal(
+                parent=_best_parent(eligible),
+                family=family,
+                card=card,
+                phase="playbook",
+                reason_code=reason_code,
+                reason=reason,
+            )
+    return None
+
+
+def _required_method_choice(
+    context: Any,
+    parent: ExperimentNodeView,
+    family: str,
+    method_id: str,
+    *,
+    reason_code: str,
+    reason: str,
+) -> PolicyChoice:
+    if family not in _allowed_families(context):
+        return _blocked(
+            "REQUIRED_FAMILY_UNAVAILABLE",
+            "Playbook family %s is not allowed by the frozen contract." % family,
+        )
+    card = _method_for_family(context, family, preferred=method_id)
+    if card is None:
+        return _blocked(
+            "REQUIRED_METHOD_UNAVAILABLE",
+            "Playbook method %s is not eligible under the frozen method-card contract."
+            % method_id,
+        )
+    return _proposal(
+        parent=parent,
+        family=family,
+        card=card,
+        phase="playbook",
+        reason_code=reason_code,
+        reason=reason,
+    )
+
+
 def _playbook_choice(
     context: Any,
     eligible: list[ExperimentNodeView],
     allowed: tuple[str, ...],
 ) -> PolicyChoice | None:
-    """Apply mandatory evidence routing before generic breadth/depth search."""
-
     history = as_list(get_value(context, "family_history", None))
     if not history:
         return None
     latest = history[-1]
-    trust = get_value(latest, "trust", None)
-    verdict = _normalized(
-        get_value(latest, "trust_verdict", None) or get_value(trust, "verdict", None)
-    )
-    integrity = _normalized(
-        get_value(latest, "integrity", None) or get_value(trust, "integrity", None)
-    )
-    stability = _normalized(
-        get_value(latest, "stability", None) or get_value(trust, "stability", None)
-    )
-    fidelity = _normalized(
-        get_value(latest, "highest_completed_fidelity", None)
-        or get_value(latest, "highest_fidelity_completed", None)
-    )
-
-    if integrity == "compromised" or verdict == "suspicious":
-        return PolicyChoice(
-            action="blocked",
-            parent=None,
-            family=None,
-            cost_tier="low",
-            phase="playbook_gate",
-            reason_code="SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
-            reason="The latest evaluation is suspicious or integrity-compromised.",
-        )
-    if verdict == "no_op":
-        return PolicyChoice(
-            action="blocked",
-            parent=None,
-            family=None,
-            cost_tier="low",
-            phase="playbook_gate",
-            reason_code="NO_OP_REQUIRES_RECOVERY",
-            reason="The latest candidate did not change predictions meaningfully.",
-        )
-    if stability == "unstable":
-        return PolicyChoice(
-            action="blocked",
-            parent=None,
-            family=None,
-            cost_tier="low",
-            phase="playbook_gate",
-            reason_code="UNSTABLE_RESULT_REQUIRES_CONFIRMATION",
-            reason="The latest result requires seed confirmation before branching.",
-        )
-    if fidelity in {"smoke", "proxy"}:
-        return PolicyChoice(
-            action="blocked",
-            parent=None,
-            family=None,
-            cost_tier="low",
-            phase="playbook_gate",
-            reason_code="FIDELITY_PROMOTION_REQUIRED",
-            reason="A smoke or proxy result cannot create a new research branch.",
-        )
-
-    # Metric-shape routing only treats a clean, trusted full result as reward.
-    if verdict not in {"accepted", "verified"} or integrity not in {"", "clean"}:
-        return None
-    if fidelity and fidelity != "full":
-        return None
-
-    latest_id = str(get_value(latest, "experiment_id", ""))
-    best = max(eligible, key=lambda node: (_score(node), -node.child_count))
-    parent = next((node for node in eligible if node.experiment_id == latest_id), best)
+    verdict = _normalized(get_value(latest, "trust_verdict", None))
+    integrity = _normalized(get_value(latest, "integrity", None))
+    stability = _normalized(get_value(latest, "stability", None))
+    fidelity = _normalized(get_value(latest, "highest_completed_fidelity", None))
+    population = _normalized(get_value(latest, "population", None))
+    output_accepted = get_value(latest, "output_accepted", None)
+    contract = get_value(context, "contract_summary", None)
+    epsilon = _number(get_value(contract, "epsilon", 0.002))
+    if epsilon is None:
+        epsilon = 0.002
+    no_op_threshold = _number(
+        get_value(contract, "prediction_change_no_op_threshold", 0.0)
+    ) or 0.0
+    prediction_change = _number(get_value(latest, "prediction_change", None))
+    parent_delta = _number(get_value(latest, "parent_delta", None))
+    gauc_delta = _metric_delta(latest, "gauc")
+    ndcg_delta = _metric_delta(latest, "ndcg@5", "ndcg")
     family = str(get_value(latest, "family", ""))
     method_ids = {
         str(item) for item in as_list(get_value(latest, "method_card_ids", None))
     }
-    hypothesis = " ".join(
-        str(get_value(latest, field, ""))
-        for field in ("hypothesis_summary", "hypothesis", "change_summary")
-    ).lower()
-    is_pairwise = (
-        "objective_pairwise_bpr" in method_ids
-        or (family == "objective" and ("pairwise" in hypothesis or "bpr" in hypothesis))
+    is_pairwise = "objective_pairwise_bpr" in method_ids
+    clean_full_public = (
+        verdict in {"accepted", "verified"}
+        and integrity == "clean"
+        and fidelity == "full"
+        and population == "public_validation"
+        and output_accepted is True
+        and prediction_change is not None
     )
-    contract = get_value(context, "contract_summary", None)
-    epsilon = _number(get_value(contract, "epsilon", 0.002)) or 0.002
-    gauc_delta = _metric_delta(latest, "gauc", "GAUC")
-    ndcg_delta = _metric_delta(latest, "ndcg@5", "nDCG@5", "ndcg")
-    parent_delta = _number(get_value(latest, "parent_delta", None))
-    prediction_change = _number(get_value(latest, "prediction_change", None))
+    parent = _latest_parent(latest, eligible)
 
-    if is_pairwise and "objective" in allowed:
+    for rule in _rule_order(context):
+        if rule == "output_rejected" and output_accepted is False:
+            return _blocked(
+                "OUTPUT_CHECK_REJECTED",
+                "The latest output failed structural or contract validation and must recover.",
+            )
+        if rule == "suspicious_or_compromised" and (
+            integrity == "compromised" or verdict == "suspicious"
+        ):
+            return _blocked(
+                "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
+                "The latest evaluation is suspicious or integrity-compromised.",
+            )
+        if rule == "no_op" and (
+            verdict == "no_op"
+            or (
+                prediction_change is not None
+                and prediction_change <= no_op_threshold
+            )
+        ):
+            return _blocked(
+                "NO_OP_REQUIRES_RECOVERY",
+                "The latest candidate did not change predictions meaningfully.",
+            )
+        if rule == "unstable" and stability == "unstable":
+            return _blocked(
+                "UNSTABLE_RESULT_REQUIRES_CONFIRMATION",
+                "The latest result requires seed confirmation before branching.",
+            )
+        if rule == "non_public_or_incomplete" and (
+            output_accepted is not True
+            or fidelity != "full"
+            or population != "public_validation"
+            or verdict not in {"accepted", "verified"}
+            or integrity != "clean"
+            or stability not in {"single_seed", "confirmed", "not_applicable"}
+            or prediction_change is None
+        ):
+            return _blocked(
+                "RESULT_NOT_BRANCHABLE",
+                "Only a completed public-validation result may drive a research branch.",
+            )
+        if rule == "promotion_required" and fidelity in {"smoke", "proxy"}:
+            return _blocked(
+                "FIDELITY_PROMOTION_REQUIRED",
+                "A smoke or proxy result must be promoted or rejected before branching.",
+            )
+        if not clean_full_public:
+            continue
         if (
-            gauc_delta is not None
+            rule == "pairwise_gauc_up_ndcg_down"
+            and is_pairwise
+            and gauc_delta is not None
             and ndcg_delta is not None
             and gauc_delta > epsilon
             and ndcg_delta < -epsilon
         ):
-            return PolicyChoice(
-                action="propose",
-                parent=parent,
-                family="objective",
-                cost_tier="medium",
-                phase="playbook",
+            return _required_method_choice(
+                context,
+                parent,
+                "objective",
+                "objective_listwise_user_softmax",
                 reason_code="PAIRWISE_GAUC_UP_NDCG_DOWN",
-                reason=(
-                    "Pairwise ranking improved GAUC but hurt nDCG@5; follow with "
-                    "one listwise or top-weighted objective experiment."
-                ),
-                method_card_id="objective_listwise_user_softmax",
+                reason="Pairwise improved GAUC but hurt nDCG@5; test one listwise objective.",
             )
         if (
-            gauc_delta is not None
+            rule == "pairwise_gauc_down_ndcg_up"
+            and is_pairwise
+            and gauc_delta is not None
+            and ndcg_delta is not None
+            and gauc_delta < -epsilon
+            and ndcg_delta > epsilon
+        ):
+            return _required_method_choice(
+                context,
+                parent,
+                "objective",
+                "objective_listwise_user_softmax",
+                reason_code="PAIRWISE_GAUC_DOWN_NDCG_UP",
+                reason="Pairwise improved top-5 placement but hurt broad ordering; test a bounded hybrid/listwise objective.",
+            )
+        if (
+            rule == "pairwise_both_up"
+            and is_pairwise
+            and gauc_delta is not None
             and ndcg_delta is not None
             and gauc_delta > epsilon
             and ndcg_delta > epsilon
         ):
-            return PolicyChoice(
-                action="propose",
-                parent=parent,
-                family="objective",
-                cost_tier="medium",
-                phase="playbook",
+            return _required_method_choice(
+                context,
+                parent,
+                "objective",
+                "objective_pairwise_bpr",
                 reason_code="PAIRWISE_BOTH_METRICS_UP",
-                reason="Confirm or atomically refine the successful objective mechanism.",
-                method_card_id="objective_pairwise_bpr",
+                reason="Confirm or atomically refine the successful pairwise mechanism.",
             )
         if (
-            parent_delta is not None
+            rule == "meaningful_no_gain"
+            and parent_delta is not None
             and abs(parent_delta) <= epsilon
             and prediction_change is not None
-            and prediction_change > 0.0
-            and "temporal_history" in allowed
+            and prediction_change > no_op_threshold
         ):
-            return PolicyChoice(
-                action="propose",
-                parent=best,
-                family="temporal_history",
-                cost_tier="medium",
-                phase="playbook",
-                reason_code="PAIRWISE_MEANINGFUL_NO_GAIN",
-                reason="Pairwise predictions changed without a trusted gain; move to compact history.",
-                method_card_id="temporal_history_compact",
+            preferred = (
+                "temporal_history_compact" if is_pairwise else None
             )
+            if preferred and "temporal_history" in allowed:
+                return _required_method_choice(
+                    context,
+                    _best_parent(eligible),
+                    "temporal_history",
+                    preferred,
+                    reason_code="MEANINGFUL_CHANGE_NO_GAIN",
+                    reason="Predictions changed without trusted gain; move to compact temporal history.",
+                )
+            return _next_independent_choice(
+                context,
+                eligible,
+                allowed,
+                family,
+                reason_code="MEANINGFUL_CHANGE_NO_GAIN",
+                reason="Predictions changed without trusted gain; move to the next independent mechanism.",
+            ) or _blocked("NO_ELIGIBLE_METHOD", "No independent eligible method remains.")
+        if (
+            rule == "trusted_improvement"
+            and parent_delta is not None
+            and parent_delta > epsilon
+        ):
+            if family not in allowed:
+                return _blocked(
+                    "REQUIRED_FAMILY_UNAVAILABLE",
+                    "The successful family is no longer allowed by the frozen contract.",
+                )
+            preferred = next(iter(method_ids), None) if len(method_ids) == 1 else None
+            card = _method_for_family(context, family, preferred=preferred)
+            if card is None:
+                return _blocked(
+                    "REQUIRED_METHOD_UNAVAILABLE",
+                    "No eligible method can confirm or refine the successful family.",
+                )
+            return _proposal(
+                parent=parent,
+                family=family,
+                card=card,
+                phase="playbook",
+                reason_code="TRUSTED_FULL_IMPROVEMENT",
+                reason="Deepen the same family after a trusted full improvement.",
+            )
+        if (
+            rule == "trusted_regression"
+            and parent_delta is not None
+            and parent_delta < -epsilon
+        ):
+            return _next_independent_choice(
+                context,
+                eligible,
+                allowed,
+                family,
+                reason_code="TRUSTED_FULL_REGRESSION",
+                reason="The tested mechanism regressed beyond tolerance; move to an independent method.",
+            ) or _blocked("NO_ELIGIBLE_METHOD", "No independent eligible method remains.")
     return None
 
 
-def _cost_tier(node: ExperimentNodeView) -> str:
-    value = node.actual_cost
-    tier = get_value(value, "cost_tier", None)
-    if tier is not None:
-        return _normalized(tier)
-    return _normalized(value) if value is not None else "medium"
-
-
 class SearchPolicy:
-    """Select an eligible parent and family without mutable state."""
+    """Select a legal parent and method; optional rankers see legal choices only."""
 
-    def __init__(self, frontier_limit: int = 3):
+    def __init__(
+        self,
+        frontier_limit: int = 3,
+        legal_choice_ranker: LegalChoiceRanker | None = None,
+    ):
         if frontier_limit < 1:
             raise ValueError("frontier_limit must be positive")
         self.frontier_limit = frontier_limit
+        self.legal_choice_ranker = legal_choice_ranker
+
+    def _rank(self, candidates: Sequence[PolicyChoice], context: Any) -> PolicyChoice:
+        if not candidates:
+            raise ValueError("cannot rank an empty legal choice set")
+        if self.legal_choice_ranker is None:
+            return candidates[0]
+        ranked = self.legal_choice_ranker(tuple(candidates), context)
+        return ranked if ranked in candidates else candidates[0]
 
     def choose(self, context: Any) -> PolicyChoice:
         graph = GraphView.from_context(context)
@@ -243,24 +511,34 @@ class SearchPolicy:
         allowed = _allowed_families(context)
         history = _family_history(context)
         if not eligible:
-            return PolicyChoice(
-                action="blocked",
-                parent=None,
-                family=None,
-                cost_tier="low",
+            return _blocked(
+                "NO_ELIGIBLE_PARENT",
+                "No verified full-fidelity parent is available in the planner context.",
                 phase="none",
-                reason_code="NO_ELIGIBLE_PARENT",
-                reason="No verified full-fidelity parent is available in the planner context.",
             )
         if not allowed:
-            return PolicyChoice(
-                action="blocked",
-                parent=None,
-                family=None,
-                cost_tier="low",
+            return _blocked(
+                "NO_LEGAL_FAMILY",
+                "The frozen contract exposes no legal experiment family.",
                 phase="none",
-                reason_code="NO_LEGAL_FAMILY",
-                reason="The frozen contract exposes no legal experiment family.",
+            )
+        if not method_card_map(context):
+            return _blocked(
+                "NO_METHOD_CARDS",
+                "The planner context contains no validated method cards.",
+                phase="none",
+            )
+        if _playbook(context) is None:
+            return _blocked(
+                "PLAYBOOK_MISSING",
+                "The planner context is missing the validated improvement playbook.",
+                phase="none",
+            )
+        if not _playbook_is_valid(context):
+            return _blocked(
+                "PLAYBOOK_INVALID",
+                "The planner context contains an invalid improvement playbook.",
+                phase="none",
             )
 
         routed = _playbook_choice(context, eligible, allowed)
@@ -268,52 +546,56 @@ class SearchPolicy:
             return routed
 
         tried = set(history)
-        breadth_family = next(
-            (family for family in HIGH_VALUE_FAMILIES if family in allowed and family not in tried),
-            None,
-        )
-        if breadth_family:
-            baseline = next((node for node in eligible if node.is_root), None)
-            parent = baseline or min(eligible, key=lambda node: node.experiment_id)
-            return PolicyChoice(
-                action="propose",
-                parent=parent,
-                family=breadth_family,
-                cost_tier="medium",
-                phase="breadth",
-                reason_code="BREADTH_FAMILY_PROBE",
-                reason=(
-                    f"Probe untried high-value family {breadth_family} from "
-                    f"{parent.experiment_id}."
-                ),
+        baseline = next((node for node in eligible if node.is_root), None)
+        breadth_parent = baseline or min(eligible, key=lambda node: node.experiment_id)
+        breadth: list[PolicyChoice] = []
+        for family in allowed:
+            if family in tried:
+                continue
+            card = _method_for_family(context, family)
+            if card is None:
+                continue
+            breadth.append(
+                _proposal(
+                    parent=breadth_parent,
+                    family=family,
+                    card=card,
+                    phase="breadth",
+                    reason_code="BREADTH_FAMILY_PROBE",
+                    reason="Probe untried method %s in family %s from %s."
+                    % (get_value(card, "method_id", ""), family, breadth_parent.experiment_id),
+                )
             )
+        if breadth:
+            return self._rank(breadth, context)
 
         frontier = sorted(
             eligible,
-            key=lambda node: (
-                -_score(node),
-                node.child_count,
-                node.experiment_id,
-            ),
+            key=lambda node: (-_score(node), node.child_count, node.experiment_id),
         )[: self.frontier_limit]
-        recent = history[-2:]
-        # Diversity decides what to try, not whether to discard the strongest
-        # verified parent. The latter caused a family-less baseline root to beat
-        # a higher-scoring frontier candidate.
         parent = frontier[0]
-        family = next(
-            (candidate for candidate in allowed if candidate not in recent),
-            allowed[0],
-        )
-        return PolicyChoice(
-            action="propose",
-            parent=parent,
-            family=family,
-            cost_tier="low" if _cost_tier(parent) == "low" else "medium",
-            phase="depth",
-            reason_code="EVIDENCE_GUIDED_DEPTH",
-            reason=(
-                f"Select {parent.experiment_id} using trusted score, child count, "
-                "family diversity and deterministic tie-breaking."
-            ),
+        recent = set(history[-2:])
+        depth: list[PolicyChoice] = []
+        for family in allowed:
+            card = _method_for_family(context, family)
+            if card is None:
+                continue
+            depth.append(
+                _proposal(
+                    parent=parent,
+                    family=family,
+                    card=card,
+                    phase="depth",
+                    reason_code="EVIDENCE_GUIDED_DEPTH",
+                    reason="Select %s using trusted score and legal method %s."
+                    % (parent.experiment_id, get_value(card, "method_id", "")),
+                )
+            )
+        depth.sort(key=lambda choice: (choice.family in recent, allowed.index(choice.family)))
+        if depth:
+            return self._rank(depth, context)
+        return _blocked(
+            "NO_ELIGIBLE_METHOD",
+            "No candidate method satisfies status, data, prerequisite, prohibition and family gates.",
+            phase="none",
         )

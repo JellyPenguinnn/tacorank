@@ -1,0 +1,47 @@
+name: Person 1 research planner
+
+on:
+  pull_request:
+    paths:
+      - "research/**"
+      - "src/tacorank/agents/**"
+      - "src/tacorank/context/**"
+      - "src/tacorank/providers/**"
+      - "src/tacorank/research/**"
+      - "src/tacorank/config.py"
+      - "src/tacorank/schemas.py"
+      - "tests/context/**"
+      - "tests/research/**"
+      - "tests/config/**"
+      - "tests/schemas/**"
+      - "requirements*.txt"
+      - ".github/workflows/person1.yml"
+  push:
+    branches: [person1, fix-research-plan]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip install --no-deps -e .
+      - run: >-
+          python -m pytest
+          tests/research
+          tests/context
+          tests/config
+          tests/schemas

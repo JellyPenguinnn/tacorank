@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"temporal_history_compact","family":"temporal_history","status":"candidate","tags":["sequence","history","temporal"],"cost_tier":"medium","sources":[]}
+{"schema_version":"1.0","method_id":"temporal_history_compact","family":"temporal_history","status":"candidate","tags":["sequence","history","temporal"],"cost_tier":"medium","prerequisites":["strict_temporal_cutoff"],"allowed_data":["train_interactions","date","user_id","video_id","author_id"],"prohibition_conditions":["unreliable_event_ordering"],"sources":[]}
 ```
 
 ## Mechanism

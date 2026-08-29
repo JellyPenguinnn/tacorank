@@ -6,6 +6,52 @@
 **Primary score:** contract-defined mean of GAUC and nDCG@5
 **Core rule:** one experiment changes one research mechanism.
 
+```json
+{
+  "schema_version": "1.0",
+  "rule_order": [
+    "output_rejected",
+    "suspicious_or_compromised",
+    "no_op",
+    "unstable",
+    "promotion_required",
+    "non_public_or_incomplete",
+    "pairwise_gauc_up_ndcg_down",
+    "pairwise_gauc_down_ndcg_up",
+    "pairwise_both_up",
+    "meaningful_no_gain",
+    "trusted_improvement",
+    "trusted_regression"
+  ],
+  "family_order": [
+    "objective",
+    "temporal_history",
+    "multitask",
+    "duration_bias",
+    "features",
+    "model",
+    "sampling",
+    "ensemble",
+    "evaluation",
+    "other"
+  ],
+  "method_order": {
+    "objective": ["objective_pairwise_bpr", "objective_listwise_user_softmax"],
+    "temporal_history": ["temporal_history_compact"],
+    "multitask": ["multitask_single_auxiliary"],
+    "duration_bias": ["duration_bias_censored_watch_time"],
+    "features": ["temporal_drift_past_only"],
+    "model": ["model_compact_ranker"],
+    "ensemble": ["ensemble_confirmed_members"],
+    "evaluation": ["evaluation_random_exposure_robustness"]
+  }
+}
+```
+
+The JSON block above is the executable control surface. The harness validates
+its rule identifiers and ordering before building `PlannerContext`; the prose
+below explains the evidence semantics and research rationale for humans.
+
 This file tells the Planner how to turn verified evaluation feedback into the
 next research direction. It is seed knowledge, not dynamic memory. During a
 run it is read-only: outcomes belong in `events.jsonl`, reusable conclusions

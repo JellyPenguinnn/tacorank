@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -52,7 +53,13 @@ def repository(tmp_path: Path) -> Path:
     (tmp_path / "PROTECTED_PATHS.md").write_text(
         "# Protected\n\ncontract/\ntests/evaluation/\n", encoding="utf-8"
     )
-    (tmp_path / "research/methods").mkdir(parents=True)
+    source_research = Path(__file__).parents[1] / "research"
+    (tmp_path / "research").mkdir(parents=True)
+    shutil.copy2(
+        source_research / "CURRENT_RUN_IMPROVEMENT_PLAN.md",
+        tmp_path / "research/CURRENT_RUN_IMPROVEMENT_PLAN.md",
+    )
+    shutil.copytree(source_research / "methods", tmp_path / "research/methods")
     (tmp_path / "artifacts").mkdir()
     (tmp_path / "runs").mkdir()
     return tmp_path
