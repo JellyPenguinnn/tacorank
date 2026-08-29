@@ -165,6 +165,10 @@ def test_coding_prompt_is_exact_bounded_and_credential_free() -> None:
     assert '"hypothesis": "Add a bounded candidate feature."' in prompt
     assert "Do not choose or reinterpret the hypothesis" in prompt
     assert "max_provider_tokens: `50`" in prompt
+    assert '"authoritative_target_files": [\n    "solution/model.py"\n  ]' in prompt
+    assert "do not list the repository root" in prompt
+    assert "controller-owned post-patch checks" in prompt
+    assert "then call task_done" in prompt
 
     changed_spec = dict(spec, hypothesis="different")
     with pytest.raises(PromptContractError, match="differs"):

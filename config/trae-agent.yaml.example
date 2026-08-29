@@ -5,7 +5,7 @@ agents:
   trae_agent:
     enable_lakeview: false
     model: tacorank_coder
-    max_steps: 20
+    max_steps: 40
     tools:
       - str_replace_based_edit_tool
       - task_done
@@ -22,8 +22,8 @@ model_providers:
 models:
   tacorank_coder:
     model_provider: openai
-    model: deepseek-v4-pro
-    max_tokens: 4096
+    model: deepseek-v4-flash
+    max_tokens: 32768
     temperature: 0
     top_p: 1
     top_k: 0

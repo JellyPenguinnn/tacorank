@@ -120,6 +120,30 @@ export DEEPSEEK_API_KEY='your-key'
 
 Planning calls DeepSeek directly. The pinned Trae version uses an OpenAI-compatible client, so TacoRank maps the same key to that child process and fixes its base URL to DeepSeek. The key is never written to YAML, JSON, prompts, logs, trajectories, fixtures, or artifacts.
 
+### Trae-first validation (no dataset or ML training)
+
+Person 3 can validate the production coding path independently before preparing KuaiRand-Pure or running a training command. This path uses `deepseek-v4-flash` with explicit high reasoning, the pinned Trae source, and the same hardened Docker edit boundary as a full run.
+
+From a clean tracked checkout:
+
+```bash
+tacorank setup-trae
+tacorank trae-preflight \
+  --config .tacorank/trae/trae-deployment.json \
+  --local-only
+
+export DEEPSEEK_API_KEY='your-rotated-key'
+tacorank trae-preflight \
+  --config .tacorank/trae/trae-deployment.json
+tacorank trae-run-example \
+  --config .tacorank/trae/trae-deployment.json \
+  --input examples/trae/experiment-spec.json
+```
+
+`setup-trae` installs and hash-attests the reviewed Trae runtime, builds a digest-pinned CPU Docker image, and writes a credential-free deployment file under ignored `.tacorank/`. The local-only preflight executes the reviewed edit tool through its read-only mount without reading an API key. The full preflight additionally authenticates to DeepSeek and verifies that `deepseek-v4-flash` is available. The example consumes a canonical `ExperimentSpec`, creates a real Trae patch in a disposable worktree, and applies Gate A; it deliberately stops before any dataset access, ML training, evaluation, or ledger creation.
+
+Docker is required for the production Trae coding worker because all edit tools run inside the hardened container. It is not required for a raw DeepSeek API request. On macOS, Docker Desktop or a Docker-compatible daemon such as Colima is sufficient.
+
 ## KuaiRand-Pure starter kit and data
 
 Starter resources are tracked in `KuaiRand-Pure/` and through the `kuairand-starter-kit` submodule. The dataset itself is intentionally excluded from Git. Obtain it separately and follow [`docs/KUAIRAND_STARTER_KIT.md`](docs/KUAIRAND_STARTER_KIT.md) for the official split, baseline, evaluation, and submission contracts.

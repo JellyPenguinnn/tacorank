@@ -100,11 +100,11 @@ class RunConfig(StrictModel):
     target_interface_excerpts: Dict[str, str] = Field(
         default_factory=lambda: dict(DEFAULT_TARGET_INTERFACE_EXCERPTS)
     )
-    coding_step_limit: int = Field(default=20, gt=0)
+    coding_step_limit: int = Field(default=40, gt=0)
     # ``None`` explicitly disables TacoRank's cumulative coding-trajectory
     # token gate. Provider/model request limits remain independently enforced.
     coding_token_limit: Optional[int] = Field(default=None, gt=0)
-    coding_wall_time_limit_seconds: int = Field(default=900, gt=0)
+    coding_wall_time_limit_seconds: int = Field(default=1800, gt=0)
     research_provider: Literal["deepseek"] = "deepseek"
     deepseek_model: NonEmptyStr = "deepseek-v4-flash"
     deepseek_base_url: NonEmptyStr = "https://api.deepseek.com"

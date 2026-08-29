@@ -8,10 +8,12 @@ from enum import Enum
 import json
 import logging
 import re
+import ssl
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import certifi
 from pydantic import BaseModel
 
 from ..research.duplicate_detection import compute_duplicate_key
@@ -21,6 +23,8 @@ from .research_provider import ProviderError, ProviderRequest
 
 
 logger = logging.getLogger(__name__)
+
+_TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 Transport = Callable[[str, Mapping[str, str], Mapping[str, Any], int], Mapping[str, Any]]
 
@@ -131,7 +135,11 @@ def _default_transport(
         method="POST",
     )
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:
+        with urlopen(
+            request,
+            timeout=timeout_seconds,
+            context=_TLS_CONTEXT,
+        ) as response:
             body = response.read()
     except HTTPError as exc:
         detail = exc.read(2_048).decode("utf-8", errors="replace").strip()
@@ -200,7 +208,11 @@ class DeepSeekResearchProvider:
             method="GET",
         )
         try:
-            with urlopen(request, timeout=min(self.timeout_seconds, 30)) as response:
+            with urlopen(
+                request,
+                timeout=min(self.timeout_seconds, 30),
+                context=_TLS_CONTEXT,
+            ) as response:
                 body = response.read(1024 * 1024)
         except HTTPError as exc:
             raise ProviderError(

@@ -533,7 +533,13 @@ class PatchGate:
         root = validated_repository(self.repository_root)
         status = _git_output(
             root,
-            ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+            (
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ),
         )
         if status:
             raise GitOperationError(

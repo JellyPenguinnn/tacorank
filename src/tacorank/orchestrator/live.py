@@ -94,14 +94,6 @@ _INPUT_COMMAND_IDS = frozenset(
     }
 )
 _POPULATION_KEYS = frozenset({"smoke", "proxy", "full"})
-_TRAE_PATH_KEYS = (
-    "config_file",
-    "docker_executable",
-    "trae_install_root",
-    "trae_install_identity_file",
-    "trae_runtime_root",
-    "python_dotenv_metadata_file",
-)
 
 
 class LiveAdapterConfig(StrictModel):
@@ -214,24 +206,8 @@ class LiveAdapters:
 def _trae_config_from_mapping(values: Mapping[str, Any]) -> TraeConfig:
     """Normalize JSON-shaped live values at the Trae dataclass boundary."""
 
-    normalized = dict(values)
     try:
-        normalized["command_prefix"] = tuple(normalized["command_prefix"])
-        for key in _TRAE_PATH_KEYS:
-            if normalized.get(key) is not None:
-                normalized[key] = Path(normalized[key])
-        for key in (
-            "repair_allowed_command_ids",
-            "approved_environment_names",
-            "credential_environment_names",
-        ):
-            if key in normalized:
-                normalized[key] = tuple(normalized[key])
-        if "credential_environment_aliases" in normalized:
-            normalized["credential_environment_aliases"] = tuple(
-                tuple(item) for item in normalized["credential_environment_aliases"]
-            )
-        return TraeConfig(**normalized)
+        return TraeConfig.from_mapping(values)
     except (KeyError, TypeError, ValueError) as error:
         raise ContractError("live Trae configuration has invalid field types") from error
 

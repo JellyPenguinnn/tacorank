@@ -149,6 +149,42 @@ def build_parser() -> argparse.ArgumentParser:
     setup_live.add_argument("--run-id", default="run_001")
     setup_live.add_argument("--download-data", action="store_true")
 
+    setup_trae = commands.add_parser(
+        "setup-trae",
+        help="prepare the production Trae coding path without benchmark data",
+    )
+    setup_trae.add_argument("--repository-root", type=Path, default=Path.cwd())
+    setup_trae.add_argument(
+        "--deployment-dir", type=Path, default=Path(".tacorank/trae")
+    )
+    setup_trae.add_argument("--runtime-dir", type=Path)
+    setup_trae.add_argument("--python312", type=Path)
+    setup_trae.add_argument("--docker", type=Path)
+
+    trae_preflight = commands.add_parser(
+        "trae-preflight",
+        help="verify Docker, pinned Trae, credential, and DeepSeek model access",
+    )
+    trae_preflight.add_argument("--config", type=Path, required=True)
+    trae_preflight.add_argument(
+        "--local-only",
+        action="store_true",
+        help="verify the pinned Trae and Docker runtime without reading a credential",
+    )
+
+    trae_example = commands.add_parser(
+        "trae-run-example",
+        help="run one real Trae patch and Gate A without ML training",
+    )
+    trae_example.add_argument("--config", type=Path, required=True)
+    trae_example.add_argument(
+        "--input",
+        type=Path,
+        default=Path("examples/trae/experiment-spec.json"),
+    )
+    trae_example.add_argument("--run-id", default="trae_trial_001")
+    trae_example.add_argument("--experiment-id", default="exp_0001")
+
     run = commands.add_parser("run", help="start a frozen run")
     run.add_argument("--config", type=Path, required=True)
     run.add_argument(
@@ -193,6 +229,48 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 run_id=args.run_id,
                 download_data=args.download_data,
             )
+            print(json.dumps(result, sort_keys=True))
+            return 0
+
+        if args.command == "setup-trae":
+            from .deployment import setup_trae_deployment
+
+            root = args.repository_root.resolve(strict=True)
+            python312 = args.python312 or Path(shutil.which("python3.12") or "python3.12")
+            docker = args.docker or Path(shutil.which("docker") or "docker")
+            runtime = args.runtime_dir or (
+                Path(".tacorank-runtime") / (root.name + "-trae")
+            )
+            result = setup_trae_deployment(
+                repository_root=root,
+                deployment_directory=args.deployment_dir,
+                runtime_directory=runtime,
+                python312=python312,
+                docker_executable=docker,
+            )
+            print(json.dumps(result, sort_keys=True))
+            return 0
+
+        if args.command in {"trae-preflight", "trae-run-example"}:
+            from .coding.standalone import (
+                TraeStandaloneConfig,
+                preflight_trae,
+                run_example_sync,
+            )
+
+            trae_config = TraeStandaloneConfig.load(args.config)
+            if args.command == "trae-preflight":
+                result = preflight_trae(
+                    trae_config,
+                    local_only=args.local_only,
+                )
+            else:
+                result = run_example_sync(
+                    trae_config,
+                    args.input,
+                    run_id=args.run_id,
+                    experiment_id=args.experiment_id,
+                )
             print(json.dumps(result, sort_keys=True))
             return 0
 

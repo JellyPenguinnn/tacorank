@@ -192,3 +192,110 @@ def test_patch_trae_read_only_attach_reuses_pre_mounted_tools(
     assert "test -x /agent_tools/edit_tool" in patched
     assert "test -x /agent_tools/json_edit_tool" in patched
     compile(patched, str(docker_manager), "exec")
+
+
+def test_patch_trae_deepseek_reasoning_is_explicit_and_continuous(
+    tmp_path: Path, monkeypatch
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    client = site_packages / "trae_agent/utils/llm_clients/openai_client.py"
+    client.parent.mkdir(parents=True)
+    client.write_text(
+        '''class Client:
+    def request(self, model_config):
+        return self.client.responses.create(
+            max_output_tokens=model_config.max_tokens,
+        )
+
+    def record(self, response):
+        for output_block in response.output:
+            if output_block.type == "function_call":
+                pass
+            elif output_block.type == "message":
+                content = "".join(
+                    content_block.text
+                    for content_block in output_block.content
+                    if content_block.type == "output_text"
+                )
+
+        if content != "":
+            self.message_history.append(
+                EasyInputMessageParam(content=content, role="assistant", type="message")
+            )
+''',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        deployment_module, "_trae_site_packages", lambda runtime: site_packages
+    )
+
+    deployment_module._patch_trae_deepseek_reasoning(tmp_path / "runtime")
+
+    patched = client.read_text(encoding="utf-8")
+    assert deployment_module.TRAE_DEEPSEEK_REASONING_MARKER in patched
+    assert 'reasoning={"effort": "high"}' in patched
+    assert 'output_block.type == "reasoning"' in patched
+    assert "self.message_history.append(reasoning_item)" in patched
+    assert "content += message_content" in patched
+    assert patched.index("content += message_content") > patched.index(
+        'output_block.type == "function_call"'
+    )
+    assert 'if content != "":' not in patched
+    compile(patched, str(client), "exec")
+
+
+def test_patch_trae_docker_edit_tool_filters_and_quotes_arguments(
+    tmp_path: Path, monkeypatch
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    executor = site_packages / "trae_agent/tools/docker_tool_executor.py"
+    executor.parent.mkdir(parents=True)
+    executor.write_text(
+        '''import json
+import os
+
+class Executor:
+    def run(self, processed_args, sub_command):
+                executable_path = f"{self._docker_manager.CONTAINER_TOOLS_PATH}/edit_tool"
+                cmd_parts = [executable_path, sub_command]
+
+                for key, value in processed_args.items():
+                    if key == "command" or value is None:
+                        continue
+                    if isinstance(value, list):
+                        str_value = " ".join(map(str, value))
+                        cmd_parts.append(f"--{key} {str_value}")
+                    else:
+                        cmd_parts.append(f"--{key} '{str(value)}'")
+
+                command_to_run = " ".join(cmd_parts)
+''',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        deployment_module, "_trae_site_packages", lambda runtime: site_packages
+    )
+
+    deployment_module._patch_trae_docker_edit_tool(tmp_path / "runtime")
+
+    patched = executor.read_text(encoding="utf-8")
+    assert deployment_module.TRAE_DOCKER_EDIT_TOOL_MARKER in patched
+    assert '"view": ("path", "view_range")' in patched
+    assert "for key in command_arguments" in patched
+    assert "shlex.join(cmd_parts)" in patched
+    compile(patched, str(executor), "exec")
+
+
+def test_generated_trae_yaml_uses_v4_flash() -> None:
+    document = deployment_module._trae_yaml()
+
+    assert "model: deepseek-v4-flash" in document
+    assert "deepseek-v4-pro" not in document
+
+
+def test_trae_responses_sdk_is_exactly_pinned() -> None:
+    requirements = (
+        Path(__file__).parents[2] / "requirements-trae.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "openai==3.6.0" in requirements.splitlines()

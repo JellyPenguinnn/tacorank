@@ -7,6 +7,7 @@ from urllib.error import HTTPError
 
 import pytest
 
+from tacorank.providers import deepseek as deepseek_module
 from tacorank.agents.research_planner import ResearchPlanner
 from tacorank.cli import _planner_for
 from tacorank.providers.deepseek import DeepSeekResearchProvider
@@ -305,8 +306,8 @@ def test_deepseek_preflight_authenticates_and_requires_configured_model(monkeypa
 
     requests = []
 
-    def open_request(request, timeout):
-        requests.append((request, timeout))
+    def open_request(request, timeout, context):
+        requests.append((request, timeout, context))
         return Response()
 
     monkeypatch.setattr("tacorank.providers.deepseek.urlopen", open_request)
@@ -314,15 +315,17 @@ def test_deepseek_preflight_authenticates_and_requires_configured_model(monkeypa
 
     provider.preflight()
 
-    request, timeout = requests[0]
+    request, timeout, context = requests[0]
     assert request.full_url == "https://api.deepseek.com/models"
     assert request.headers["Authorization"] == "Bearer secret-key"
     assert timeout == 30
+    assert context is deepseek_module._TLS_CONTEXT
 
 
 def test_deepseek_preflight_redacts_http_failure_detail(monkeypatch):
-    def reject(request, timeout):
+    def reject(request, timeout, context):
         del request, timeout
+        assert context is deepseek_module._TLS_CONTEXT
         raise HTTPError(
             "https://api.deepseek.com/models",
             401,

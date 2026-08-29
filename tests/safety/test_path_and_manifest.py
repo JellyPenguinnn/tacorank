@@ -62,6 +62,37 @@ def test_manifest_detects_protected_content_change(tmp_path: Path) -> None:
     assert verification.current_contract_sha256 != manifest.contract_sha256
 
 
+def test_git_manifest_ignores_controller_runtime_files_but_binds_tracked_tree(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    write(repository / ".gitignore", "contract/runtime/\n")
+    git(repository, "add", ".gitignore")
+    git(
+        repository,
+        "-c",
+        "user.name=TacoRank Test",
+        "-c",
+        "user.email=tacorank@invalid",
+        "commit",
+        "-m",
+        "ignore controller runtime",
+    )
+    write(repository / "contract/runtime/ledger.jsonl", "controller-only\n")
+    manifest = ProtectedManifest.capture(
+        repository,
+        ("contract",),
+        data_manifest_sha256=DATA_SHA,
+        require_minimum=False,
+    )
+
+    write(repository / "contract/runtime/ledger.jsonl", "appended-controller-only\n")
+    assert manifest.verify().valid
+    write(repository / "contract/COMPETITION.md", "tampered\n")
+    assert not manifest.verify().valid
+
+
 def test_markdown_manifest_is_hash_bound_and_requires_paths(tmp_path: Path) -> None:
     write(tmp_path / "contract" / "COMPETITION.md", "sealed\n")
     manifest_path = tmp_path / "PROTECTED_PATHS.md"
