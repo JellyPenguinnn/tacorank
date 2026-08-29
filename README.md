@@ -4,7 +4,7 @@ TacoRank is a deterministic, evidence-tracked harness for autonomous recommender
 
 The repository is organized for five developers with one canonical schema and explicit typed handoffs. The controller owns orchestration; role components return values and never compete for control.
 
-> **Current main status:** All five roles have implemented and tested component logic. Person 1 can use either a fake planner or the real DeepSeek provider; the other command-line adapters remain deterministic fakes. This is an integration-ready research harness—not yet a live autonomous training deployment.
+> **Current main status:** All five role implementations are merged. Person 1 can use either a fake planner or the real DeepSeek provider; the other command-line adapters remain deterministic fakes. One post-merge Gate B/shared-schema compatibility failure remains, so the combined branch is not yet fully integration-green or ready for live autonomous training.
 
 ## System architecture
 
@@ -40,7 +40,7 @@ Generated status, lesson, summary, context, and chart files are derived views—
 | --- | --- | --- | --- |
 | Person 1 | Evidence-grounded experiment planning and deterministic search policy | `src/tacorank/agents/`, `src/tacorank/research/`, `src/tacorank/providers/`, `research/` | Implemented with fake and DeepSeek providers |
 | Person 2 | Shared schemas, append-only memory, contexts, orchestration, budgets, replay, resume and CLI | `src/tacorank/schemas.py`, `memory/`, `context/`, `orchestrator/`, `artifacts.py`, `cli.py` | P0 harness and fake lifecycle implemented |
-| Person 3 | Trae coding worker, Git worktrees, Gate A, sandboxed execution, telemetry, artifacts and Gate B | `src/tacorank/coding/`, `git/`, `safety/`, `execution/` | Implemented and integration-tested; live runtime validation remains |
+| Person 3 | Trae coding worker, Git worktrees, Gate A, sandboxed execution, telemetry, artifacts and Gate B | `src/tacorank/coding/`, `git/`, `safety/`, `execution/` | Implemented; one post-Person-5 schema compatibility fix remains |
 | Person 4 | SRE monitoring, failure classification, bounded recovery and operational reflection | `src/tacorank/sre/`, `src/tacorank/recovery/` | Implemented and failure-injection tested |
 | Person 5 | Protected evaluation, trust decisions, stability, final selection and research reflection | `src/tacorank/evaluation/`, `reflection/`, `reporting/`, `benchmarks/kuairand_pure/` | Implemented and covered by evaluator, reflection and reporting tests |
 
@@ -171,6 +171,7 @@ tacorank finalize --run-id run_001 --repository-root .
 
 ## Current limitations
 
+- The Gate B rejection path does not yet populate the ordered row-identity and prediction hashes now required by the shared `OutputCheckResult` schema; the merged full suite therefore has one failing cross-component test.
 - The outer CLI can use a real DeepSeek planner, but coding, execution, recovery, output checking, and evaluation are still wired to fake adapters.
 - `solution/` does not yet contain the real candidate training pipeline.
 - Live Trae, production Docker, GPU and full-data runs have not been validated by this repository snapshot.
