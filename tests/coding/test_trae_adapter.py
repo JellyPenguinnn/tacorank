@@ -1026,3 +1026,35 @@ def test_production_rejects_docker_path_through_symlinked_parent(
         _worker(parts)
     assert failure.value.code == "TRAE_CONFIG_INVALID"
     assert not docker.with_name("docker.log").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Docker Desktop uses docker.exe on Windows")
+def test_production_accepts_windows_docker_executable_name(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    _, docker = _production_worker(parts)
+    docker_exe = docker.with_name("docker.exe")
+    docker_exe.write_bytes(docker.read_bytes())
+    docker_exe.chmod(0o755)
+    parts.config = replace(parts.config, docker_executable=docker_exe)
+
+    # Construction performs the complete production configuration validation;
+    # no Docker daemon is needed for this boundary test.
+    _worker(parts)
+
+
+def test_production_sanitized_path_uses_host_separator(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    _production_worker(parts)
+    worker = _worker(parts)
+
+    path_entries = worker._sanitized_environment()["PATH"].split(os.pathsep)
+    assert path_entries[0] == str(parts.config.docker_executable.parent)
+    if os.name == "nt":
+        assert os.pathsep == ";"
+        assert path_entries[1:] == os.environ.get("PATH", "").split(os.pathsep)
+    else:
+        assert path_entries[1:] == ["/usr/bin", "/bin"]

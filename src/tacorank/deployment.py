@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, Mapping, Sequence, Tuple
 
 from .coding import hash_trae_runtime_package
+from .docker_host import normalize_local_docker_host
 from .evaluation.proxy import split_validation_indices
 
 
@@ -703,16 +704,10 @@ def _discover_docker_host(docker: Path, root: Path) -> str:
         cwd=root,
         label="Docker context discovery",
     )
-    if not value.startswith("unix://") or "\x00" in value:
-        raise DeploymentError("production Docker must use a local Unix socket")
-    socket_path = Path(value[len("unix://") :])
     try:
-        resolved = socket_path.resolve(strict=True)
-    except OSError as error:
-        raise DeploymentError("Docker context Unix socket is unavailable") from error
-    if not resolved.is_socket():
-        raise DeploymentError("Docker context endpoint is not a Unix socket")
-    return "unix://" + str(resolved)
+        return normalize_local_docker_host(value)
+    except ValueError as error:
+        raise DeploymentError(str(error)) from error
 
 
 def _download_data(root: Path, data: Path) -> None:

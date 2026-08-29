@@ -38,6 +38,35 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
 )
+_HARD_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+
+def _windows_taskkill(process_id: int, *, force: bool) -> bool:
+    """Terminate a Windows process tree without invoking a shell.
+
+    ``os.killpg`` has no Windows equivalent.  The launcher creates a
+    dedicated process group there, and ``taskkill /T`` is the native way to
+    apply termination to the leader and its descendants.  A failed command
+    is deliberately reported to the caller so it can fall back to the
+    ``Popen`` leader operation.
+    """
+
+    # Windows has no portable group-level graceful signal.  Without /F,
+    # console children can ignore the request and leave descendants alive;
+    # use the bounded forced tree operation for both termination paths.
+    command = ["taskkill.exe", "/PID", str(process_id), "/T", "/F"]
+    try:
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
 
 
 def redact_runtime_output(text: str) -> str:
@@ -148,7 +177,7 @@ class ManagedProcess:
             except ProcessLaunchError as error:
                 cleanup_error = error
         if self._group_exists():
-            self._signal_group(signal.SIGKILL)
+            self._signal_group(_HARD_KILL_SIGNAL, force=True)
         try:
             return_code = self._process.wait(timeout=max(1.0, grace + 0.5))
         except subprocess.TimeoutExpired as error:
@@ -171,7 +200,7 @@ class ManagedProcess:
             while self._group_exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             if self._group_exists():
-                self._signal_group(signal.SIGKILL)
+                self._signal_group(_HARD_KILL_SIGNAL, force=True)
         self._close_reader()
         state_error: Optional[ProcessLaunchError] = None
         try:
@@ -201,17 +230,20 @@ class ManagedProcess:
     def close_after_termination(self) -> None:
         self._close_reader()
 
-    def _signal_group(self, requested_signal: signal.Signals) -> None:
+    def _signal_group(
+        self, requested_signal: signal.Signals, *, force: bool = False
+    ) -> None:
         if os.name == "posix":
             try:
                 os.killpg(self.process_group_id, requested_signal)
             except ProcessLookupError:
                 return
         elif self._process.poll() is None:
-            if requested_signal == signal.SIGTERM:
-                self._process.terminate()
-            else:
-                self._process.kill()
+            if not _windows_taskkill(self.process_group_id, force=force):
+                if force:
+                    self._process.kill()
+                else:
+                    self._process.terminate()
 
     def _group_exists(self) -> bool:
         if os.name != "posix":
@@ -702,7 +734,13 @@ def _open_exclusive_log(
         identity = os.fstat(descriptor)
         if not stat.S_ISREG(identity.st_mode):
             raise ProcessLaunchError("runtime log destination is not a regular file")
-        os.fchmod(descriptor, 0o600)
+        # Windows does not expose fchmod; the exclusive create above still
+        # binds this handle to the reviewed path before applying its closest
+        # available permission mode.
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        else:
+            os.chmod(str(destination), 0o600)
         handle = os.fdopen(descriptor, "w", encoding="utf-8", newline="")
     except BaseException:
         os.close(descriptor)

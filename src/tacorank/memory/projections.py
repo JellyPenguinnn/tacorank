@@ -117,6 +117,12 @@ def project(events: Iterable[Event]) -> RunState:
                 node.status = ExperimentStatus.RECOVERING
                 node.last_error_fingerprint = result.error_fingerprint
                 state.phase = "recovery"
+        elif event.event_type == EventType.ADAPTER_FAILED:
+            result = payload.result
+            node = _node(state, result.experiment_id)
+            node.status = ExperimentStatus.RECOVERING
+            node.last_error_fingerprint = result.error_fingerprint
+            state.phase = "recovery"
         elif event.event_type == EventType.RECOVERY_DECIDED:
             decision = payload.decision
             node = _node(state, decision.experiment_id)

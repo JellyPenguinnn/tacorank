@@ -73,6 +73,7 @@ it never repeats an expensive external action.
 | `patch.checked` | Gate A checks and receipt |
 | `execution.started` | Legal `RunRequest` |
 | `execution.finished` | `RunResult` and measured resources |
+| `adapter.failed` | Typed adapter-boundary failure evidence for recovery |
 | `recovery.decided` | Person 4 `RecoveryDecision` |
 | `output.checked` | Gate B `OutputCheckResult` |
 | `evaluation.completed` | Person 5 metrics and trust assessment |

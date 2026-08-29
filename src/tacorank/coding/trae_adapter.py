@@ -33,6 +33,7 @@ from tacorank.git.patches import (
 )
 from tacorank.git.refs import GitOperationError, require_ancestor, resolve_commit
 from tacorank.git.worktrees import WorktreeManager, WorktreeRecord
+from tacorank.docker_host import normalize_local_docker_host
 
 from .output_parser import ParsedTrajectory, TrajectoryParseError, parse_trajectory_file
 from .prompts import build_coding_prompt, build_repair_prompt, prompt_sha256
@@ -864,7 +865,7 @@ class TraeCodingWorker:
             "--workdir",
             "/workspace",
             "--user",
-            f"{os.getuid()}:{os.getgid()}",
+            _container_user(),
             "--init",
             "--ulimit",
             "nofile=256:256",
@@ -1035,7 +1036,7 @@ class TraeCodingWorker:
                 "readonly,bind-propagation=rprivate"
             ),
             "--user",
-            f"{os.getuid()}:{os.getgid()}",
+            _container_user(),
             "--pull",
             "never",
             "--entrypoint",
@@ -1192,8 +1193,13 @@ class TraeCodingWorker:
             raise CodingWorkerError(
                 "TRAE_ISOLATION_REQUIRED", "Docker executable is not configured"
             )
+        docker_path = str(executable.parent)
         environment = {
-            "PATH": f"{executable.parent}:/usr/bin:/bin",
+            "PATH": (
+                os.pathsep.join((docker_path, os.environ.get("PATH", "")))
+                if os.name == "nt"
+                else f"{docker_path}:/usr/bin:/bin"
+            ),
             "HOME": str(docker_config_root),
             "DOCKER_CONFIG": str(docker_config_root),
             "LANG": "C.UTF-8",
@@ -1533,7 +1539,8 @@ class TraeCodingWorker:
                 or not docker_path.is_file()
                 or docker_path.is_symlink()
                 or docker_path.resolve(strict=True) != docker_path
-                or docker_path.name != "docker"
+                or docker_path.name
+                not in (("docker", "docker.exe") if os.name == "nt" else ("docker",))
                 or not os.access(docker_path, os.X_OK)
             ):
                 raise CodingWorkerError(
@@ -1541,31 +1548,13 @@ class TraeCodingWorker:
                     "docker_executable must be an absolute executable regular file named docker",
                 )
             if config.docker_host is not None:
-                if (
-                    not isinstance(config.docker_host, str)
-                    or not config.docker_host.startswith("unix://")
-                    or "\x00" in config.docker_host
-                ):
-                    raise CodingWorkerError(
-                        "TRAE_CONFIG_INVALID", "Docker host must be a local Unix socket"
-                    )
-                socket_path = Path(config.docker_host[len("unix://") :])
                 try:
-                    socket_metadata = socket_path.stat()
-                except OSError as exc:
-                    raise CodingWorkerError(
-                        "TRAE_CONFIG_INVALID", "Docker host socket is unavailable"
-                    ) from exc
-                if (
-                    not socket_path.is_absolute()
-                    or socket_path.is_symlink()
-                    or socket_path.resolve(strict=True) != socket_path
-                    or not stat.S_ISSOCK(socket_metadata.st_mode)
-                ):
+                    normalize_local_docker_host(config.docker_host)
+                except ValueError as exc:
                     raise CodingWorkerError(
                         "TRAE_CONFIG_INVALID",
-                        "Docker host must be a canonical local Unix socket",
-                    )
+                        str(exc),
+                    ) from exc
         if config.docker_image is not None and _PINNED_IMAGE_RE.fullmatch(
             config.docker_image
         ) is None:
@@ -1979,7 +1968,12 @@ class TraeCodingWorker:
                 raise CodingWorkerError(
                     "TRAE_CONFIG_INVALID", "Docker executable is required in production"
                 )
-            environment["PATH"] = f"{docker_executable.parent}:/usr/bin:/bin"
+            if os.name == "nt":
+                environment["PATH"] = os.pathsep.join(
+                    (str(docker_executable.parent), os.environ.get("PATH", ""))
+                )
+            else:
+                environment["PATH"] = f"{docker_executable.parent}:/usr/bin:/bin"
             if self.config.docker_host is not None:
                 environment["DOCKER_HOST"] = self.config.docker_host
         return environment
@@ -2198,6 +2192,11 @@ def _run_bounded_process(
     output_limited = False
     with Path(output_path).open("wb") as output:
         try:
+            process_options = (
+                {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                if os.name == "nt"
+                else {"start_new_session": True}
+            )
             process = subprocess.Popen(
                 list(command),
                 cwd=str(cwd),
@@ -2206,8 +2205,8 @@ def _run_bounded_process(
                 stdout=output,
                 stderr=subprocess.STDOUT,
                 shell=False,
-                start_new_session=True,
                 close_fds=True,
+                **process_options,
             )
         except OSError as exc:
             raise CodingWorkerError(
@@ -2250,8 +2249,24 @@ def _fake_result(value: Any) -> Any:
     return value
 
 
+def _container_user() -> str:
+    """Return a portable numeric uid:gid for the Linux Trae container."""
+
+    get_uid = getattr(os, "getuid", lambda: 65534)
+    get_gid = getattr(os, "getgid", lambda: 65534)
+    return f"{get_uid()}:{get_gid()}"
+
+
 def _terminate_process_group(process: subprocess.Popen[Any], grace_seconds: int) -> None:
     if process.poll() is None:
+        if os.name == "nt":
+            _windows_terminate_tree(process.pid)
+            try:
+                process.wait(timeout=grace_seconds)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            return
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -2269,6 +2284,10 @@ def _terminate_process_group(process: subprocess.Popen[Any], grace_seconds: int)
 
 def _cleanup_process_group(process_group_id: int, grace_seconds: int) -> None:
     """Terminate descendants left in the dedicated coding process group."""
+
+    if os.name == "nt":
+        _windows_terminate_tree(process_group_id)
+        return
 
     try:
         os.killpg(process_group_id, 0)
@@ -2288,6 +2307,24 @@ def _cleanup_process_group(process_group_id: int, grace_seconds: int) -> None:
     try:
         os.killpg(process_group_id, signal.SIGKILL)
     except ProcessLookupError:
+        pass
+
+
+def _windows_terminate_tree(process_id: int) -> None:
+    """Terminate a Windows child tree (the native equivalent of ``killpg``)."""
+
+    try:
+        subprocess.run(
+            ("taskkill", "/PID", str(process_id), "/T", "/F"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            shell=False,
+        )
+    except OSError:
+        # The child may already have exited, or taskkill may be unavailable in
+        # a constrained test environment. The parent wait/kill path remains the
+        # final bound.
         pass
 
 

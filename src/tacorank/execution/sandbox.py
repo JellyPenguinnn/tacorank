@@ -16,7 +16,6 @@ import os
 import re
 import secrets
 import shutil
-import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, Mapping, Optional, Protocol, Tuple
 
 from tacorank.execution.commands import ResolvedCommand
+from tacorank.docker_host import normalize_local_docker_host
 
 
 class SandboxPolicyError(RuntimeError):
@@ -165,8 +165,13 @@ class DedicatedFilesystemQuotaVerifier:
             raise SandboxPolicyError(
                 "hard output disk quota requires a dedicated filesystem mount"
             )
+        statvfs = getattr(os, "statvfs", None)
+        if statvfs is None:
+            raise SandboxPolicyError(
+                "hard output quota capacity inspection is unavailable on this platform"
+            )
         try:
-            filesystem = os.statvfs(str(resolved))
+            filesystem = statvfs(str(resolved))
         except OSError as error:
             raise SandboxPolicyError(
                 "hard output disk quota capacity cannot be inspected"
@@ -1372,19 +1377,10 @@ def _credential_shaped(key: str) -> bool:
 def _validated_docker_host(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
-    if not isinstance(value, str) or not value.startswith("unix://") or "\x00" in value:
-        raise SandboxPolicyError("Docker host must be a local Unix socket")
-    path = Path(value[len("unix://") :])
-    if not path.is_absolute() or path.is_symlink():
-        raise SandboxPolicyError("Docker host must be a canonical local Unix socket")
     try:
-        resolved = path.resolve(strict=True)
-        metadata = resolved.stat()
-    except OSError as error:
-        raise SandboxPolicyError("Docker host socket is unavailable") from error
-    if resolved != path or not stat.S_ISSOCK(metadata.st_mode):
-        raise SandboxPolicyError("Docker host must be a canonical local Unix socket")
-    return "unix://" + str(resolved)
+        return normalize_local_docker_host(value)
+    except ValueError as error:
+        raise SandboxPolicyError(str(error)) from error
 
 
 def _reject_symlink_components(path: Path, label: str) -> None:

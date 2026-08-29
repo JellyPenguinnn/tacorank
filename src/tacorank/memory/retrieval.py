@@ -92,6 +92,7 @@ def failure_chain(events: Sequence[Event], experiment_id: str, limit: int = 12) 
         in (
             EventType.PATCH_CHECKED,
             EventType.EXECUTION_FINISHED,
+            EventType.ADAPTER_FAILED,
             EventType.OUTPUT_CHECKED,
             EventType.EVALUATION_COMPLETED,
             EventType.RECOVERY_DECIDED,

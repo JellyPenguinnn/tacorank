@@ -13,6 +13,7 @@ import selectors
 import signal
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -245,6 +246,29 @@ def _run_git_bounded(command: Sequence[str], *, max_stdout_bytes: int) -> _RawGi
     )
     if process.stdout is None or process.stderr is None:
         raise AssertionError("bounded Git pipes were not created")
+    if os.name == "nt":
+        # ``selectors.SelectSelector`` cannot poll Windows pipe handles. Read
+        # each stream with a strict cap on a worker thread instead.
+        def read_limited(stream, limit: int) -> bytes:
+            return stream.read(limit + 1)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            stdout_future = pool.submit(read_limited, process.stdout, max_stdout_bytes)
+            stderr_future = pool.submit(read_limited, process.stderr, 64 * 1024)
+            try:
+                stdout = stdout_future.result(timeout=60.0)
+                stderr = stderr_future.result(timeout=60.0)
+            except FutureTimeout as exc:
+                _kill_git_process(process)
+                raise GitOperationError(
+                    "GIT_COMMAND_TIMEOUT", "bounded Git command timed out"
+                ) from exc
+        returncode = process.wait()
+        if len(stdout) > max_stdout_bytes:
+            raise GitOperationError("PATCH_TOO_LARGE", "bounded Git output exceeded its limit")
+        if len(stderr) > 64 * 1024:
+            raise GitOperationError("GIT_OUTPUT_LIMIT", "bounded Git output exceeded its limit")
+        return _RawGitResult(returncode, stdout, stderr)
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ, "stdout")
     selector.register(process.stderr, selectors.EVENT_READ, "stderr")
@@ -279,8 +303,11 @@ def _run_git_bounded(command: Sequence[str], *, max_stdout_bytes: int) -> _RawGi
 def _kill_git_process(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is None:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+            if hasattr(os, "killpg"):
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except (ProcessLookupError, PermissionError, AttributeError):
             try:
                 process.kill()
             except ProcessLookupError:
