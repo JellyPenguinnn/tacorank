@@ -36,3 +36,9 @@ tests/                        Component, contract, and integration tests
 ## Status
 
 Skeleton only. No research, orchestration, execution, recovery, or evaluation logic has been implemented yet.
+
+## Official KuaiRand-Pure starter kit
+
+The official baseline, data loader, evaluator, submission utility, feature ablation, published scores, dataset loader, and dataset license are included. See [`docs/KUAIRAND_STARTER_KIT.md`](docs/KUAIRAND_STARTER_KIT.md) for setup and usage.
+
+Downloaded CSV data belongs in `KuaiRand-Pure/data/`. Git ignores only that dataset directory and the downloaded `KuaiRand-Pure.tar.gz` archive.
