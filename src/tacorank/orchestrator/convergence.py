@@ -56,7 +56,10 @@ def stop_decision(
         return StopDecision(True, "experiment_budget", "The frozen experiment budget is exhausted.")
     if state.elapsed_wall_time_seconds >= config.wall_time_limit_seconds:
         return StopDecision(True, "wall_time_budget", "The frozen wall-clock budget is exhausted.")
-    total_tokens = state.resource_totals.provider_tokens + state.resource_totals.estimated_tokens
+    # token_measurement describes provenance, not whether reported tokens count
+    # against the frozen ceiling. Excluding "none" would let callers bypass the
+    # stop rule simply by changing the measurement label.
+    total_tokens = state.resource_totals.total_reported_tokens
     if config.token_limit is not None and total_tokens >= config.token_limit:
         return StopDecision(True, "token_budget", "The frozen LLM token budget is exhausted.")
     gpu_seconds = state.resource_totals.gpu_weighted_time_ms / 1000.0

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 from contextlib import contextmanager
@@ -21,6 +20,17 @@ from ..schemas import (
     payload_artifacts,
 )
 from .canonical_json import canonical_dumps, canonical_sha256, event_hash_input
+
+
+try:  # POSIX
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    _fcntl = None
+
+try:  # Windows
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX
+    _msvcrt = None
 
 
 GENESIS_HASH = "0" * 64
@@ -59,12 +69,29 @@ class EventStore:
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            with os.fdopen(descriptor, "r+") as lock_handle:
-                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            with os.fdopen(descriptor, "r+b") as lock_handle:
+                if _fcntl is not None:
+                    _fcntl.flock(lock_handle.fileno(), _fcntl.LOCK_EX)
+                elif _msvcrt is not None:
+                    # msvcrt locks a byte range rather than the whole file. Keep
+                    # one stable byte in the sidecar so every process contends on
+                    # the same range.
+                    lock_handle.seek(0, os.SEEK_END)
+                    if lock_handle.tell() == 0:
+                        lock_handle.write(b"\0")
+                        lock_handle.flush()
+                    lock_handle.seek(0)
+                    _msvcrt.locking(lock_handle.fileno(), _msvcrt.LK_LOCK, 1)
+                else:  # pragma: no cover - every supported OS has one backend
+                    raise LedgerError("no supported file-locking backend is available")
                 try:
                     yield
                 finally:
-                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                    if _fcntl is not None:
+                        _fcntl.flock(lock_handle.fileno(), _fcntl.LOCK_UN)
+                    elif _msvcrt is not None:
+                        lock_handle.seek(0)
+                        _msvcrt.locking(lock_handle.fileno(), _msvcrt.LK_UNLCK, 1)
         finally:
             # fdopen owns and closes the descriptor in the normal path.
             pass

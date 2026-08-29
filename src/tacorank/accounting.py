@@ -35,6 +35,16 @@ class ResourceTotals:
     def estimated_tokens(self) -> int:
         return self.estimated_input_tokens + self.estimated_output_tokens
 
+    @property
+    def unmeasured_tokens(self) -> int:
+        return self.unmeasured_input_tokens + self.unmeasured_output_tokens
+
+    @property
+    def total_reported_tokens(self) -> int:
+        """All reported tokens, regardless of measurement provenance."""
+
+        return self.provider_tokens + self.estimated_tokens + self.unmeasured_tokens
+
 
 def aggregate_resources(deltas: Iterable[ResourceDelta]) -> ResourceTotals:
     values = list(deltas)

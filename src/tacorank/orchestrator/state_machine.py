@@ -103,6 +103,20 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
                 or spec.parent_experiment_id == "baseline",
                 "unknown parent experiment",
             )
+        if spec.parent_experiment_id in (None, "baseline"):
+            baseline = _events_of(events, EventType.BASELINE_VERIFIED)[-1]
+            expected_parent_commit = baseline.payload.commit_sha
+        else:
+            parent = state.experiments[spec.parent_experiment_id]
+            expected_parent_commit = parent.latest_commit_sha
+            _require(
+                expected_parent_commit is not None,
+                "selected parent experiment has no patch commit",
+            )
+        _require(
+            spec.parent_commit_sha == expected_parent_commit,
+            "parent_commit_sha does not match the selected parent",
+        )
         last_context = _events_of(events, EventType.CONTEXT_CREATED)
         _require(bool(last_context), "proposal requires planner context")
         context = last_context[-1].payload.context

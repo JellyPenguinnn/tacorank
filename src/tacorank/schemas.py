@@ -896,6 +896,11 @@ class Event(StrictModel):
             raise ValueError("event_type must match payload discriminator")
         if self.causation_event_id and int(self.causation_event_id.split("_")[1]) >= self.seq:
             raise ValueError("causation_event_id must refer to an earlier event")
+        expected_artifacts = payload_artifacts(self.payload)
+        if self.artifact_refs != expected_artifacts:
+            raise ValueError(
+                "artifact_refs must exactly match the canonical artifacts nested in payload"
+            )
         return self
 
 
@@ -918,5 +923,10 @@ def payload_artifacts(payload: EventPayload) -> List[ArtifactRef]:
                 visit(item)
 
     visit(payload)
-    unique = {item.artifact_id: item for item in found}
+    unique: Dict[str, ArtifactRef] = {}
+    for item in found:
+        previous = unique.get(item.artifact_id)
+        if previous is not None and previous != item:
+            raise ValueError("conflicting payload artifacts share artifact_id %r" % item.artifact_id)
+        unique[item.artifact_id] = item
     return [unique[key] for key in sorted(unique)]
