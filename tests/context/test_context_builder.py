@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from tacorank.context.builder import ContextBuildError
 from tacorank.context.redaction import redact
+from tacorank.schemas import ArtifactKind
 
 
 def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_evaluation):
@@ -81,6 +83,23 @@ def test_secret_redaction():
     assert "sk-" not in redacted
     assert "[REDACTED]" in redacted
     assert count >= 1
+
+
+def test_empty_verified_failure_log_uses_typed_error_summary(harness) -> None:
+    artifact = harness.context_builder.artifact_store.write(
+        artifact_id="empty-log",
+        kind=ArtifactKind.LOG,
+        relative_path="runs/run_test/empty-execution.log",
+        content=b"",
+        content_type="text/plain; charset=utf-8",
+    )
+
+    trace = harness.context_builder._trace_tail(
+        SimpleNamespace(log_artifact=artifact),
+        "missing required output roles: prediction",
+    )
+
+    assert trace == "missing required output roles: prediction"
 
 
 def test_coder_context_contains_the_real_worker_contract(harness, baseline_evaluation):

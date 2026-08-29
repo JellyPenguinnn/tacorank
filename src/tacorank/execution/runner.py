@@ -414,6 +414,29 @@ class ExecutionRunner:
                         )
                         break
 
+                    try:
+                        outputs_ready = process.runtime_outputs_ready()
+                    except ProcessLaunchError:
+                        termination = (
+                            "infrastructure_error",
+                            "RUNTIME_OUTPUT_HANDSHAKE_FAILURE",
+                            "container output completion probe failed",
+                        )
+                        break
+                    if outputs_ready:
+                        try:
+                            process.extract_ready_runtime_outputs()
+                        except ProcessLaunchError:
+                            termination = (
+                                "infrastructure_error",
+                                "RUNTIME_OUTPUT_EXTRACTION_FAILURE",
+                                "bounded container output extraction failed",
+                            )
+                            break
+                        release_wait = limits.wall_time_seconds - elapsed
+                        process.wait(timeout=min(0.1, max(0.001, release_wait)))
+                        continue
+
                     remaining = limits.wall_time_seconds - elapsed
                     time.sleep(
                         min(self.policy.telemetry_interval_seconds, max(0.001, remaining))

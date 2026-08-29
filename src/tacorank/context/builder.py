@@ -268,7 +268,8 @@ class ContextBuilder:
             with path.open("rb") as handle:
                 handle.seek(max(0, artifact.size_bytes - 8_000))
                 raw = handle.read(8_000)
-            return raw.decode("utf-8", errors="replace")[-4_000:]
+            trace = raw.decode("utf-8", errors="replace")[-4_000:]
+            return trace if trace.strip() else fallback[-4_000:]
         except (OSError, ValueError):
             return fallback[-4_000:]
 

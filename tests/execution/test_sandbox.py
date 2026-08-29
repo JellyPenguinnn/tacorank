@@ -551,10 +551,19 @@ def test_docker_portable_quota_uses_bounded_tmpfs_and_output_copy(
         mechanism="container_tmpfs",
     )
     assert launch.runtime_cleanup is not None
+    assert launch.argv[launch.argv.index("--user") + 1] == "0:0"
+    assert "tacorank.execution.container_supervisor" in launch.argv
     extraction = launch.runtime_cleanup.output_extraction
     assert extraction is not None
     assert extraction.argv[1] == "cp"
     assert extraction.argv[-1] == "-"
+    assert launch.runtime_cleanup.completion_argv is not None
+    assert launch.runtime_cleanup.release_argv is not None
+    assert launch.runtime_cleanup.completion_argv[1:4] == (
+        "exec",
+        "--user",
+        "0:0",
+    )
 
 
 def test_docker_preflight_launches_and_cleans_exact_capability_probe(
