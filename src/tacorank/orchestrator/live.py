@@ -763,7 +763,7 @@ def build_live_adapters(
             DataViewPolicy(
                 view_id=command_id,
                 allowed_columns=tuple(live.candidate_allowed_columns),
-                allowed_path_prefixes=("/inputs/data",),
+                allowed_path_prefixes=("/inputs",),
             )
             for command_id in sorted(live.input_roots)
         ),
@@ -968,12 +968,12 @@ def _mount_policies(
             mounts=(
                 ContainerReadOnlyMount(
                     live.contract_root.resolve(strict=True),
-                    "/contracts/competition",
+                    "/contracts",
                     "contract",
                 ),
                 ContainerReadOnlyMount(
                     live.input_roots[command_id].resolve(strict=True),
-                    "/inputs/data",
+                    "/inputs",
                     (
                         "hidden_inference_data"
                         if command_id == "candidate_final_infer"
