@@ -23,6 +23,8 @@ recovery, or evaluator implementations owned by the other team members.
   artifacts with inclusion/exclusion manifests.
 - Deterministic convergence and resource stop checks.
 - Replaceable adapter protocols and deterministic fakes that complete one full lifecycle.
+- A DeepSeek research-provider adapter that receives the bounded planner context, uses
+  JSON output, preserves deterministic parent/family policy, and records provider token usage.
 - Operator commands for run, resume inspection, status, ledger validation, view rebuild,
   and a fail-closed finalization boundary.
 
@@ -82,6 +84,40 @@ PYTHONPYCACHEPREFIX=/tmp/tacorank-pycache .venv/bin/python -m pytest
 
 The editable install exposes the `tacorank` command.
 
+## DeepSeek research planner
+
+The required `research_provider` field selects the research planner independently from
+the other adapters, so an omitted field cannot silently fall back to the fake planner:
+
+```json
+{
+  "research_provider": "deepseek",
+  "deepseek_model": "deepseek-v4-pro",
+  "deepseek_base_url": "https://api.deepseek.com",
+  "deepseek_api_key_env": "DEEPSEEK_API_KEY",
+  "deepseek_timeout_seconds": 120,
+  "deepseek_max_output_tokens": 2000,
+  "deepseek_thinking_enabled": true,
+  "deepseek_reasoning_effort": "high"
+}
+```
+
+Set the secret only in the environment; never put it in the run configuration or ledger:
+
+```text
+export DEEPSEEK_API_KEY="your-key"
+tacorank run --config run-config.json
+```
+
+`research_provider: fake` retains the deterministic test planner. In DeepSeek mode,
+`SearchPolicy` still chooses the authoritative parent, family, phase, and required method
+card. DeepSeek proposes one atomic implementation plan inside those constraints, after
+which `PlanValidator` either accepts it, requests one bounded repair, or blocks it.
+
+The current `adapter_mode: fake` still means coding, execution, recovery, output checking,
+and evaluation use the vertical-slice fake adapters. Selecting DeepSeek makes only the
+research-direction planner real.
+
 ## Contract gate
 
 The checked-in `contract/COMPETITION.md` and `PROTECTED_PATHS.md` are intentionally
@@ -114,8 +150,9 @@ tacorank rebuild-views --run-id run_001 --repository-root .
 tacorank finalize --run-id run_001 --repository-root .
 ```
 
-`adapter_mode` is currently frozen to `fake`; this lets teammates validate their
-schemas and the complete route before integrating real adapters. `finalize` fails closed
+`adapter_mode` remains frozen to `fake` for the non-research adapters; this lets teammates
+validate their schemas and the complete route while the research planner uses either the
+fake or DeepSeek provider. `finalize` fails closed
 until a real clean-reproduction runner/evaluator is connected, because the harness must
 not manufacture final evidence.
 
@@ -140,7 +177,7 @@ not manufacture final evidence.
 
 ## Intentionally deferred
 
-- Real adapters for Persons 1, 3, 4, and 5.
+- Real coding, execution, recovery, and evaluation adapters for Persons 3, 4, and 5.
 - Git ancestry/ref reconciliation and clean reproduction.
 - Final submission generation and hidden-final execution.
 - Provider-native token collection and real CPU/GPU telemetry.

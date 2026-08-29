@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator, model_validator
 
@@ -52,6 +53,14 @@ class RunConfig(StrictModel):
     seed_schedule: List[int]
     context_token_limit: int = Field(default=6_000, gt=0)
     adapter_mode: Literal["fake"] = "fake"
+    research_provider: Literal["fake", "deepseek"]
+    deepseek_model: NonEmptyStr = "deepseek-v4-pro"
+    deepseek_base_url: NonEmptyStr = "https://api.deepseek.com"
+    deepseek_api_key_env: NonEmptyStr = "DEEPSEEK_API_KEY"
+    deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
+    deepseek_max_output_tokens: int = Field(default=2_000, gt=0)
+    deepseek_thinking_enabled: bool = True
+    deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
     baseline_metrics: Optional[Dict[str, float]] = None
 
     @field_validator("run_id")
@@ -81,6 +90,29 @@ class RunConfig(StrictModel):
     def validate_hashes(cls, value: str) -> str:
         if not SHA256_RE.fullmatch(value):
             raise ValueError("hashes must be lowercase sha256")
+        return value
+
+    @field_validator("deepseek_base_url")
+    @classmethod
+    def validate_deepseek_base_url(cls, value: str) -> str:
+        value = value.rstrip("/")
+        parsed = urlparse(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("deepseek_base_url must be a credential-free HTTPS origin")
+        return value
+
+    @field_validator("deepseek_api_key_env")
+    @classmethod
+    def validate_deepseek_api_key_env(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", value):
+            raise ValueError("deepseek_api_key_env must be an uppercase environment variable")
         return value
 
     @model_validator(mode="after")
