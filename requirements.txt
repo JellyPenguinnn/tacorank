@@ -1,0 +1,10 @@
+# Python 3.9+
+
+# Official KuaiRand-Pure starter kit
+numpy>=1.23,<3
+
+# Upstream KuaiRand-Pure dataset loader
+pandas>=1.5,<3
+
+# TacoRank shared schemas
+pydantic>=2,<3
