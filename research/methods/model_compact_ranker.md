@@ -1,0 +1,35 @@
+```json
+{"schema_version":"1.0","method_id":"model_compact_ranker","family":"model","status":"candidate","tags":["deepfm","dcn","model"],"cost_tier":"high","sources":[]}
+```
+
+## Mechanism
+
+Capture interactions not represented by the baseline FM.
+
+## Preconditions
+
+Baseline parity and the objective/data frame are verified.
+
+## Allowed data
+
+Only contract-permitted features and labels.
+
+## Expected effect
+
+Improve ranking through additional interactions.
+
+## Falsification condition
+
+No improvement after a bounded, mechanism-driven trial.
+
+## Do not use when
+
+Baseline parity or the objective contract is unresolved.
+
+## Minimal implementation
+
+Try one compact alternative ranker with fixed training and resource bounds.
+
+## Sources
+
+No external source required for the bounded trial.
