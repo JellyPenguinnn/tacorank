@@ -44,7 +44,7 @@ from ..schemas import (
     RunStoppedPayload,
     TrustVerdict,
 )
-from .convergence import StopDecision, stop_decision
+from .convergence import StopDecision, runtime_budget_decision, stop_decision
 from .ports import (
     CodingWorker,
     Evaluator,
@@ -152,6 +152,7 @@ class Harness:
             ContractVerifiedPayload(
                 contract_sha256=self.verified_contract.contract_sha256,
                 protected_paths_sha256=self.verified_contract.protected_paths_sha256,
+                evaluator_sha256=self.config.evaluator_sha256,
                 metric_names=self.config.metric_names,
                 primary_metric_name=self.config.primary_metric_name,
                 command_ids=self.config.command_ids,
@@ -184,6 +185,13 @@ class Harness:
             stage="stopped",
             causation_event_id=self.events()[-1].event_id,
         )
+
+    def _stop_if_runtime_budget_exhausted(self) -> bool:
+        decision = runtime_budget_decision(self.state(), self.config)
+        if not decision.stop:
+            return False
+        self.stop(decision)
+        return True
 
     def _command_for(self, fidelity: Fidelity) -> str:
         preferred = "run_%s" % fidelity.value
@@ -450,6 +458,8 @@ class Harness:
             causation_event_id=planner_context_event.event_id,
             resource_delta=planner_output.resource_delta,
         )
+        if self._stop_if_runtime_budget_exhausted():
+            return self.state()
         coder_context = self.context_builder.build_coder(self.events(), spec)
         coder_context_event = self._append(
             ContextCreatedPayload(context=coder_context),

@@ -96,6 +96,8 @@ def render_summary(events: Sequence[Event]) -> str:
             "",
             "- Provider tokens: %d" % totals.provider_tokens,
             "- Estimated tokens: %d" % totals.estimated_tokens,
+            "- Unmeasured tokens: %d" % totals.unmeasured_tokens,
+            "- Total reported tokens: %d" % totals.total_reported_tokens,
             "- Agent elapsed wall-clock: %.3f seconds" % state.elapsed_wall_time_seconds,
             "- Action CPU time: %.3f seconds" % (totals.cpu_time_ms / 1000.0),
             "- GPU-hours: %.6f" % totals.gpu_hours,

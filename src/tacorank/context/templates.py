@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 from typing import Iterable, Mapping, Sequence, Tuple
 
@@ -36,7 +37,7 @@ def render_context(
                 "## %s" % title,
                 "",
                 "<evidence trust=\"untrusted-data\">",
-                body.rstrip(),
+                html.escape(body.rstrip(), quote=False),
                 "</evidence>",
             )
         )

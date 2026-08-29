@@ -21,10 +21,16 @@ from ..schemas import (
 )
 from .canonical_json import canonical_dumps, canonical_sha256, event_hash_input
 
-if os.name == "nt":
-    import msvcrt
-else:
-    import fcntl
+
+try:  # POSIX
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    _fcntl = None
+
+try:  # Windows
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX
+    _msvcrt = None
 
 
 GENESIS_HASH = "0" * 64
@@ -45,6 +51,11 @@ class DuplicateIdempotencyKey(LedgerError):
         self.event = event
 
 
+def _validate_idempotency_payload_hash(key: str, payload: EventPayload) -> None:
+    if key.rsplit(":", 1)[-1] != canonical_sha256(payload):
+        raise ValueError("idempotency key input hash does not match payload")
+
+
 class EventStore:
     def __init__(
         self,
@@ -63,22 +74,29 @@ class EventStore:
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            with os.fdopen(descriptor, "r+") as lock_handle:
-                if os.name == "nt":
-                    lock_handle.write("\0")
-                    lock_handle.flush()
+            with os.fdopen(descriptor, "r+b") as lock_handle:
+                if _fcntl is not None:
+                    _fcntl.flock(lock_handle.fileno(), _fcntl.LOCK_EX)
+                elif _msvcrt is not None:
+                    # msvcrt locks a byte range rather than the whole file. Keep
+                    # one stable byte in the sidecar so every process contends on
+                    # the same range.
+                    lock_handle.seek(0, os.SEEK_END)
+                    if lock_handle.tell() == 0:
+                        lock_handle.write(b"\0")
+                        lock_handle.flush()
                     lock_handle.seek(0)
-                    msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, 1)
-                else:
-                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                    _msvcrt.locking(lock_handle.fileno(), _msvcrt.LK_LOCK, 1)
+                else:  # pragma: no cover - every supported OS has one backend
+                    raise LedgerError("no supported file-locking backend is available")
                 try:
                     yield
                 finally:
-                    if os.name == "nt":
+                    if _fcntl is not None:
+                        _fcntl.flock(lock_handle.fileno(), _fcntl.LOCK_UN)
+                    elif _msvcrt is not None:
                         lock_handle.seek(0)
-                        msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                        _msvcrt.locking(lock_handle.fileno(), _msvcrt.LK_UNLCK, 1)
         finally:
             # fdopen owns and closes the descriptor in the normal path.
             pass
@@ -113,14 +131,25 @@ class EventStore:
         previous_hash = GENESIS_HASH
         run_id: Optional[str] = None
         idempotency: Dict[str, Event] = {}
-        for line_number, raw_line in enumerate(data.splitlines(), start=1):
+        complete_lines = data[:-1].split(b"\n") if data else []
+        for line_number, raw_line in enumerate(complete_lines, start=1):
             try:
                 decoded = json.loads(raw_line.decode("utf-8"))
                 event = Event.model_validate(decoded)
+                _validate_idempotency_payload_hash(event.idempotency_key, event.payload)
             except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
                 raise LedgerCorruptionError(
                     "invalid complete ledger line %d: %s" % (line_number, exc)
                 ) from exc
+            except ValueError as exc:
+                raise LedgerCorruptionError(
+                    "invalid complete ledger line %d: %s" % (line_number, exc)
+                ) from exc
+
+            if raw_line != canonical_dumps(event).encode("utf-8"):
+                raise LedgerCorruptionError(
+                    "ledger line %d is not canonical JSON" % line_number
+                )
 
             expected_seq = len(events) + 1
             if event.seq != expected_seq:
@@ -171,6 +200,10 @@ class EventStore:
         timestamp: Optional[datetime] = None,
     ) -> Event:
         with self._locked():
+            try:
+                _validate_idempotency_payload_hash(idempotency_key, payload)
+            except ValueError as exc:
+                raise LedgerError(str(exc)) from exc
             self._repair_incomplete_tail_locked()
             events = self._read_locked()
             for existing in events:
