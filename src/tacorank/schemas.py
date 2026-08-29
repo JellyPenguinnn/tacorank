@@ -7,20 +7,70 @@ against the models in this module.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import PurePosixPath
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+from pathlib import Path, PurePosixPath
+from typing import (
+    Annotated,
+    Any,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+)
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 
 SCHEMA_VERSION = "1.0"
+ZERO_SHA256 = "0" * 64
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 EVENT_ID_RE = re.compile(r"^evt_[0-9]{6,}$")
+
+COMPETITION_CONTRACT_HEADINGS: Tuple[str, ...] = (
+    "# Competition Contract",
+    "## Identity and source precedence",
+    "## Required benchmark",
+    "## Data and temporal boundary",
+    "## Target label and permitted inputs",
+    "## Metrics and primary aggregation",
+    "## Official baseline",
+    "## Convergence and resource limits",
+    "## Editable and protected paths",
+    "## Allowed commands",
+    "## Evaluation isolation",
+    "## Submission schema",
+    "## Resolved ambiguities",
+    "## Human approvals",
+)
+
+METHOD_CARD_HEADINGS: Tuple[str, ...] = (
+    "## Mechanism",
+    "## Preconditions",
+    "## Allowed data",
+    "## Expected effect",
+    "## Falsification condition",
+    "## Do not use when",
+    "## Minimal implementation",
+    "## Sources",
+)
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -93,6 +143,7 @@ class ArtifactKind(str, Enum):
     CHECKPOINT = "checkpoint"
     PREDICTIONS = "predictions"
     METRICS = "metrics"
+    DELTA_VECTOR = "delta_vector"
     VERIFICATION_RECEIPT = "verification_receipt"
     SUBMISSION = "submission"
     REPORT = "report"
@@ -115,6 +166,7 @@ class Fidelity(str, Enum):
     SMOKE = "smoke"
     PROXY = "proxy"
     FULL = "full"
+    FINAL = "final"
 
 
 class CheckStatus(str, Enum):
@@ -158,6 +210,7 @@ class RecoveryAction(str, Enum):
 class Population(str, Enum):
     INTERNAL_PROXY = "internal_proxy"
     PUBLIC_VALIDATION = "public_validation"
+    UNBIASED_AUDIT = "unbiased_audit"
     HIDDEN_FINAL = "hidden_final"
 
 
@@ -167,6 +220,7 @@ class TrustVerdict(str, Enum):
     NEGATIVE = "negative"
     NO_OP = "no_op"
     SUSPICIOUS = "suspicious"
+    REDUNDANT = "redundant"
 
 
 class Stability(str, Enum):
@@ -188,6 +242,82 @@ class ExperimentDecisionKind(str, Enum):
     REJECT = "reject"
     PRUNE = "prune"
     INVALID = "invalid"
+
+
+# Person 5's deterministic decision layer uses the shorter canonical name.
+Decision = ExperimentDecisionKind
+
+
+class ExperimentFamily(str, Enum):
+    OBJECTIVE = "objective"
+    SAMPLING = "sampling"
+    TEMPORAL_HISTORY = "temporal_history"
+    FEATURES = "features"
+    MODEL = "model"
+    MULTITASK = "multitask"
+    DURATION_BIAS = "duration_bias"
+    ENSEMBLE = "ensemble"
+    EVALUATION = "evaluation"
+    OTHER = "other"
+
+
+class ExperimentKind(str, Enum):
+    FRAME = "frame"
+    CONTENT = "content"
+    CAPACITY = "capacity"
+    COMPOSITION = "composition"
+    POLICY = "policy"
+    OTHER = "other"
+
+
+class MethodStatus(str, Enum):
+    CANDIDATE = "candidate"
+    BLOCKED = "blocked"
+    KNOWN_NEGATIVE = "known_negative"
+    FORBIDDEN = "forbidden"
+
+
+FAMILY_KIND: Mapping[ExperimentFamily, ExperimentKind] = {
+    ExperimentFamily.OBJECTIVE: ExperimentKind.FRAME,
+    ExperimentFamily.SAMPLING: ExperimentKind.FRAME,
+    ExperimentFamily.TEMPORAL_HISTORY: ExperimentKind.CONTENT,
+    ExperimentFamily.FEATURES: ExperimentKind.CONTENT,
+    ExperimentFamily.MULTITASK: ExperimentKind.CONTENT,
+    ExperimentFamily.DURATION_BIAS: ExperimentKind.CONTENT,
+    ExperimentFamily.MODEL: ExperimentKind.CAPACITY,
+    ExperimentFamily.ENSEMBLE: ExperimentKind.COMPOSITION,
+    ExperimentFamily.EVALUATION: ExperimentKind.POLICY,
+    ExperimentFamily.OTHER: ExperimentKind.OTHER,
+}
+
+
+def family_kind(family: ExperimentFamily) -> ExperimentKind:
+    return FAMILY_KIND[family]
+
+
+class MethodCardMetadata(StrictModel):
+    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    method_id: NonEmptyStr
+    family: ExperimentFamily
+    status: MethodStatus
+    tags: List[NonEmptyStr]
+    cost_tier: CostTier
+    sources: List[NonEmptyStr] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_method_card(self) -> "MethodCardMetadata":
+        if not self.tags:
+            raise ValueError("method card requires at least one tag")
+        if len(self.tags) != len(set(self.tags)):
+            raise ValueError("method card tags must be unique")
+        if len(self.sources) != len(set(self.sources)):
+            raise ValueError("method card sources must be unique")
+        if any(
+            not source.startswith(("https://", "http://"))
+            for source in self.sources
+        ):
+            raise ValueError("method card sources must be HTTP(S) URLs")
+        return self
 
 
 class LessonOrigin(str, Enum):
@@ -235,6 +365,36 @@ class ArtifactRef(StrictModel):
             raise ValueError("sha256 must be 64 lowercase hexadecimal characters")
         return value
 
+    def verify_file(
+        self,
+        repository_root: Union[str, Path],
+        approved_roots: Sequence[str] = ("artifacts", "runs"),
+    ) -> Path:
+        """Verify location, size, and content hash under an approved root."""
+        root = Path(repository_root).resolve()
+        candidate = root.joinpath(*PurePosixPath(self.path).parts)
+        if candidate.is_symlink():
+            raise ValueError("artifact path must not be a symlink")
+        resolved = candidate.resolve()
+        _require_within(resolved, root, "artifact path escapes repository root")
+        approved = [
+            root.joinpath(*PurePosixPath(item).parts).resolve()
+            for item in approved_roots
+        ]
+        if not any(_is_within(resolved, allowed) for allowed in approved):
+            raise ValueError("artifact path is outside approved artifact roots")
+        if not resolved.is_file():
+            raise ValueError("artifact bytes are missing or not a regular file")
+        if resolved.stat().st_size != self.size_bytes:
+            raise ValueError("artifact size does not match ArtifactRef")
+        digest = hashlib.sha256()
+        with resolved.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != self.sha256:
+            raise ValueError("artifact hash does not match ArtifactRef")
+        return resolved
+
 
 class ResourceDelta(StrictModel):
     llm_input_tokens: int = Field(default=0, ge=0)
@@ -272,13 +432,36 @@ class MetricSet(StrictModel):
 
     @model_validator(mode="after")
     def validate_primary(self) -> "MetricSet":
-        if self.primary_metric_name not in self.metrics:
-            raise ValueError("primary_metric_name must exist in metrics")
         if not math.isfinite(self.primary_score):
             raise ValueError("primary_score must be finite")
-        if self.metrics[self.primary_metric_name] != self.primary_score:
+        if (
+            self.primary_metric_name in self.metrics
+            and self.metrics[self.primary_metric_name] != self.primary_score
+        ):
             raise ValueError("primary_score must equal the named primary metric")
         return self
+
+    def validate_contract(
+        self,
+        required_metrics: Sequence[str],
+        diagnostic_metrics: Sequence[str] = (),
+        expected_primary: Optional[float] = None,
+        tolerance: float = 1e-12,
+    ) -> None:
+        required = set(required_metrics)
+        allowed = required | set(diagnostic_metrics)
+        names = set(self.metrics)
+        if not required.issubset(names):
+            raise ValueError("MetricSet is missing required contract metrics")
+        if not names.issubset(allowed):
+            raise ValueError("MetricSet contains undeclared diagnostic metrics")
+        if expected_primary is not None and not math.isclose(
+            self.primary_score,
+            float(expected_primary),
+            rel_tol=0.0,
+            abs_tol=float(tolerance),
+        ):
+            raise ValueError("primary_score does not match contract aggregation")
 
 
 class CostEstimate(StrictModel):
@@ -533,16 +716,28 @@ class OutputCheckResult(StrictModel):
     experiment_id: NonEmptyStr
     attempt: int = Field(ge=1)
     prediction_artifact: ArtifactRef
+    ordered_row_identity_sha256: str
+    ordered_prediction_sha256: str
     accepted: bool
     checks: Dict[str, CheckStatus]
     score_stats: Dict[str, float] = Field(default_factory=dict)
     violations: List[Violation] = Field(default_factory=list)
     resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
 
+    @field_validator(
+        "ordered_row_identity_sha256", "ordered_prediction_sha256"
+    )
+    @classmethod
+    def validate_ordered_hashes(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("ordered identities must be lowercase sha256")
+        return value
+
     @model_validator(mode="after")
     def validate_acceptance(self) -> "OutputCheckResult":
-        if self.accepted and any(status == CheckStatus.FAIL for status in self.checks.values()):
-            raise ValueError("accepted output checks cannot contain failed checks")
+        failed = any(status == CheckStatus.FAIL for status in self.checks.values())
+        if self.accepted and (failed or self.violations):
+            raise ValueError("accepted output checks must be clean")
         return self
 
 
@@ -580,6 +775,41 @@ class TrustAssessment(StrictModel):
     stability: Stability
     integrity: Integrity
     flags: List[NonEmptyStr] = Field(default_factory=list)
+    eta_applied: Optional[float] = Field(default=None, ge=0.0)
+    seed_mean: Optional[float] = None
+    seed_stderr: Optional[float] = Field(default=None, ge=0.0)
+    seed_count: int = Field(default=1, ge=1)
+
+    @field_validator("flags")
+    @classmethod
+    def validate_flags(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("trust flags must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_consistency(self) -> "TrustAssessment":
+        if (
+            self.integrity == Integrity.COMPROMISED
+            and self.verdict != TrustVerdict.SUSPICIOUS
+        ):
+            raise ValueError("compromised integrity requires suspicious verdict")
+        if (
+            self.verdict == TrustVerdict.NO_OP
+            and self.stability != Stability.NOT_APPLICABLE
+        ):
+            raise ValueError("no_op stability must be not_applicable")
+        supplied = (self.seed_mean is not None, self.seed_stderr is not None)
+        if supplied[0] != supplied[1]:
+            raise ValueError("seed mean and standard error must be supplied together")
+        if any(supplied) and self.seed_count < 3:
+            raise ValueError("seed aggregates require at least three seed results")
+        return self
+
+
+class PredictionChange(StrictModel):
+    spearman_vs_parent: float = Field(ge=-1.0, le=1.0)
+    changed_row_fraction: float = Field(ge=0.0, le=1.0)
 
 
 class EvaluationRequest(StrictModel):
@@ -621,8 +851,9 @@ class EvaluationResult(StrictModel):
     baseline_delta: float
     parent_delta: Optional[float] = None
     previous_best_delta: Optional[float] = None
-    prediction_change: float = Field(ge=0)
+    prediction_change: Union[float, PredictionChange]
     trust: TrustAssessment
+    seed_evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
     metrics_artifact: Optional[ArtifactRef] = None
     resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
 
@@ -632,6 +863,61 @@ class EvaluationResult(StrictModel):
         if not SHA256_RE.fullmatch(value):
             raise ValueError("evaluation hashes must be lowercase sha256")
         return value
+
+    @field_validator("prediction_change")
+    @classmethod
+    def validate_prediction_change(
+        cls, value: Union[float, PredictionChange]
+    ) -> Union[float, PredictionChange]:
+        if isinstance(value, float) and value < 0:
+            raise ValueError("prediction_change must be non-negative")
+        return value
+
+    @field_validator("seed_evidence_event_ids")
+    @classmethod
+    def validate_seed_events(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("seed_evidence_event_ids must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_evaluation_route(self) -> "EvaluationResult":
+        if self.population == Population.PUBLIC_VALIDATION:
+            if self.fidelity != Fidelity.FULL or self.public_query_index is None:
+                raise ValueError("public validation requires full fidelity and query index")
+        elif self.public_query_index is not None:
+            raise ValueError("public_query_index is only valid for public validation")
+        if (
+            self.population == Population.INTERNAL_PROXY
+            and self.fidelity != Fidelity.PROXY
+        ):
+            raise ValueError("internal proxy requires proxy fidelity")
+        if (
+            self.population == Population.UNBIASED_AUDIT
+            and self.fidelity != Fidelity.FULL
+        ):
+            raise ValueError("unbiased audit requires full fidelity")
+        if (
+            self.population == Population.HIDDEN_FINAL
+            and self.fidelity != Fidelity.FINAL
+        ):
+            raise ValueError("hidden final requires final fidelity")
+        if self.experiment_id != "baseline":
+            if self.trust.seed_count != len(self.seed_evidence_event_ids) + 1:
+                raise ValueError(
+                    "trust seed_count must include the current evaluation and all "
+                    "seed evidence events"
+                )
+            if self.trust.stability in (Stability.CONFIRMED, Stability.UNSTABLE):
+                if (
+                    self.trust.seed_count < 3
+                    or self.trust.seed_mean is None
+                    or self.trust.seed_stderr is None
+                ):
+                    raise ValueError(
+                        "confirmed or unstable trust requires verified seed aggregates"
+                    )
+        return self
 
 
 class ExperimentDecision(StrictModel):
@@ -1015,6 +1301,30 @@ EventPayload = Annotated[
     Field(discriminator="type"),
 ]
 
+EVENT_PAYLOAD_MODELS: Mapping[EventType, Type[StrictModel]] = {
+    EventType.RUN_STARTED: RunStartedPayload,
+    EventType.CONTRACT_VERIFIED: ContractVerifiedPayload,
+    EventType.BASELINE_VERIFIED: BaselineVerifiedPayload,
+    EventType.CONTEXT_CREATED: ContextCreatedPayload,
+    EventType.PLANNER_RECOMMENDED: PlannerRecommendedPayload,
+    EventType.EXPERIMENT_PROPOSED: ExperimentProposedPayload,
+    EventType.PATCH_CREATED: PatchCreatedPayload,
+    EventType.PATCH_CHECKED: PatchCheckedPayload,
+    EventType.EXECUTION_STARTED: ExecutionStartedPayload,
+    EventType.EXECUTION_FINISHED: ExecutionFinishedPayload,
+    EventType.RECOVERY_DECIDED: RecoveryDecidedPayload,
+    EventType.OUTPUT_CHECKED: OutputCheckedPayload,
+    EventType.EVALUATION_COMPLETED: EvaluationCompletedPayload,
+    EventType.EXPERIMENT_DECIDED: ExperimentDecidedPayload,
+    EventType.BEST_UPDATED: BestUpdatedPayload,
+    EventType.LESSON_RECORDED: LessonRecordedPayload,
+    EventType.LESSON_STATUS_CHANGED: LessonStatusChangedPayload,
+    EventType.MANUAL_INTERVENTION: ManualInterventionPayload,
+    EventType.RUN_STOPPED: RunStoppedPayload,
+    EventType.FINAL_SELECTED: FinalSelectedPayload,
+    EventType.SUBMISSION_CHECKED: SubmissionCheckedPayload,
+}
+
 
 class Event(StrictModel):
     schema_version: Literal["1.0"] = SCHEMA_VERSION
@@ -1092,6 +1402,32 @@ class Event(StrictModel):
             )
         return self
 
+    def canonical_bytes(self) -> bytes:
+        data = self.model_dump(mode="json", exclude_none=False)
+        data.pop("event_hash", None)
+        return json.dumps(
+            data,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+
+    def computed_event_hash(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    def assert_hash_valid(self) -> None:
+        if self.event_hash != self.computed_event_hash():
+            raise ValueError("event_hash does not match canonical event bytes")
+
+    @classmethod
+    def create(cls, **values: Any) -> "Event":
+        """Validate an event draft and fill its canonical event hash."""
+        draft_values = dict(values)
+        draft_values["event_hash"] = ZERO_SHA256
+        draft = cls.model_validate(draft_values)
+        return draft.model_copy(update={"event_hash": draft.computed_event_hash()})
+
 
 def payload_artifacts(payload: EventPayload) -> List[ArtifactRef]:
     """Collect ArtifactRef values nested anywhere in a payload."""
@@ -1141,3 +1477,69 @@ def payload_resource_deltas(payload: EventPayload) -> List[ResourceDelta]:
 
     visit(payload)
     return found
+
+
+def parse_event_json(line: Union[str, bytes], verify_hash: bool = True) -> Event:
+    """Parse one JSON event and optionally verify its content hash."""
+    event = Event.model_validate_json(line)
+    if verify_hash:
+        event.assert_hash_valid()
+    return event
+
+
+def validate_competition_contract_markdown(text: str) -> None:
+    """Validate the canonical contract's required heading order."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("competition contract must not be empty")
+    headings = [line.strip() for line in text.splitlines() if line.startswith("#")]
+    if not headings or headings[0] != COMPETITION_CONTRACT_HEADINGS[0]:
+        raise ValueError("competition contract has the wrong title")
+    position = -1
+    for required in COMPETITION_CONTRACT_HEADINGS:
+        matches = [
+            index for index, heading in enumerate(headings) if heading == required
+        ]
+        if len(matches) != 1 or matches[0] <= position:
+            raise ValueError(
+                "competition contract headings are missing, duplicated, or out of order"
+            )
+        position = matches[0]
+
+
+def parse_method_card_markdown(text: str) -> MethodCardMetadata:
+    """Parse and validate a method card's first JSON block and headings."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("method card must not be empty")
+    match = re.search(r"```json\s*\n(.*?)\n```", text, flags=re.DOTALL)
+    if match is None or "```" in text[: match.start()]:
+        raise ValueError("method card's first fenced block must be JSON")
+    metadata = MethodCardMetadata.model_validate_json(match.group(1))
+    headings = [
+        line.strip()
+        for line in text[match.end() :].splitlines()
+        if line.startswith("## ")
+    ]
+    position = -1
+    for required in METHOD_CARD_HEADINGS:
+        matches = [
+            index for index, heading in enumerate(headings) if heading == required
+        ]
+        if len(matches) != 1 or matches[0] <= position:
+            raise ValueError(
+                "method card headings are missing, duplicated, or out of order"
+            )
+        position = matches[0]
+    return metadata
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _require_within(path: Path, root: Path, message: str) -> None:
+    if not _is_within(path, root):
+        raise ValueError(message)

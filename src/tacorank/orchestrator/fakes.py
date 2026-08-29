@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from ..artifacts import ArtifactStore
+from ..evaluation.adapter import (
+    ordered_prediction_sha256,
+    ordered_row_identity_sha256,
+)
 from ..schemas import (
     ArtifactKind,
     CheckResult,
@@ -32,6 +36,7 @@ from ..schemas import (
     PlannerContext,
     PlannerOutput,
     Population,
+    PredictionChange,
     RecoveryAction,
     RecoveryContext,
     RecoveryDecision,
@@ -218,7 +223,7 @@ class FakeExecutionRunner:
             artifact_id="predictions_" + suffix,
             kind=ArtifactKind.PREDICTIONS,
             relative_path="artifacts/%s/%s_predictions.csv" % (request.experiment_id, suffix),
-            content=b"row_id,score\n0,0.5\n",
+            content=b"row_id,user_id,video_id,score\n0,u0,v0,0.5\n",
             content_type="text/csv",
         )
         checkpoint = self.artifacts.write(
@@ -252,6 +257,12 @@ class FakeOutputGate:
             experiment_id=result.experiment_id,
             attempt=result.attempt,
             prediction_artifact=result.prediction_artifact,
+            ordered_row_identity_sha256=ordered_row_identity_sha256(
+                (0,), ("u0",), ("v0",)
+            ),
+            ordered_prediction_sha256=ordered_prediction_sha256(
+                (0,), ("u0",), ("v0",), (0.5,)
+            ),
             accepted=True,
             checks={"schema": CheckStatus.PASS, "finite": CheckStatus.PASS},
             score_stats={"min": 0.5, "max": 0.5},
@@ -285,7 +296,10 @@ class FakeEvaluator:
             parent_delta=primary - request.parent_summary.get(self.primary_metric_name, primary),
             previous_best_delta=primary
             - request.previous_best_summary.get(self.primary_metric_name, primary),
-            prediction_change=0.1,
+            prediction_change=PredictionChange(
+                spearman_vs_parent=0.9,
+                changed_row_fraction=0.1,
+            ),
             trust=TrustAssessment(
                 verdict=TrustVerdict.ACCEPTED,
                 stability=Stability.SINGLE_SEED,

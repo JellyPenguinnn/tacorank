@@ -1,12 +1,44 @@
+# Downloaded benchmark data
 /KuaiRand-Pure/data/
 /KuaiRand-Pure.tar.gz
-context/
+
+# Local context and secrets
+/context/
+/eesyuen-agents/
+.env
+.env.*
+!.env.example
+/CLAUDE.md
+/.claude/
+
+# Python environments and caches
 .venv/
+venv/
 __pycache__/
 *.py[cod]
-/.claude/
-/CLAUDE.md
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Packaging output
+build/
+dist/
 *.egg-info/
-.env
+
+# Runtime artifacts (keep the directories in Git)
+/runs/*
+!/runs/.gitkeep
+/artifacts/*
+!/artifacts/.gitkeep
+
+# Generated benchmark submissions
+/submission*.csv
+/kuairand-starter-kit/submission*.csv
+
+# Local editor and operating-system metadata
+.DS_Store
+.idea/
 .env.*

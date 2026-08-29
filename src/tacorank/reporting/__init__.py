@@ -1,5 +1,22 @@
-"""Derived reporting views."""
+"""Deterministic derived and judge-facing evidence projections."""
 
-from .results import rebuild_views, render_lessons, render_status, render_summary
+from .resources import ResourceSummary, aggregate_resources
+from .results import (
+    rebuild_views,
+    render_evaluation_summary,
+    render_lessons,
+    render_metric_table,
+    render_status,
+    render_summary,
+)
 
-__all__ = ["rebuild_views", "render_lessons", "render_status", "render_summary"]
+__all__ = [
+    "ResourceSummary",
+    "aggregate_resources",
+    "rebuild_views",
+    "render_evaluation_summary",
+    "render_lessons",
+    "render_metric_table",
+    "render_status",
+    "render_summary",
+]

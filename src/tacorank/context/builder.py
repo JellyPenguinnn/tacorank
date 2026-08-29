@@ -39,6 +39,11 @@ from .templates import compact_json, render_context
 from .token_estimator import estimate_tokens
 
 
+def _prediction_change_fraction(value: object) -> float:
+    changed_fraction = getattr(value, "changed_row_fraction", value)
+    return float(changed_fraction)
+
+
 class ContextBuildError(RuntimeError):
     pass
 
@@ -232,7 +237,9 @@ class ContextBuilder:
             baseline_delta=0.0,
             parent_delta=0.0,
             previous_best_delta=0.0,
-            prediction_change=baseline_evaluation.prediction_change,
+            prediction_change=_prediction_change_fraction(
+                baseline_evaluation.prediction_change
+            ),
             child_count=0,
             actual_cost=CostTier.LOW,
             parent_eligible=True,
@@ -305,7 +312,11 @@ class ContextBuilder:
                     previous_best_delta=(
                         evaluation.previous_best_delta if evaluation else None
                     ),
-                    prediction_change=(evaluation.prediction_change if evaluation else None),
+                    prediction_change=(
+                        _prediction_change_fraction(evaluation.prediction_change)
+                        if evaluation
+                        else None
+                    ),
                     child_count=children[spec.experiment_id],
                     actual_cost=spec.estimated_cost.cost_tier,
                     parent_eligible=bool(decision and decision.parent_eligible),

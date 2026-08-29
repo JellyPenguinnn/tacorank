@@ -1,9 +1,9 @@
 # TacoRank Current-Run Improvement Playbook
 
-**Schema version:** 1.0  
-**Status:** predefined, human-reviewed direction for the current run  
-**Primary task:** within-user ranking of `long_view`  
-**Primary score:** contract-defined mean of GAUC and nDCG@5  
+**Schema version:** 1.0
+**Status:** predefined, human-reviewed direction for the current run
+**Primary task:** within-user ranking of `long_view`
+**Primary score:** contract-defined mean of GAUC and nDCG@5
 **Core rule:** one experiment changes one research mechanism.
 
 This file tells the Planner how to turn verified evaluation feedback into the

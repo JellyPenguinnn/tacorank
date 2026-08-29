@@ -8,8 +8,10 @@ from tacorank.schemas import (
     EvaluationCompletedPayload,
     Event,
     EventType,
+    Fidelity,
     MetricSet,
     Population,
+    Stability,
 )
 
 
@@ -29,7 +31,11 @@ def test_hidden_final_evidence_is_excluded_from_planner_context(
         update={
             "experiment_id": "exp_hidden",
             "population": Population.HIDDEN_FINAL,
+            "fidelity": Fidelity.FINAL,
             "public_query_index": None,
+            "trust": baseline_evaluation.trust.model_copy(
+                update={"stability": Stability.NOT_APPLICABLE}
+            ),
             "metric_set": MetricSet(
                 metrics={"gauc": 0.99, "ndcg@5": 0.99, "primary": 0.99},
                 primary_metric_name="primary",

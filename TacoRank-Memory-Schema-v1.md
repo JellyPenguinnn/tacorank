@@ -93,7 +93,7 @@ models. Unknown fields are rejected at every adapter boundary.
 ```text
 artifact_id: stable ID
 kind: diff | trajectory | context | log | checkpoint | predictions |
-      metrics | verification_receipt | submission | report | other
+      metrics | delta_vector | verification_receipt | submission | report | other
 path: normalized repository-relative POSIX path
 sha256: 64 lowercase hexadecimal characters
 size_bytes: integer >= 0
@@ -102,6 +102,25 @@ content_type: string or null
 
 Validation rejects absolute and parent paths, path normalization changes, symlinks,
 unapproved roots, missing bytes, size mismatches, and hash mismatches.
+
+## Evaluation evidence
+
+Gate B records both `ordered_row_identity_sha256` and
+`ordered_prediction_sha256`. The first binds the ordered `(row_id, user_id,
+video_id)` population, including duplicate pairs; the second also binds every exact
+score value. Evaluation resolves the referenced `output.checked` event and verifies
+both digests and the prediction artifact hash before protected scoring.
+
+Seed confirmation is event-backed. `seed_evidence_event_ids` references verified
+earlier `evaluation.completed` events for the same run, experiment, population,
+fidelity, evaluator, contract, data manifest, and reference metric sets. The current
+evaluation is added internally. Confirmed or unstable trust records `eta_applied`,
+`seed_mean`, `seed_stderr`, and `seed_count`, where `seed_count` equals the number of
+prior evidence events plus one.
+
+Official evaluation runs in a fresh isolated interpreter after the evaluator and
+contract identities are checked. Candidate interpreter state is never reused for
+protected metric computation.
 
 ## Resource accounting
 
