@@ -205,6 +205,8 @@ def _self_test(uid: int, gid: int) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
+        if arguments.command == "self-test":
+            return _self_test(arguments.uid, arguments.gid)
         control = _control_directory(arguments.control_directory)
         if arguments.command == "run":
             return _run(
@@ -217,8 +219,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _probe(control)
         if arguments.command == "release":
             return _release(control)
-        if arguments.command == "self-test":
-            return _self_test(arguments.uid, arguments.gid)
         raise SupervisorError("unknown supervisor command")
     except SupervisorError as error:
         print("tacorank container supervisor: {0}".format(error), file=sys.stderr)

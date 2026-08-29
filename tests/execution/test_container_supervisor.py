@@ -7,7 +7,19 @@ import sys
 import time
 from pathlib import Path
 
-from tacorank.execution.container_supervisor import main
+from tacorank.execution import container_supervisor
+
+
+def test_self_test_command_does_not_require_control_directory(
+    monkeypatch,
+) -> None:
+    def self_test(uid: int, gid: int) -> int:
+        assert (uid, gid) == (501, 20)
+        return 0
+
+    monkeypatch.setattr(container_supervisor, "_self_test", self_test)
+
+    assert container_supervisor.main(("self-test", "--uid", "501", "--gid", "20")) == 0
 
 
 def test_supervisor_holds_candidate_container_until_controller_release(
@@ -42,13 +54,21 @@ def test_supervisor_holds_candidate_container_until_controller_release(
     try:
         deadline = time.monotonic() + 5
         while (
-            main(("probe", "--control-directory", str(control))) != 0
+            container_supervisor.main(
+                ("probe", "--control-directory", str(control))
+            )
+            != 0
             and time.monotonic() < deadline
         ):
             time.sleep(0.02)
         assert marker.read_text(encoding="utf-8") == "done"
         assert process.poll() is None
-        assert main(("release", "--control-directory", str(control))) == 0
+        assert (
+            container_supervisor.main(
+                ("release", "--control-directory", str(control))
+            )
+            == 0
+        )
         assert process.wait(timeout=5) == 0
     finally:
         if process.poll() is None:
