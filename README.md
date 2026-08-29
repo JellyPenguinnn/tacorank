@@ -4,7 +4,7 @@ TacoRank is a deterministic, evidence-tracked harness for autonomous recommender
 
 The repository is organized for five developers with one canonical schema and explicit typed handoffs. The controller owns orchestration; role components return values and never compete for control.
 
-> **Current main status:** The production CLI composes DeepSeek planning, the pinned Trae coding worker, Gate A, Docker execution, SRE/recovery, Gate B, and protected evaluation. `tacorank setup-live` derives and hash-binds the machine-specific runtime, data views, official baseline, and configuration; `tacorank preflight` verifies them before any ledger event is created.
+> **Current main status:** The production CLI composes DeepSeek planning, the pinned Trae coding worker, Gate A, Docker execution, SRE/recovery, Gate B, and protected evaluation. `tacorank setup-live` derives and hash-binds the machine-specific runtime, legal data views, label-free submission contract, official baseline, and configuration; `tacorank preflight` verifies them before any ledger event is created. The Person 3 path has completed live CPU acceptance through full inference and submission checking; autonomous convergence and finalization remain separate controller-level work.
 
 ## System architecture
 
@@ -173,6 +173,12 @@ export DEEPSEEK_API_KEY='your-key'
 If Python 3.12 or Docker is not on `PATH`, pass canonical executables with `--python312` and `--docker`. If the data is already present, omit `--download-data` and use `--data-dir` when needed. Setup requires a clean tracked checkout because the generated Docker image, Git baseline, contract, and protected manifest must all describe the same commit.
 
 Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, pinned Trae install/config/runtime, credential presence and DeepSeek model access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
+
+### Latest live CPU acceptance
+
+The 2026-08-30 acceptance run used `deepseek-v4-flash` with high reasoning and the pinned Trae worker. A real Trae patch passed Gate A, then isolated smoke and proxy executions passed every Gate B check. The official proxy score was below baseline, so the controller correctly pruned it instead of promoting it. To validate the otherwise-unreached execution path, the same sealed commit was then run twice at full fidelity with seed 33 through the canonical runner and Gate B without changing the prune decision. Both 124,909-row outputs were byte-identical, passed the protected submission checker, and were accepted by the official evaluator. Exact hashes, metrics, limits, and the boundary between ledger evidence and the separate full-fidelity diagnostic are recorded in [`docs/person3-handoff.md`](docs/person3-handoff.md).
+
+This proves the Person 3 coding and CPU execution stage is runnable; it does not claim that the 50-experiment research search converged or that `finalize` is implemented.
 
 After a run starts, inspect or rebuild its state with:
 

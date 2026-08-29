@@ -1,6 +1,6 @@
 # Person 3 integration handoff
 
-This branch implements the coding-worker, Git-lineage, deterministic safety-gate, execution, telemetry, artifact, and prediction-output boundaries defined by `03-person-3-brian-coding-execution-safety.md`.
+This implementation provides the coding-worker, Git-lineage, deterministic safety-gate, execution, telemetry, artifact, and prediction-output boundaries defined by `03-person-3-brian-coding-execution-safety.md`.
 
 ## Ownership and authority
 
@@ -112,3 +112,32 @@ python3.12 -m pip install -r requirements-trae.txt
 ```
 
 Live Trae, container, GPU, and full-data validation are separate deployment checks and must not be inferred from mocked tests.
+
+## Live CPU acceptance evidence
+
+The final acceptance deployment was generated from tracked source commit `5f6373c` as run `person3_cpu_acceptance_010`. Its credentialed preflight passed without creating a ledger and reproduced the official FM baseline primary score `0.601468756352959`. The deployment bound Docker image `sha256:ce35c21d01f3fde056159f0fd2211d356679afddfd44d9f62808c45fa75d598b`, data manifest `0ca4fbf1fc9f1948e752bb7a062d8935dcff57a99e0c9a81c962dc92e7befa97`, the reviewed contract, legal views, and the generated label-free submission rows.
+
+The live production iteration used `deepseek-v4-flash` with high reasoning and no fake adapter:
+
+| Evidence | Observed result |
+| --- | --- |
+| Trae coding | 178,812 provider-measured input tokens, 27,487 output tokens, 216,322 ms, zero run-recorded manual interventions |
+| Trajectory and diff | `775c7a0c80b17a26f0a0a077a73f4ca66e0b42da5fce4b1d76e9bc09551efc16` and `9c3b5918b9ab7b6f913b4e36d1aea7e298ed97afde7c8198f9ba352a7cb72b7b` |
+| Gate A | Accepted commit `7e76b05ea59341f7e0c44b61c2401ae7be9313c6`; receipt `485a7aca2d90d11f305de3e5a3e33e83575b96bd7e1e721667a67d4b49a69a7a` |
+| Smoke execution | Exit 0; Gate B accepted all 11 checks; prediction SHA-256 `e3fc223d75656d670aa4c604dc1e86cde784d1131b3c6c9ccada7d3c2f400398` |
+| Proxy execution | Exit 0; Gate B accepted all 11 checks; GAUC `0.6121441544192503`, nDCG@5 `0.5086155968924914`, primary `0.5603798756558709` |
+| Controller decision | `PROXY_FAILED`; correctly pruned because the candidate underperformed the frozen baseline |
+
+Because the honest proxy decision prevented full promotion, full-fidelity execution was validated separately against the same Gate-A-sealed commit. This diagnostic used the canonical production runner, execution seal, Gate B, protected evaluator, and submission checker, but did not append a false promotion or full-evaluation event to the research ledger.
+
+| Full-fidelity check | Observed result |
+| --- | --- |
+| Repetitions | Attempts 3 and 4, both seed 33, CPU only |
+| Determinism | Identical prediction SHA-256 `c5a47927fbb8f3fe1ce706c54c99b78d730ac2756777814389108a36bb101cdb` and ordered prediction SHA-256 `0c5cc58785ae97c22de941f02f6a70c15c82f522ffebab3ac06515a4501a5d14` |
+| Gate B | Accepted twice; artifact identity, header, types, row count/order, duplicate preservation, finite/diverse scores, producer seal, and protected-data checks all passed |
+| Official full metrics | GAUC `0.6262603394573768`, nDCG@5 `0.5177471235029993`, primary `0.572003731480188` |
+| Submission compatibility | Protected checker passed all 124,909 rows |
+| Limits | 2 Docker CPUs, 4096 MB request limit, 600 s wall limit, 128 processes, 256 open files, network disabled, zero GPUs, 256 MB runtime tmpfs, 2 GiB hard output quota |
+| Telemetry | 3 and 4 samples; peak RSS 97 MB; peak observed CPU 101.51%; no GPU samples |
+
+Run artifacts, the official dataset, credentials, and generated deployment files remain ignored and are not Git deliverables. Reviewers can reproduce the stage from a clean checkout with `setup-live`, `preflight`, and `run`. The evidence above validates Person 3's coding and CPU execution boundary; it is not evidence that the complete multi-experiment search converged, and it does not remove the documented `resume` and `finalize` limitations.
