@@ -32,6 +32,9 @@ class TelemetryWindow(Sequence[TelemetrySample]):
     def add(self, sample: TelemetrySample) -> None:
         self._samples.append(sample)
 
+    def clear(self) -> None:
+        self._samples.clear()
+
     def snapshot(self) -> List[TelemetrySample]:
         """Return an isolated snapshot suitable for deterministic analysis."""
 

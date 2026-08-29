@@ -8,6 +8,19 @@ from typing import Any
 from .fingerprints import fingerprint_result, normalize_text
 
 
+DELIBERATE_INTEGRITY_CODES = frozenset(
+    {
+        "FORBIDDEN_INPUT_DETECTED",
+        "HIDDEN_LABEL_ACCESS",
+        "NETWORK_ACCESS",
+        "SECRET_DETECTED",
+        "TARGET_LABEL_ACCESS",
+        "UNAPPROVED_NETWORK",
+        "UNAUTHORIZED_NETWORK_ACCESS",
+    }
+)
+
+
 @dataclass(frozen=True)
 class FailureClassification:
     failure_class: str
@@ -24,9 +37,17 @@ def _value(value: Any) -> Any:
 
 def _failed_checks(result: Any) -> list[str]:
     checks = getattr(result, "checks", None)
-    if not isinstance(checks, dict):
-        return []
-    return [str(name) for name, status in checks.items() if str(_value(status)).lower() == "fail"]
+    if isinstance(checks, dict):
+        return [
+            str(name)
+            for name, status in checks.items()
+            if str(_value(status)).lower() == "fail"
+        ]
+    return [
+        str(getattr(check, "name", ""))
+        for check in (checks or ())
+        if str(_value(getattr(check, "status", ""))).lower() == "fail"
+    ]
 
 
 def _violation_text(result: Any) -> str:
@@ -34,6 +55,14 @@ def _violation_text(result: Any) -> str:
         f"{getattr(v, 'code', '')} {getattr(v, 'message', v)}"
         for v in (getattr(result, "violations", ()) or ())
     )
+
+
+def _violation_codes(result: Any) -> set[str]:
+    return {
+        str(getattr(violation, "code", "")).strip().upper()
+        for violation in (getattr(result, "violations", ()) or ())
+        if getattr(violation, "code", None)
+    }
 
 
 def classify_failure(result: Any) -> FailureClassification:
@@ -82,8 +111,21 @@ def classify_failure(result: Any) -> FailureClassification:
         evidence = combined
 
     lower_evidence = str(evidence).lower()
-    deliberate = failure_class == "contract_error" and any(
-        token in lower_evidence for token in ("hidden", "secret", "credential", "exfiltrat")
+    violation_codes = _violation_codes(result)
+    deliberate = failure_class == "contract_error" and (
+        bool(violation_codes & DELIBERATE_INTEGRITY_CODES)
+        or any(
+            token in lower_evidence
+            for token in (
+                "hidden label",
+                "target label",
+                "secret",
+                "credential",
+                "exfiltrat",
+                "unauthorized network",
+                "unapproved network",
+            )
+        )
     )
     made_progress = any(
         token in lower_evidence for token in ("progress", "checkpoint", "epoch", "step ")

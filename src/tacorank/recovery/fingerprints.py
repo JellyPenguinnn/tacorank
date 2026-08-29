@@ -75,14 +75,19 @@ def fingerprint_failure(
 
 def fingerprint_result(result: Any) -> str:
     """Fingerprint any supported run, gate, output, or no-op result."""
-    supplied = getattr(result, "error_fingerprint", None)
-    if supplied and re.fullmatch(r"[0-9a-fA-F]{64}", str(supplied)):
-        return str(supplied).lower()
+    # Upstream fingerprints are evidence, not authority. Trusting a caller-
+    # supplied digest lets the same normalized failure evade retry limits.
     violations = getattr(result, "violations", ()) or ()
     codes = [getattr(item, "code", item) for item in violations]
     checks = getattr(result, "checks", None)
     if isinstance(checks, dict):
         codes.extend(key for key, status in checks.items() if str(_value(status)).lower() == "fail")
+    else:
+        codes.extend(
+            getattr(check, "name", "")
+            for check in (checks or ())
+            if str(_value(getattr(check, "status", ""))).lower() == "fail"
+        )
     evidence = (
         getattr(result, "error_summary", None)
         or getattr(result, "trace_tail", None)

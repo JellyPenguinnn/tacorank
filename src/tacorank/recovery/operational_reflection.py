@@ -16,12 +16,16 @@ def build_operational_lesson(
     context: Any,
     *,
     exhausted: bool,
+    failure_event_id: str | None = None,
 ) -> Any | None:
     """Return a typed lesson only for exhausted/reusable operational constraints."""
     if not exhausted and not classification.deliberate_integrity_violation:
         return None
     failure = classification.failure_class
-    repeated = list(getattr(context, "prior_error_fingerprints", ()) or ()).count(
+    prior = getattr(context, "previous_error_fingerprints", None)
+    if prior is None:
+        prior = getattr(context, "prior_error_fingerprints", ())
+    repeated = list(prior or ()).count(
         classification.fingerprint
     ) >= 1
     if failure == "oom" and repeated:
@@ -30,13 +34,13 @@ def build_operational_lesson(
         applicability = "The current data, patch, and resource profile."
         avoid_when = "Avoid the same or larger memory footprint without an approved lower-memory setting."
         confidence = 0.95
-    elif failure == "no_op" and exhausted:
+    elif failure == "no_op" and repeated:
         category, tags = "implementation_constraint", ["wiring", "no_op"]
         summary = "The accepted change produced unchanged predictions after focused wiring recovery."
         applicability = "This implementation path and configuration-consumption boundary."
         avoid_when = "Do not treat the underlying research hypothesis as falsified until wiring is verified."
         confidence = 0.9
-    elif failure == "hang" and exhausted:
+    elif failure == "hang" and repeated:
         category, tags = "process_rule", ["hang", "heartbeat"]
         summary = "The same execution profile repeatedly stopped making observable progress."
         applicability = "The current command and heartbeat profile."
@@ -62,9 +66,7 @@ def build_operational_lesson(
         applicability=applicability,
         avoid_when=avoid_when,
         confidence=confidence,
-        source_event_ids=[getattr(context, "failure_event_id", None)]
-        if getattr(context, "failure_event_id", None)
-        else [],
+        source_event_ids=[failure_event_id] if failure_event_id else [],
         source_commit_shas=[getattr(context, "current_patch_commit_sha", None)]
         if getattr(context, "current_patch_commit_sha", None)
         else [],

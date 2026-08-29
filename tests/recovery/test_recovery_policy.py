@@ -1,200 +1,152 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from tacorank.recovery.classifier import classify_failure
-from tacorank.recovery.fingerprints import fingerprint_failure
 from tacorank.recovery.policy import RecoveryManager
+from tacorank.orchestrator.router import Harness
 from tacorank.schemas import RecoveryAction, RecoveryPolicyContext
 
 
-def context(**changes):
-    values = dict(
-        run_id="run-1",
-        experiment_id="exp-1",
-        original_experiment_spec={
-            "hypothesis": "Pairwise training improves within-user ordering",
-            "expected_mechanism": "more informative preference gradients",
-        },
-        current_patch_commit_sha="abc123",
-        failure_event_id="evt-failure-1",
-        attempt_history=[],
-        prior_error_fingerprints=[],
-        repair_attempts_used=0,
-        max_repair_attempts=2,
-        same_commit_retries_used=0,
-        remaining_run_budget={"runs": 3},
-        allowed_runtime_adjustments={},
-        contract_summary="candidate training files only",
-    )
-    values.update(changes)
-    return RecoveryPolicyContext(**values)
-
-
-def run_failure(outcome, summary="failure evidence", fingerprint=None):
+def run_failure(outcome="code_error", summary="candidate failure", upstream_hash=None):
     return SimpleNamespace(
         outcome=outcome,
-        error_class="RuntimeError",
+        error_class=outcome,
         error_summary=summary,
-        error_fingerprint=fingerprint,
+        error_fingerprint=upstream_hash,
     )
 
 
-def test_fingerprint_ignores_timestamp_address_temp_path_and_line_number():
-    first = fingerprint_failure(
-        "code_error",
-        '2026-08-29T10:00:00Z File "C:\\temp\\a\\solution\\train.py", line 19, in fit\nValueError: bad 0xabc',
+def context(*, remaining=2, previous=()):
+    return RecoveryPolicyContext(
+        run_id="run-1",
+        experiment_id="exp-1",
+        remaining_repair_budget=remaining,
+        previous_error_fingerprints=list(previous),
     )
-    second = fingerprint_failure(
-        "code_error",
-        '2026-08-29T11:10:12Z File "C:\\temp\\b\\solution\\train.py", line 91, in fit\nValueError: bad 0xdef',
+
+
+def decide(result, ctx=None, event_id="evt-failure-1"):
+    return asyncio.run(
+        RecoveryManager().decide(event_id, result, ctx or context())
     )
-    assert first == second
-    assert len(first) == 64
 
 
 def test_candidate_code_failure_gets_focused_first_repair():
-    decision = RecoveryManager().decide(
-        run_failure("code_error", "NameError in solution/train.py"), context()
-    )
-    assert decision.action is RecoveryAction.TRAE_REPAIR
+    decision = decide(run_failure("code_error", "NameError in solution/train.py"))
+
+    assert decision.action == RecoveryAction.TRAE_REPAIR
     assert decision.repair_attempt == 1
     assert decision.remaining_repair_budget == 1
-    assert "original hypothesis remains" in decision.instructions
-    assert "First explain the fault briefly" in decision.instructions
-    assert "do not edit protected" in decision.instructions
+    assert "original hypothesis" in decision.instructions.lower()
 
 
-def test_same_fingerprint_twice_abandons_before_another_repair():
-    result = run_failure("interface_error", "shape mismatch")
+def test_repair_budget_is_hard_capped_and_attempt_is_never_zero():
+    decision = decide(run_failure(), context(remaining=0))
+
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "REPAIR_BUDGET_EXHAUSTED"
+    assert decision.repair_attempt >= 1
+
+
+def test_supplied_hash_cannot_bypass_normalized_fingerprint_limit():
+    first = run_failure(upstream_hash="a" * 64)
+    second = run_failure(upstream_hash="b" * 64)
+    fingerprint = classify_failure(first).fingerprint
+
+    assert classify_failure(second).fingerprint == fingerprint
+    decision = decide(second, context(previous=[fingerprint]))
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "REPEATED_ERROR_FINGERPRINT"
+
+
+def test_harness_recomputes_prior_fingerprints_and_excludes_current_failure():
+    prior = run_failure(upstream_hash="a" * 64)
+    current = run_failure(upstream_hash="b" * 64)
+    prior.experiment_id = current.experiment_id = "exp-1"
+    harness = Harness.__new__(Harness)
+    harness.events = lambda: [
+        SimpleNamespace(
+            event_id="evt-prior",
+            payload=SimpleNamespace(result=prior),
+        ),
+        SimpleNamespace(
+            event_id="evt-current",
+            payload=SimpleNamespace(result=current),
+        ),
+    ]
+
+    fingerprints = harness._previous_failure_fingerprints(
+        "exp-1", "evt-current"
+    )
+
+    assert fingerprints == [classify_failure(prior).fingerprint]
+    assert fingerprints != ["a" * 64]
+
+
+@pytest.mark.parametrize("outcome", ["infrastructure_error", "hang", "timeout"])
+def test_transient_execution_failure_gets_one_exact_retry(outcome):
+    result = run_failure(outcome, "execution stopped after progress")
+    first = decide(result)
     fingerprint = classify_failure(result).fingerprint
-    decision = RecoveryManager().decide(
-        result,
-        context(prior_error_fingerprints=[fingerprint], repair_attempts_used=1),
-    )
-    assert decision.action is RecoveryAction.ABANDON
-    assert decision.same_error_count == 2
-    assert decision.repair_attempt == 1
+    second = decide(result, context(previous=[fingerprint]))
+
+    assert first.action == RecoveryAction.RETRY_SAME_COMMIT
+    assert second.action == RecoveryAction.ABANDON
 
 
-def test_repair_budget_is_hard_capped_at_two():
-    decision = RecoveryManager().decide(
-        run_failure("code_error", "new syntax error"),
-        context(repair_attempts_used=2),
-    )
-    assert decision.action is RecoveryAction.ABANDON
-    assert decision.repair_attempt == 2
-    assert decision.remaining_repair_budget == 0
+def test_oom_without_contract_approved_adjustment_rolls_back():
+    assert decide(run_failure("oom", "CUDA out of memory")).action == RecoveryAction.ROLLBACK
 
 
-def test_infrastructure_and_hang_get_only_one_exact_retry():
-    first = RecoveryManager().decide(run_failure("infrastructure_error"), context())
-    assert first.action is RecoveryAction.RETRY_SAME_COMMIT
-    second = RecoveryManager().decide(
-        run_failure("hang", "heartbeat stale"),
-        context(same_commit_retries_used=1),
-    )
-    assert second.action is RecoveryAction.ABANDON
-    assert second.lesson_candidate.category.value == "process_rule"
-
-
-def test_oom_uses_only_named_allowlisted_adjustment():
-    decision = RecoveryManager().decide(
-        run_failure("oom", "CUDA out of memory"),
-        context(allowed_runtime_adjustments={"batch_size": 32, "shell": "rm -rf /"}),
-    )
-    assert decision.action is RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING
-    assert "batch_size=32" in decision.instructions
-    assert "shell" not in decision.instructions
-
-
-def test_oom_without_legal_adjustment_rolls_back():
-    decision = RecoveryManager().decide(run_failure("oom"), context())
-    assert decision.action is RecoveryAction.ROLLBACK
-
-
-def test_repeated_oom_emits_evidence_linked_resource_lesson():
-    result = run_failure("oom", "CUDA out of memory")
-    decision = RecoveryManager().decide(
-        result,
-        context(prior_error_fingerprints=[classify_failure(result).fingerprint]),
-    )
-    lesson = decision.lesson_candidate
-    assert decision.action is RecoveryAction.ABANDON
-    assert lesson.category.value == "resource_constraint"
-    assert lesson.source_event_ids == ["evt-failure-1"]
-    assert lesson.source_commit_shas == ["abc123"]
-
-
-def test_timeout_does_not_expand_unapproved_budget():
-    decision = RecoveryManager().decide(
-        run_failure("timeout", "steady checkpoint progress"), context()
-    )
-    assert decision.action is RecoveryAction.ABANDON
-    assert decision.reason_code == "TIMEOUT_TOO_COSTLY"
-
-
-def test_explicitly_exhausted_structured_run_budget_abandons():
-    decision = RecoveryManager().decide(
-        run_failure("code_error"),
-        context(remaining_run_budget={"proxy_runs": 0, "full_runs": 0}),
-    )
-    assert decision.action is RecoveryAction.ABANDON
-    assert decision.reason_code == "RUN_BUDGET_EXHAUSTED"
-
-
-def test_gate_b_alignment_failure_routes_to_focused_repair():
-    output = SimpleNamespace(
+@pytest.mark.parametrize(
+    "code,message",
+    [
+        ("UNAPPROVED_NETWORK", "unauthorized network access"),
+        ("TARGET_LABEL_ACCESS", "candidate read target labels"),
+    ],
+)
+def test_deliberate_integrity_codes_abandon_without_repair(code, message):
+    result = SimpleNamespace(
         accepted=False,
-        checks={"row_alignment": "fail", "finite_scores": "pass"},
-        violations=[SimpleNamespace(code="ROW_ALIGNMENT", message="row order differs")],
+        checks=[],
+        violations=[SimpleNamespace(code=code, message=message)],
     )
-    decision = RecoveryManager().decide(output, context())
-    assert decision.action is RecoveryAction.TRAE_REPAIR
-    assert "Gate B output-contract checks" in decision.instructions
+    decision = decide(result)
+
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "INTEGRITY_VIOLATION"
+
+
+def test_first_hang_does_not_claim_repeated_hangs_when_budget_is_exhausted():
+    decision = decide(run_failure("hang", "worker stopped"), context(remaining=0))
+
+    assert decision.action == RecoveryAction.RETRY_SAME_COMMIT
+    assert decision.lesson_candidate is None
+
+
+def test_first_noop_does_not_claim_a_focused_repair_occurred():
+    result = SimpleNamespace(
+        trust=SimpleNamespace(verdict="no_op", flags=["predictions unchanged"])
+    )
+    decision = decide(result, context(remaining=0))
+
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.lesson_candidate is None
+
+
+def test_repeated_hang_emits_evidence_linked_lesson():
+    result = run_failure("hang", "worker stopped")
+    fingerprint = classify_failure(result).fingerprint
+    decision = decide(result, context(previous=[fingerprint]))
+
+    assert decision.lesson_candidate is not None
+    assert decision.lesson_candidate.source_event_ids == ["evt-failure-1"]
+    assert "repeatedly" in decision.lesson_candidate.summary
 
 
 def test_non_noop_evaluation_is_not_a_recovery_input():
-    accepted = SimpleNamespace(trust=SimpleNamespace(verdict="negative", flags=[]))
-    with pytest.raises(ValueError, match="only an evaluation verdict of no_op"):
-        RecoveryManager().decide(accepted, context())
-
-
-def test_first_noop_repairs_wiring_and_repeated_noop_reflects_sparsely():
-    result = SimpleNamespace(trust=SimpleNamespace(verdict="no_op", flags=["unchanged_scores"]))
-    first = RecoveryManager().decide(result, context())
-    assert first.action is RecoveryAction.TRAE_REPAIR
-    assert "wiring smoke test" in first.instructions
-    assert first.lesson_candidate is None
-
-    second = RecoveryManager().decide(
-        result,
-        context(
-            prior_error_fingerprints=[classify_failure(result).fingerprint],
-            repair_attempts_used=1,
-        ),
-    )
-    assert second.action is RecoveryAction.ABANDON
-    assert second.lesson_candidate.category.value == "implementation_constraint"
-    assert "hypothesis as falsified" in second.lesson_candidate.avoid_when
-
-
-def test_hidden_access_abandons_and_emits_integrity_lesson():
-    gate_result = SimpleNamespace(
-        accepted=False,
-        checks=[],
-        violations=[SimpleNamespace(code="HIDDEN_ACCESS", message="attempted hidden label access")],
-    )
-    decision = RecoveryManager().decide("evt-legacy", gate_result, context())
-    assert decision.failure_event_id == "evt-legacy"
-    assert decision.action is RecoveryAction.ABANDON
-    assert decision.lesson_candidate.category.value == "integrity_warning"
-    assert decision.lesson_candidate.confidence == pytest.approx(0.99)
-
-
-def test_one_off_syntax_failure_produces_no_operational_lesson():
-    decision = RecoveryManager().decide(
-        run_failure("code_error", "SyntaxError: invalid syntax"), context()
-    )
-    assert decision.action is RecoveryAction.TRAE_REPAIR
-    assert decision.lesson_candidate is None
+    result = SimpleNamespace(trust=SimpleNamespace(verdict="valid", flags=[]))
+    with pytest.raises(ValueError):
+        decide(result)

@@ -28,7 +28,12 @@ class SREObserver(HealthObserver):
             raise ValueError("provide policy or config, not both")
         self.window = TelemetryWindow(window_capacity)
         self.policy = policy or HealthPolicy(config)
+        self._execution_identity: Optional[tuple[str, str, int]] = None
 
     def observe(self, sample: TelemetrySample) -> MonitorDirective:
+        identity = (sample.run_id, sample.experiment_id, sample.attempt)
+        if self._execution_identity != identity:
+            self.window.clear()
+            self._execution_identity = identity
         self.window.add(sample)
         return self.policy.evaluate(self.window)

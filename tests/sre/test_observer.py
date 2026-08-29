@@ -28,7 +28,7 @@ def sample(**overrides):
         loss=1.0,
         gradient_norm=None,
         disk_free_mb=10_000,
-        recent_output_tail=None,
+        recent_output_tail="",
     )
     values.update(overrides)
     return TelemetrySample(**values)
@@ -197,7 +197,20 @@ def test_window_is_bounded_and_keeps_order():
         window.add(sample(elapsed_ms=elapsed))
     assert len(window) == 3
     assert [item.elapsed_ms for item in window] == [2, 3, 4]
-    assert window.latest.elapsed_ms == 4
+
+
+def test_observer_resets_numerical_window_when_execution_identity_changes():
+    observer = SREObserver(
+        config=HealthPolicyConfig(anomaly_baseline_samples=3, anomaly_persistence=2)
+    )
+    for value in (1.0, 1.1, 0.9):
+        observer.observe(sample(loss=value))
+
+    first_new_attempt = observer.observe(sample(attempt=2, loss=100.0))
+
+    assert first_new_attempt.action.value == "continue"
+    assert len(observer.window) == 1
+    assert observer.window.latest.attempt == 2
 
 
 @pytest.mark.parametrize("capacity", [0, -1, True, 1.5])
