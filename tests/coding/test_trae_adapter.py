@@ -96,6 +96,7 @@ trajectory = {
     "fake_cli_arguments": sys.argv[1:],
     "fake_environment": {
         "PYTHON_DOTENV_DISABLED": os.environ.get("PYTHON_DOTENV_DISABLED"),
+        "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
         "PATH": os.environ.get("PATH"),
         "DOCKER_CONFIG": os.environ.get("DOCKER_CONFIG"),
         "HOME": os.environ.get("HOME"),
@@ -439,6 +440,7 @@ def test_real_adapter_seals_patch_and_redacted_evidence(
     assert trajectory["tacorank_adapter"]["redacted"] is True
     assert trajectory["tacorank_adapter"]["isolation_mode"] == "trusted_test"
     assert trajectory["fake_environment"]["PYTHON_DOTENV_DISABLED"] == "1"
+    assert trajectory["fake_environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert trajectory["fake_environment"]["HOME"] != "/sensitive-real-home"
     assert trajectory["fake_environment"]["HOME"].endswith("/home")
     assert trajectory["fake_environment"]["TMPDIR"].endswith("/tmp")

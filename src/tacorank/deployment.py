@@ -72,8 +72,9 @@ def setup_live_deployment(
     runtime.mkdir(parents=True, exist_ok=False)
     deployment.mkdir(parents=True, exist_ok=False)
     _install_trae(python, runtime, root)
-    runtime_identity = _trae_identity(runtime)
     image, image_environment_sha256 = _build_runtime_image(root, docker)
+    _install_trae_tools(runtime, docker, image, root)
+    runtime_identity = _trae_identity(runtime)
     generated_data = _prepare_data(root, deployment, data)
 
     trae_yaml = deployment / "trae-agent.yaml"
@@ -462,6 +463,7 @@ def _install_trae(python: Path, runtime: Path, root: Path) -> None:
             "pip",
             "install",
             "--disable-pip-version-check",
+            "--no-compile",
             "-r",
             str(root / "requirements-trae.txt"),
         ),
@@ -470,15 +472,108 @@ def _install_trae(python: Path, runtime: Path, root: Path) -> None:
     )
 
 
-def _trae_identity(runtime: Path) -> Mapping[str, Path]:
-    executable = runtime / ("Scripts/trae-cli.exe" if os.name == "nt" else "bin/trae-cli")
+def _install_trae_tools(
+    runtime: Path,
+    docker: Path,
+    image: str,
+    root: Path,
+) -> None:
+    """Install the pinned Linux tool bundle built into the runtime image."""
+
+    site_packages = _trae_site_packages(runtime)
+    package_root = site_packages / "trae_agent"
+    destination = package_root / "dist"
+    staging = runtime / ".trae-tools-staging"
+    if (
+        not package_root.is_dir()
+        or package_root.is_symlink()
+        or package_root.resolve(strict=True) != package_root
+        or staging.exists()
+        or staging.is_symlink()
+    ):
+        raise DeploymentError("Trae package cannot receive canonical Docker tools")
+    staging.mkdir(mode=0o700)
+    container_id = _run_output(
+        (str(docker), "create", "--entrypoint", "/bin/true", image),
+        cwd=root,
+        label="Trae tool extraction container creation",
+    )
+    if len(container_id) != 64 or any(
+        character not in "0123456789abcdef" for character in container_id
+    ):
+        raise DeploymentError("Docker returned an invalid tool extraction container")
+    try:
+        _run(
+            (
+                str(docker),
+                "cp",
+                container_id + ":/opt/tacorank-trae-tools/.",
+                str(staging),
+            ),
+            cwd=root,
+            label="Trae tool extraction",
+        )
+        _validate_trae_tools(staging)
+        if destination.is_symlink() or not destination.is_dir():
+            raise DeploymentError("installed Trae tool directory is invalid")
+        shutil.rmtree(destination)
+        os.replace(staging, destination)
+    finally:
+        _run(
+            (str(docker), "rm", "--force", "--volumes", container_id),
+            cwd=root,
+            label="Trae tool extraction container cleanup",
+        )
+
+
+def _validate_trae_tools(root: Path) -> None:
+    required = (root / "edit_tool", root / "json_edit_tool")
+    internal = root / "_internal"
+    if (
+        root.is_symlink()
+        or root.resolve(strict=True) != root
+        or internal.is_symlink()
+        or not internal.is_dir()
+        or internal.resolve(strict=True) != internal
+    ):
+        raise DeploymentError("built Trae tools have an invalid canonical layout")
+    paths = tuple(root.rglob("*"))
+    if not paths or len(paths) > 10_000:
+        raise DeploymentError("built Trae tool asset count is invalid")
+    total_bytes = 0
+    for path in paths:
+        if path.is_symlink():
+            raise DeploymentError("built Trae tools cannot contain symlinks")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise DeploymentError("built Trae tools contain a non-regular asset")
+        total_bytes += path.stat().st_size
+        if total_bytes > 1024 * 1024 * 1024:
+            raise DeploymentError("built Trae tools exceed the deployment byte bound")
+    for executable in required:
+        if (
+            executable.is_symlink()
+            or not executable.is_file()
+            or executable.resolve(strict=True) != executable
+            or not os.access(executable, os.X_OK)
+        ):
+            raise DeploymentError("built Trae tool executable is invalid")
+
+
+def _trae_site_packages(runtime: Path) -> Path:
     python = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     site_packages_text = _run_output(
         (str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"),
         cwd=runtime,
         label="Trae site-packages discovery",
     )
-    site_packages = Path(site_packages_text).resolve(strict=True)
+    return Path(site_packages_text).resolve(strict=True)
+
+
+def _trae_identity(runtime: Path) -> Mapping[str, Path]:
+    executable = runtime / ("Scripts/trae-cli.exe" if os.name == "nt" else "bin/trae-cli")
+    site_packages = _trae_site_packages(runtime)
     direct_urls = tuple(site_packages.glob("trae_agent-*.dist-info/direct_url.json"))
     dotenv_metadata = tuple(site_packages.glob("python_dotenv-*.dist-info/METADATA"))
     if len(direct_urls) != 1 or len(dotenv_metadata) != 1:
@@ -494,11 +589,20 @@ def _trae_identity(runtime: Path) -> Mapping[str, Path]:
 def _build_runtime_image(root: Path, docker: Path) -> Tuple[str, str]:
     commit = _git_text(root, ("rev-parse", "--short=12", "HEAD"))
     tag = "tacorank-runtime:" + commit
+    platform = _run_output(
+        (str(docker), "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"),
+        cwd=root,
+        label="Docker server platform",
+    )
+    if platform not in {"linux/amd64", "linux/arm64"}:
+        raise DeploymentError("Docker server platform is not supported: " + platform)
     _run(
         (
             str(docker),
             "build",
             "--pull",
+            "--platform",
+            platform,
             "--file",
             str(root / "docker" / "runtime.Dockerfile"),
             "--tag",

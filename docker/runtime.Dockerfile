@@ -1,3 +1,40 @@
+FROM python:3.12-slim AS trae-tools
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONNOUSERSITE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends binutils git \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements-trae.txt /opt/trae-build/requirements-trae.txt
+RUN python -m pip install --no-cache-dir \
+    --requirement /opt/trae-build/requirements-trae.txt
+WORKDIR /usr/local/lib/python3.12/site-packages
+RUN pyinstaller --clean --noconfirm \
+        --name edit_tool \
+        --distpath /tmp/trae-edit-dist \
+        --workpath /tmp/trae-edit-build \
+        --specpath /tmp/trae-edit-spec \
+        trae_agent/tools/edit_tool_cli.py \
+    && pyinstaller --clean --noconfirm \
+        --name json_edit_tool \
+        --hidden-import jsonpath_ng \
+        --distpath /tmp/trae-json-dist \
+        --workpath /tmp/trae-json-build \
+        --specpath /tmp/trae-json-spec \
+        trae_agent/tools/json_edit_tool_cli.py \
+    && rm -rf trae_agent/dist \
+    && mkdir trae_agent/dist \
+    && cp /tmp/trae-edit-dist/edit_tool/edit_tool trae_agent/dist/edit_tool \
+    && cp /tmp/trae-json-dist/json_edit_tool/json_edit_tool trae_agent/dist/json_edit_tool \
+    && cp -R /tmp/trae-json-dist/json_edit_tool/_internal trae_agent/dist/_internal \
+    && test -x trae_agent/dist/edit_tool \
+    && test -x trae_agent/dist/json_edit_tool \
+    && test -d trae_agent/dist/_internal \
+    && trae_agent/dist/edit_tool --help >/dev/null \
+    && trae_agent/dist/json_edit_tool --help >/dev/null
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -9,6 +46,9 @@ COPY pyproject.toml setup.cfg setup.py requirements.txt ./
 COPY src ./src
 COPY benchmarks ./benchmarks
 RUN python -m pip install --no-cache-dir .
+COPY --from=trae-tools \
+    /usr/local/lib/python3.12/site-packages/trae_agent/dist \
+    /opt/tacorank-trae-tools
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/python3"]

@@ -1828,6 +1828,7 @@ class TraeCodingWorker:
                 environment[target] = value
         environment["LANG"] = "C.UTF-8"
         environment["LC_ALL"] = "C.UTF-8"
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHON_DOTENV_DISABLED"] = "1"
         environment["GIT_TERMINAL_PROMPT"] = "0"

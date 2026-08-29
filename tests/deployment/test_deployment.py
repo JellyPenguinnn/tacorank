@@ -134,3 +134,31 @@ def test_production_candidate_writes_ordered_finite_predictions(tmp_path: Path) 
         ("u1", "unknown"),
     ]
     assert all(float(row["score"]) == float(row["score"]) for row in rows)
+
+
+def test_validate_trae_tools_accepts_canonical_bundle(tmp_path: Path) -> None:
+    tools = (tmp_path / "tools").resolve()
+    internal = tools / "_internal"
+    internal.mkdir(parents=True)
+    (internal / "libpython.so").write_bytes(b"runtime")
+    for name in ("edit_tool", "json_edit_tool"):
+        executable = tools / name
+        executable.write_bytes(b"tool")
+        executable.chmod(0o755)
+
+    deployment_module._validate_trae_tools(tools)
+
+
+def test_validate_trae_tools_rejects_symlinked_asset(tmp_path: Path) -> None:
+    tools = (tmp_path / "tools").resolve()
+    internal = tools / "_internal"
+    internal.mkdir(parents=True)
+    (internal / "libpython.so").write_bytes(b"runtime")
+    for name in ("edit_tool", "json_edit_tool"):
+        executable = tools / name
+        executable.write_bytes(b"tool")
+        executable.chmod(0o755)
+    (internal / "alias").symlink_to(internal / "libpython.so")
+
+    with pytest.raises(deployment_module.DeploymentError, match="cannot contain symlinks"):
+        deployment_module._validate_trae_tools(tools)
