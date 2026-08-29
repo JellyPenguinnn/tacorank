@@ -88,6 +88,23 @@ def test_context_identity_includes_selection_and_budget_inputs(
     ) == 3
 
 
+def test_planner_source_event_ids_exclude_non_event_evidence(
+    harness, baseline_evaluation
+):
+    method_path = (
+        harness.config.repository_root / "research/methods/provenance_probe.md"
+    )
+    method_path.write_text("Bounded method-card evidence.", encoding="utf-8")
+    harness.bootstrap(baseline_evaluation)
+    events = harness.events()
+
+    context = harness.context_builder.build_planner(events, max_tokens=20_000)
+
+    assert "## Method card" in context.content
+    assert context.source_event_ids == [events[-1].event_id]
+    assert all(source_id.startswith("evt_") for source_id in context.source_event_ids)
+
+
 def test_untrusted_evidence_cannot_close_its_wrapper(harness, baseline_evaluation):
     method = harness.config.repository_root / "research/methods/adversarial.md"
     method.write_text(

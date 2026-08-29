@@ -173,6 +173,10 @@ class ContextBuilder:
             content=content.encode("utf-8"),
             content_type="text/markdown",
         )
+        known_event_ids = {event.event_id for event in events}
+        included_event_ids = [
+            source_id for source_id in included if source_id in known_event_ids
+        ]
         return context_type(
             context_id=context_id,
             role=role,
@@ -181,7 +185,8 @@ class ContextBuilder:
             snapshot_event_id=events[-1].event_id if events else None,
             source_event_ids=list(
                 dict.fromkeys(
-                    ([events[-1].event_id] if events else []) + included
+                    ([events[-1].event_id] if events else [])
+                    + included_event_ids
                 )
             ),
             excluded_source_ids=excluded,
