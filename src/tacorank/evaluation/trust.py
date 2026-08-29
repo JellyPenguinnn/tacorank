@@ -132,7 +132,7 @@ def assess_trust(
         if evidence.delta_correlation_experiment_id:
             suffix = ":%s" % evidence.delta_correlation_experiment_id
         return _assessment(
-            Verdict.REDUNDANT, Stability.CONFIRMED,
+            Verdict.REDUNDANT, Stability.NOT_APPLICABLE,
             Integrity.CLEAN,
             ["DELTA_VECTOR_REDUNDANT:%.4f%s" % (evidence.delta_correlation, suffix)],
             aggregate,

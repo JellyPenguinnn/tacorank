@@ -2,7 +2,7 @@ import unittest
 
 from tacorank.evaluation.no_op import NoOpConfig, analyze_prediction_change, is_no_op
 from tacorank.evaluation.trust import TrustConfig, TrustEvidence, assess_trust
-from tacorank.evaluation.types import Fidelity, Population, Verdict
+from tacorank.evaluation.types import Fidelity, Population, Stability, Verdict
 
 
 def evidence(change, parent_delta=0.0, **overrides):
@@ -81,6 +81,20 @@ class NoOpTrustTests(unittest.TestCase):
             TrustConfig(require_non_decreasing_metrics=True),
         )
         self.assertEqual(prohibited.verdict, Verdict.INCONCLUSIVE)
+
+    def test_redundancy_does_not_claim_seed_confirmation(self):
+        change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
+        trust = assess_trust(
+            evidence(
+                change,
+                parent_delta=0.01,
+                seed_scores=(0.61,),
+                delta_correlation=0.9,
+                delta_correlation_experiment_id="exp_0001",
+            )
+        )
+        self.assertEqual(trust.verdict, Verdict.REDUNDANT)
+        self.assertEqual(trust.stability, Stability.NOT_APPLICABLE)
 
 
 if __name__ == "__main__":
