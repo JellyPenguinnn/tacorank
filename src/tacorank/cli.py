@@ -1,9 +1,10 @@
-"""Command-line interface for ledger validation, replay, and fake integration runs."""
+"""Command-line interface for production runs and ledger operations."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -69,6 +70,8 @@ def _status_dict(state) -> dict:
 
 def _planner_for(config: RunConfig):
     if config.research_provider == "fake":
+        if config.adapter_mode != "fake":
+            raise ContractError("live adapter mode cannot use the fake research provider")
         return FakeResearchPlanner(config.baseline_commit_sha)
     api_key = os.environ.get(config.deepseek_api_key_env, "").strip()
     if not api_key:
@@ -92,7 +95,12 @@ def _planner_for(config: RunConfig):
     )
 
 
-def _harness(config: RunConfig) -> Harness:
+def _runtime(
+    config: RunConfig,
+    *,
+    live_config_path: Optional[Path],
+    allow_test_adapters: bool,
+) -> tuple[Harness, EvaluationResult]:
     verified = verify_contract(config)
     artifacts = ArtifactStore(config.repository_root, config.artifact_roots)
     store = EventStore(
@@ -100,23 +108,65 @@ def _harness(config: RunConfig) -> Harness:
         artifact_store=artifacts,
         transition_validator=validator,
     )
-    return Harness(
+    if config.adapter_mode == "fake":
+        if not allow_test_adapters:
+            raise ContractError(
+                "fake adapters are test-only; pass --allow-test-adapters explicitly"
+            )
+        adapters = {
+            "coding_worker": FakeCodingWorker(artifacts),
+            "patch_gate": FakePatchGate(artifacts),
+            "runner": FakeExecutionRunner(artifacts),
+            "health_observer": FakeHealthObserver(),
+            "recovery_manager": FakeRecoveryManager(),
+            "output_gate": FakeOutputGate(),
+            "evaluator": FakeEvaluator(
+                config.metric_names, config.primary_metric_name
+            ),
+        }
+        baseline = _fake_baseline(config, verified.contract_sha256)
+    else:
+        if live_config_path is None:
+            raise ContractError("live adapter mode requires --live-config")
+        if config.live_adapter_config_sha256 is None:
+            raise ContractError(
+                "live adapter mode requires a frozen live_adapter_config_sha256"
+            )
+        actual_live_hash = hashlib.sha256(live_config_path.read_bytes()).hexdigest()
+        if actual_live_hash != config.live_adapter_config_sha256:
+            raise ContractError("live adapter configuration hash does not match")
+        from .orchestrator.live import LiveAdapterConfig, build_live_adapters
+
+        live = LiveAdapterConfig.load(live_config_path)
+        built = build_live_adapters(
+            config=config,
+            verified=verified,
+            live=live,
+            event_store=store,
+            artifact_store=artifacts,
+        )
+        adapters = {
+            "coding_worker": built.coding_worker,
+            "patch_gate": built.patch_gate,
+            "runner": built.runner,
+            "health_observer": built.health_observer,
+            "recovery_manager": built.recovery_manager,
+            "output_gate": built.output_gate,
+            "evaluator": built.evaluator,
+        }
+        baseline = built.baseline
+    harness = Harness(
         config=config,
         verified_contract=verified,
         event_store=store,
         context_builder=ContextBuilder(config, verified, artifacts),
         planner=_planner_for(config),
-        coding_worker=FakeCodingWorker(artifacts),
-        patch_gate=FakePatchGate(artifacts),
-        runner=FakeExecutionRunner(artifacts),
-        health_observer=FakeHealthObserver(),
-        recovery_manager=FakeRecoveryManager(),
-        output_gate=FakeOutputGate(),
-        evaluator=FakeEvaluator(config.metric_names, config.primary_metric_name),
+        **adapters,
     )
+    return harness, baseline
 
 
-def _baseline(config: RunConfig, contract_sha256: str) -> EvaluationResult:
+def _fake_baseline(config: RunConfig, contract_sha256: str) -> EvaluationResult:
     if config.baseline_metrics is None:
         raise ContractError("fake adapter mode requires frozen baseline_metrics in config")
     metric_set = MetricSet(
@@ -153,6 +203,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="start a frozen run")
     run.add_argument("--config", type=Path, required=True)
+    run.add_argument(
+        "--live-config",
+        type=Path,
+        help="operator-reviewed production adapter configuration",
+    )
+    run.add_argument(
+        "--allow-test-adapters",
+        action="store_true",
+        help="explicitly permit deterministic fake adapters for tests only",
+    )
 
     for name in ("resume", "status", "validate-ledger", "rebuild-views", "finalize"):
         command = commands.add_parser(name)
@@ -166,8 +226,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if args.command == "run":
             config = RunConfig.load(args.config)
-            harness = _harness(config)
-            baseline = _baseline(config, harness.verified_contract.contract_sha256)
+            harness, baseline = _runtime(
+                config,
+                live_config_path=args.live_config,
+                allow_test_adapters=args.allow_test_adapters,
+            )
             harness.bootstrap(baseline)
             asyncio.run(harness.run_one_experiment())
             events = harness.events()
@@ -199,7 +262,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "P0 intentionally refuses to fabricate it"
             )
         return 0
-    except (ContractError, LedgerError, ProviderError, ValueError) as exc:
+    except (
+        ContractError,
+        LedgerError,
+        ProviderError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 2
 

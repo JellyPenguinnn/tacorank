@@ -194,16 +194,22 @@ class Harness:
         return True
 
     def _command_for(self, fidelity: Fidelity) -> str:
-        preferred = "run_%s" % fidelity.value
-        if preferred in self.config.command_ids:
-            return preferred
+        for preferred in (
+            "candidate_%s" % fidelity.value,
+            "run_%s" % fidelity.value,
+        ):
+            if preferred in self.config.command_ids:
+                return preferred
         return self.config.command_ids[0]
 
     def _baseline_metrics(self) -> dict:
         baseline = next(
             event for event in self.events() if event.payload.type == "baseline.verified"
         )
-        return dict(baseline.payload.metric_set.metrics)
+        metric_set = baseline.payload.metric_set
+        values = dict(metric_set.metrics)
+        values.setdefault(metric_set.primary_metric_name, metric_set.primary_score)
+        return values
 
     def _previous_failure_fingerprints(
         self, experiment_id: str, before_event_id: str
@@ -396,6 +402,9 @@ class Harness:
         decision, context, decision_event = recovery
         if decision.action != RecoveryAction.TRAE_REPAIR:
             raise OrchestrationError("only Trae repair can create a replacement patch")
+        context = context.model_copy(
+            update={"recovery_instructions": decision.instructions}
+        )
         candidate = await self.coding_worker.repair_patch(context, decision)
         candidate = candidate.__class__.model_validate(
             {
@@ -506,14 +515,17 @@ class Harness:
             )
 
         stage_queue: Deque[Fidelity] = deque(spec.fidelity_plan)
-        attempts = {fidelity: 0 for fidelity in Fidelity}
+        execution_attempt = 0
         runtime_settings = {}
         next_request_template = None
         next_execution_cause = None
         while stage_queue:
             fidelity = stage_queue.popleft()
-            attempts[fidelity] += 1
-            attempt = attempts[fidelity]
+            # Execution artifacts are keyed by experiment + attempt.  Attempts
+            # therefore increase across fidelities and retries; resetting them
+            # at each fidelity would make proxy/full outputs collide.
+            execution_attempt += 1
+            attempt = execution_attempt
             if next_request_template is not None:
                 request = RunRequest.model_validate(
                     {
@@ -528,7 +540,7 @@ class Harness:
                 next_request_template = None
             else:
                 seed_index = min(
-                    sum(attempts.values()) - 1,
+                    execution_attempt - 1,
                     len(self.config.seed_schedule) - 1,
                 )
                 request = RunRequest(
@@ -677,6 +689,10 @@ class Harness:
                 best_node = state.experiments[state.best_experiment_id]
                 if best_node.metric_set:
                     best = dict(best_node.metric_set.metrics)
+                    best.setdefault(
+                        best_node.metric_set.primary_metric_name,
+                        best_node.metric_set.primary_score,
+                    )
             evaluation_request = EvaluationRequest(
                 run_id=self.config.run_id,
                 experiment_id=spec.experiment_id,

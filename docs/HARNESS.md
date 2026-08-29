@@ -106,7 +106,7 @@ Set the secret only in the environment; never put it in the run configuration or
 
 ```text
 export DEEPSEEK_API_KEY="your-key"
-tacorank run --config run-config.json
+tacorank run --config run-config.json --live-config live-adapters.json
 ```
 
 `research_provider: fake` retains the deterministic test planner. In DeepSeek mode,
@@ -114,9 +114,15 @@ tacorank run --config run-config.json
 card. DeepSeek proposes one atomic implementation plan inside those constraints, after
 which `PlanValidator` either accepts it, requests one bounded repair, or blocks it.
 
-The current `adapter_mode: fake` still means coding, execution, recovery, output checking,
-and evaluation use the vertical-slice fake adapters. Selecting DeepSeek makes only the
-research-direction planner real.
+`adapter_mode: live` composes the real Trae worker, per-worktree Gate A, receipt-sealed
+Docker execution, live SRE observer, deterministic recovery policy, execution-sealed
+Gate B, and protected KuaiRand evaluator. The operator-owned paths and runtime hashes
+are supplied separately with `--live-config`; see `live-adapters.example.json`. The
+exact file hash must be frozen as `live_adapter_config_sha256` in the run config, so
+adapter identities cannot change without changing the ledger-bound config hash.
+
+`adapter_mode: fake` is test-only and the CLI refuses it unless
+`--allow-test-adapters` is passed explicitly.
 
 ## Contract gate
 
@@ -132,7 +138,7 @@ empty scaffolds. The harness will not edit them and will refuse to start until h
 For example:
 
 ```text
-Allowed command IDs: run_smoke, run_proxy, run_full
+Allowed command IDs: candidate_smoke, candidate_proxy, candidate_full
 Artifact roots: artifacts, runs
 Contract status: FROZEN
 ```
@@ -142,7 +148,7 @@ This is deliberate. A prompt or adapter cannot waive the contract gate.
 ## Commands
 
 ```text
-tacorank run --config run-config.json
+tacorank run --config run-config.json --live-config live-adapters.json
 tacorank resume --run-id run_001 --repository-root .
 tacorank status --run-id run_001 --repository-root .
 tacorank validate-ledger --run-id run_001 --repository-root .
@@ -150,11 +156,10 @@ tacorank rebuild-views --run-id run_001 --repository-root .
 tacorank finalize --run-id run_001 --repository-root .
 ```
 
-`adapter_mode` remains frozen to `fake` for the non-research adapters; this lets teammates
-validate their schemas and the complete route while the research planner uses either the
-fake or DeepSeek provider. `finalize` fails closed
-until a real clean-reproduction runner/evaluator is connected, because the harness must
-not manufacture final evidence.
+The live startup path validates all deployment files, hashes, official metrics,
+population rows, baseline predictions, symbolic commands, and adapter identities before
+writing `run.started`. `finalize` still fails closed until the clean-reproduction/final
+selection route is added; it never manufactures final evidence.
 
 ## Schema-change procedure
 
@@ -177,7 +182,8 @@ not manufacture final evidence.
 
 ## Intentionally deferred
 
-- Real coding, execution, recovery, and evaluation adapters for Persons 3, 4, and 5.
+- The one-shot hidden-final/clean-reproduction selection route.
+- Deployment-owned dataset files, provider credentials, pinned images, and hard-quota mounts.
 - Git ancestry/ref reconciliation and clean reproduction.
 - Final submission generation and hidden-final execution.
 - Provider-native token collection and real CPU/GPU telemetry.

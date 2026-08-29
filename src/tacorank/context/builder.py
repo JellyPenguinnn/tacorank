@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter
-from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Type, TypeVar
 
 from ..artifacts import ArtifactStore
@@ -16,6 +15,8 @@ from ..memory.retrieval import (
     verified_experiment_history,
     visible_development_events,
 )
+from ..recovery.classifier import classify_failure
+from ..recovery.fingerprints import fingerprint_result
 from ..schemas import (
     ArtifactKind,
     CoderContext,
@@ -203,6 +204,22 @@ class ContextBuilder:
             if line:
                 values.append(line)
         return list(dict.fromkeys(values))
+
+    def _trace_tail(self, failed_value: object, fallback: str) -> str:
+        """Read only a bounded tail from a hash-verified failure log."""
+
+        artifact = getattr(failed_value, "log_artifact", None)
+        if artifact is None:
+            return fallback[-4_000:]
+        try:
+            self.artifact_store.verify(artifact)
+            path = self.config.repository_root / artifact.path
+            with path.open("rb") as handle:
+                handle.seek(max(0, artifact.size_bytes - 8_000))
+                raw = handle.read(8_000)
+            return raw.decode("utf-8", errors="replace")[-4_000:]
+        except (OSError, ValueError):
+            return fallback[-4_000:]
 
     def _planner_experiments(
         self, events: Sequence[Event]
@@ -517,6 +534,9 @@ class ContextBuilder:
                     {
                         "spec": spec.model_dump(mode="json"),
                         "protected_paths": self._protected_digest(),
+                        "target_interface_excerpts": (
+                            self.config.target_interface_excerpts
+                        ),
                         "allowed_output": "PatchCandidate",
                         "hypothesis_drift": "forbidden",
                     }
@@ -534,12 +554,20 @@ class ContextBuilder:
             ),
         ]
         optional: List[Tuple[str, str, str]] = []
+        selected_method_cards: List[Dict[str, object]] = []
         wanted = set(spec.method_card_ids)
         for path in sorted((self.config.repository_root / "research/methods").glob("*.md")):
             if path.stem in wanted:
                 relative = path.relative_to(self.config.repository_root).as_posix()
-                optional.append((relative, "Selected method card", path.read_text(encoding="utf-8")))
-        for event in active_lessons(visible, tags=[spec.family, spec.target_stage], limit=5):
+                body = path.read_text(encoding="utf-8")
+                selected_method_cards.append(
+                    {"method_id": path.stem, "path": relative, "content": body}
+                )
+                optional.append((relative, "Selected method card", body))
+        lesson_events = active_lessons(
+            visible, tags=[spec.family, spec.target_stage], limit=5
+        )
+        for event in lesson_events:
             optional.append((event.event_id, "Applicable lesson", self._event_card(event)))
         context_id = self._identity(
             "coder",
@@ -567,6 +595,33 @@ class ContextBuilder:
             content=content,
             included=included,
             excluded=excluded,
+            context_fields={
+                "contract_sha256": self.verified_contract.contract_sha256,
+                "experiment_spec": spec,
+                "parent_commit_sha": spec.parent_commit_sha,
+                "target_interface_excerpts": self.config.target_interface_excerpts,
+                "editable_roots": self.config.editable_roots,
+                "protected_paths": self._protected_paths(),
+                "allowed_command_ids": self.config.command_ids,
+                "selected_method_cards": [
+                    card for card in selected_method_cards if card["path"] in included
+                ],
+                "active_lessons": [
+                    {
+                        "event_id": event.event_id,
+                        "payload": event.payload.model_dump(
+                            mode="json", exclude_none=False
+                        ),
+                    }
+                    for event in lesson_events
+                    if event.event_id in included
+                ],
+                "step_limit": self.config.coding_step_limit,
+                "token_limit": self.config.coding_token_limit,
+                "wall_time_limit_seconds": (
+                    self.config.coding_wall_time_limit_seconds
+                ),
+            },
         )
 
     def build_recovery(
@@ -585,6 +640,58 @@ class ContextBuilder:
         chain = failure_chain(visible, experiment_id)
         if not chain:
             raise ContextBuildError("no failure evidence exists for recovery")
+        spec_event = next(
+            (
+                event
+                for event in visible
+                if event.event_type == EventType.EXPERIMENT_PROPOSED
+                and event.payload.spec.experiment_id == experiment_id
+            ),
+            None,
+        )
+        if spec_event is None:
+            raise ContextBuildError("recovery experiment specification is missing")
+        failure_event = chain[-1]
+        failed_value = getattr(failure_event.payload, "result", None)
+        if failed_value is None:
+            raise ContextBuildError("latest recovery evidence has no typed result")
+        classification = classify_failure(failed_value)
+        failed_checks = getattr(failed_value, "checks", ())
+        if isinstance(failed_checks, dict):
+            normalized_checks = [
+                {"name": name, "status": getattr(status, "value", status)}
+                for name, status in failed_checks.items()
+            ]
+        else:
+            normalized_checks = [
+                (
+                    check.model_dump(mode="json", exclude_none=False)
+                    if hasattr(check, "model_dump")
+                    else dict(check)
+                )
+                for check in failed_checks
+            ]
+        accepted_patch = next(
+            (
+                event.payload.result
+                for event in reversed(visible)
+                if event.event_type == EventType.PATCH_CHECKED
+                and event.payload.result.experiment_id == experiment_id
+                and event.payload.result.accepted
+            ),
+            None,
+        )
+        if failure_event.event_type == EventType.PATCH_CHECKED:
+            # A Gate-A rejection has no accepted receipt for the rejected
+            # commit.  Supplying an older receipt would authorize the wrong
+            # bytes and the real repair prompt correctly rejects it.
+            accepted_patch = None
+        prior_fingerprints = [
+            fingerprint_result(event.payload.result)
+            for event in chain[:-1]
+            if getattr(event.payload, "result", None) is not None
+        ]
+        repair_attempt = node.repair_count + 1
         mandatory = [
             (
                 "Recovery authority",
@@ -609,6 +716,7 @@ class ContextBuilder:
             experiment_id,
             {
                 "remaining_repair_budget": remaining_repair_budget,
+                "repair_attempt": repair_attempt,
                 "max_tokens": max_tokens,
                 "mandatory": mandatory,
                 "optional": optional,
@@ -630,4 +738,29 @@ class ContextBuilder:
             content=content,
             included=included,
             excluded=excluded,
+            context_fields={
+                "repair_attempt": repair_attempt,
+                "original_experiment_spec": spec_event.payload.spec,
+                "current_patch_commit_sha": node.latest_commit_sha,
+                "accepted_patch_receipt_id": (
+                    accepted_patch.receipt_id if accepted_patch is not None else None
+                ),
+                "failure_class": classification.failure_class,
+                "error_fingerprint": classification.fingerprint,
+                "error_summary": (
+                    getattr(failed_value, "error_summary", None)
+                    or classification.evidence
+                ),
+                "relevant_trace_tail": self._trace_tail(
+                    failed_value,
+                    getattr(failed_value, "error_summary", None)
+                    or classification.evidence,
+                ),
+                "failed_checks": normalized_checks,
+                "previous_repair_fingerprints": prior_fingerprints,
+                "recovery_instructions": "Await the deterministic recovery decision.",
+                "remaining_repair_budget": remaining_repair_budget,
+                "editable_roots": self.config.editable_roots,
+                "protected_paths": self._protected_paths(),
+            },
         )

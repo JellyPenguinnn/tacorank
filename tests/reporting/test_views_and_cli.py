@@ -40,12 +40,34 @@ def test_views_are_derived_and_cli_validates(harness, baseline_evaluation, capsy
 
 
 def test_run_command_executes_the_fake_vertical_slice(config, capsys):
+    config.adapter_mode = "fake"
     config.baseline_metrics = {"gauc": 0.6, "ndcg@5": 0.6, "primary": 0.6}
     config_path = config.repository_root / "run-config.json"
     config_path.write_text(
         json.dumps(config.model_dump(mode="json"), sort_keys=True), encoding="utf-8"
     )
-    assert main(["run", "--config", str(config_path)]) == 0
+    assert (
+        main(
+            [
+                "run",
+                "--config",
+                str(config_path),
+                "--allow-test-adapters",
+            ]
+        )
+        == 0
+    )
     output = json.loads(capsys.readouterr().out)
     assert output["best_experiment_id"] == "exp_001"
     assert (config.repository_root / "runs/run_test/STATUS.md").is_file()
+
+
+def test_run_command_never_uses_fake_adapters_implicitly(config, capsys):
+    config.adapter_mode = "fake"
+    config.baseline_metrics = {"gauc": 0.6, "ndcg@5": 0.6, "primary": 0.6}
+    config_path = config.repository_root / "fake-run-config.json"
+    config_path.write_text(
+        json.dumps(config.model_dump(mode="json"), sort_keys=True), encoding="utf-8"
+    )
+    assert main(["run", "--config", str(config_path)]) == 2
+    assert "--allow-test-adapters" in capsys.readouterr().err

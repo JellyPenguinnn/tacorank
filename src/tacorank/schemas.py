@@ -1016,6 +1016,12 @@ class ContextDocument(StrictModel):
     estimated_tokens: int = Field(ge=0)
     artifact: ArtifactRef
 
+    @property
+    def context_artifact(self) -> ArtifactRef:
+        """Compatibility name used by bounded external-agent prompts."""
+
+        return self.artifact
+
 
 class PlannerContext(ContextDocument):
     role: Literal["planner"] = "planner"
@@ -1035,10 +1041,36 @@ class PlannerContext(ContextDocument):
 
 class CoderContext(ContextDocument):
     role: Literal["coder"] = "coder"
+    contract_sha256: str
+    experiment_spec: ExperimentSpec
+    parent_commit_sha: NonEmptyStr
+    target_interface_excerpts: Dict[str, str] = Field(default_factory=dict)
+    editable_roots: List[str]
+    protected_paths: List[str]
+    allowed_command_ids: List[NonEmptyStr]
+    selected_method_cards: List[Dict[str, Any]] = Field(default_factory=list)
+    active_lessons: List[Dict[str, Any]] = Field(default_factory=list)
+    step_limit: int = Field(gt=0)
+    token_limit: int = Field(gt=0)
+    wall_time_limit_seconds: int = Field(gt=0)
 
 
 class RecoveryContext(ContextDocument):
     role: Literal["recovery"] = "recovery"
+    repair_attempt: int = Field(ge=1)
+    original_experiment_spec: ExperimentSpec
+    current_patch_commit_sha: NonEmptyStr
+    accepted_patch_receipt_id: Optional[str] = None
+    failure_class: NonEmptyStr
+    error_fingerprint: NonEmptyStr
+    error_summary: NonEmptyStr
+    relevant_trace_tail: str
+    failed_checks: List[Dict[str, Any]] = Field(default_factory=list)
+    previous_repair_fingerprints: List[NonEmptyStr] = Field(default_factory=list)
+    recovery_instructions: NonEmptyStr
+    remaining_repair_budget: int = Field(ge=0)
+    editable_roots: List[str]
+    protected_paths: List[str]
 
 
 ContextValue = Annotated[

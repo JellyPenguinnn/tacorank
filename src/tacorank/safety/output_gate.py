@@ -6,6 +6,7 @@ import asyncio
 import csv
 import hashlib
 import io
+import json
 import math
 import os
 import re
@@ -385,11 +386,20 @@ class OutputGate:
             SharedSchemaFactories.build(factories.violation, finding.as_payload())
             for finding in _deduplicate_findings(findings)
         ]
+        ordered_row_hash, ordered_prediction_hash = _ordered_output_hashes(
+            converted_rows,
+            row_id_column=self.contract.row_id_column,
+            identity_columns=self.contract.identity_columns,
+            score_column=self.contract.score_column,
+            fallback_bytes=prediction_bytes or b"",
+        )
         payload = {
             "run_id": _field(run_result, "run_id"),
             "experiment_id": _field(run_result, "experiment_id"),
             "attempt": _field(run_result, "attempt"),
             "prediction_artifact": artifact_ref,
+            "ordered_row_identity_sha256": ordered_row_hash,
+            "ordered_prediction_sha256": ordered_prediction_hash,
             "accepted": not findings,
             "checks": statuses,
             "score_stats": score_stats,
@@ -723,6 +733,60 @@ def _score_stats(scores: Sequence[float], total_rows: int) -> Mapping[str, Any]:
         "maximum": max(scores),
         "mean": sum(scores) / len(scores),
     }
+
+
+def _ordered_output_hashes(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    row_id_column: Optional[str],
+    identity_columns: Sequence[str],
+    score_column: str,
+    fallback_bytes: bytes,
+) -> Tuple[str, str]:
+    """Return evaluator-compatible identities or rejection evidence hashes."""
+
+    fallback_row = hashlib.sha256(b"invalid-row-identity\0" + fallback_bytes).hexdigest()
+    fallback_prediction = hashlib.sha256(
+        b"invalid-prediction-identity\0" + fallback_bytes
+    ).hexdigest()
+    if row_id_column is None or len(identity_columns) != 2 or not rows:
+        return fallback_row, fallback_prediction
+
+    row_ids = [row.get(row_id_column) for row in rows]
+    user_ids = [row.get(identity_columns[0]) for row in rows]
+    item_ids = [row.get(identity_columns[1]) for row in rows]
+    scores = [row.get(score_column) for row in rows]
+    if any(value is None for value in (*row_ids, *user_ids, *item_ids, *scores)):
+        return fallback_row, fallback_prediction
+
+    row_digest = hashlib.sha256()
+    prediction_digest = hashlib.sha256()
+    try:
+        for expected, (row_id, user_id, item_id, score) in enumerate(
+            zip(row_ids, user_ids, item_ids, scores)
+        ):
+            if isinstance(row_id, bool) or int(row_id) != expected:
+                return fallback_row, fallback_prediction
+            numeric_score = float(score)
+            if not math.isfinite(numeric_score):
+                return fallback_row, fallback_prediction
+            identity_record = json.dumps(
+                [int(row_id), str(user_id), str(item_id)],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            prediction_record = json.dumps(
+                [int(row_id), str(user_id), str(item_id), numeric_score.hex()],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            row_digest.update(len(identity_record).to_bytes(8, "big"))
+            row_digest.update(identity_record)
+            prediction_digest.update(len(prediction_record).to_bytes(8, "big"))
+            prediction_digest.update(prediction_record)
+    except (TypeError, ValueError, OverflowError):
+        return fallback_row, fallback_prediction
+    return row_digest.hexdigest(), prediction_digest.hexdigest()
 
 
 def _safe_identity_component(value: Any, field_name: str) -> str:

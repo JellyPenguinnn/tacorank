@@ -122,6 +122,13 @@ def test_real_recovery_repairs_gates_reruns_and_replays(
     assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
     assert len(worker.repair_calls) == 1
     context, recovery_decision = worker.repair_calls[0]
+    assert context.repair_attempt == 1
+    assert context.original_experiment_spec.experiment_id == "exp_001"
+    assert context.current_patch_commit_sha == "a" * 40
+    assert context.accepted_patch_receipt_id == "receipt_exp_001_1"
+    assert context.failure_class == "code_error"
+    assert context.recovery_instructions == recovery_decision.instructions
+    assert context.failed_checks == []
     assert "Adding a deterministic user-item cross" in recovery_decision.instructions
     assert "solution/model.py" in recovery_decision.instructions
     assert recovery_decision.action == RecoveryAction.TRAE_REPAIR

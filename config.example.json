@@ -1,14 +1,10 @@
 {
-  "adapter_mode": "fake",
+  "adapter_mode": "live",
+  "live_adapter_config_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "artifact_roots": ["artifacts", "runs"],
   "allowed_runtime_adjustments": {},
   "baseline_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "baseline_metrics": {
-    "gauc": 0.6674,
-    "ndcg@5": 0.5357,
-    "primary": 0.60155
-  },
-  "command_ids": ["run_smoke", "run_proxy", "run_full"],
+  "command_ids": ["candidate_smoke", "candidate_proxy", "candidate_full"],
   "context_token_limit": 6000,
   "contract_path": "contract/COMPETITION.md",
   "convergence_epsilon": 0.002,
@@ -25,7 +21,14 @@
   "max_confirmation_attempts": 2,
   "max_experiments": 50,
   "max_repairs_per_experiment": 2,
-  "metric_names": ["gauc", "ndcg@5", "primary"],
+  "editable_roots": ["solution"],
+  "target_interface_excerpts": {
+    "candidate": "def run(invocation: PipelineInvocation) -> None; read only invocation.input_root and write exactly invocation.output_path as row_id,user_id,video_id,score CSV; use invocation.fidelity and invocation.seed; return None"
+  },
+  "coding_step_limit": 20,
+  "coding_token_limit": 4096,
+  "coding_wall_time_limit_seconds": 900,
+  "metric_names": ["GAUC", "nDCG@5"],
   "primary_metric_name": "primary",
   "protected_paths_path": "PROTECTED_PATHS.md",
   "research_provider": "deepseek",
