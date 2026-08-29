@@ -105,7 +105,7 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     url, headers, payload, timeout = calls[0]
     assert url == "https://api.deepseek.com/chat/completions"
     assert headers["Authorization"] == "Bearer secret-key"
-    assert payload["model"] == "deepseek-v4-pro"
+    assert payload["model"] == "deepseek-v4-flash"
     assert payload["response_format"] == {"type": "json_object"}
     assert payload["max_tokens"] == 1_000
     assert payload["thinking"] == {"type": "enabled"}
@@ -217,7 +217,7 @@ def test_deepseek_preflight_authenticates_and_requires_configured_model(monkeypa
         def read(limit):
             assert limit == 1024 * 1024
             return json.dumps(
-                {"object": "list", "data": [{"id": "deepseek-v4-pro"}]}
+                {"object": "list", "data": [{"id": "deepseek-v4-flash"}]}
             ).encode("utf-8")
 
     requests = []

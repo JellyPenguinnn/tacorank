@@ -158,10 +158,10 @@ class TraeConfig:
     config_file: Path
     config_sha256: str
     max_steps_cap: int
-    max_token_cap: int
+    max_token_cap: Optional[int]
     max_wall_time_seconds_cap: int
     repair_step_limit: int
-    repair_token_limit: int
+    repair_token_limit: Optional[int]
     repair_wall_time_limit_seconds: int
     repair_allowed_command_ids: Tuple[str, ...]
     approved_environment_names: Tuple[str, ...] = ()
@@ -327,7 +327,7 @@ class TraeCodingWorker:
             identity,
             prompt,
             _context_int(context, "step_limit"),
-            _context_int(context, "token_limit"),
+            _context_optional_positive_int(context, "token_limit"),
             _context_int(context, "wall_time_limit_seconds"),
         )
 
@@ -412,7 +412,7 @@ class TraeCodingWorker:
         identity: CandidateIdentity,
         prompt: str,
         step_limit: int,
-        token_limit: int,
+        token_limit: Optional[int],
         wall_time_limit_seconds: int,
     ) -> Any:
         try:
@@ -441,7 +441,7 @@ class TraeCodingWorker:
         identity: CandidateIdentity,
         prompt: str,
         step_limit: int,
-        token_limit: int,
+        token_limit: Optional[int],
         wall_time_limit_seconds: int,
     ) -> Any:
         started = time.monotonic()
@@ -653,7 +653,7 @@ class TraeCodingWorker:
         parsed: ParsedTrajectory,
         prompt: str,
         *,
-        token_limit: int,
+        token_limit: Optional[int],
         isolation: _IsolationSession,
         install_identity: Mapping[str, Any],
         runtime_identity: Mapping[str, Any],
@@ -1247,7 +1247,10 @@ class TraeCodingWorker:
             )
 
     def _validate_trajectory(
-        self, parsed: ParsedTrajectory, step_limit: int, token_limit: int
+        self,
+        parsed: ParsedTrajectory,
+        step_limit: int,
+        token_limit: Optional[int],
     ) -> None:
         if parsed.provider != self.config.provider or parsed.model != self.config.model_id:
             raise CodingWorkerError(
@@ -1259,7 +1262,7 @@ class TraeCodingWorker:
                 "STEP_LIMIT_MISMATCH", "trajectory step limit differs from the request"
             )
         total_tokens = parsed.usage.input_tokens + parsed.usage.output_tokens
-        if total_tokens > token_limit:
+        if token_limit is not None and total_tokens > token_limit:
             raise CodingWorkerError(
                 "TOKEN_LIMIT_EXCEEDED",
                 f"provider usage {total_tokens} exceeded the {token_limit} token limit",
@@ -1272,7 +1275,6 @@ class TraeCodingWorker:
     def _validate_context_bounds(self, context: Any) -> None:
         limits = (
             ("step_limit", self.config.max_steps_cap),
-            ("token_limit", self.config.max_token_cap),
             ("wall_time_limit_seconds", self.config.max_wall_time_seconds_cap),
         )
         for field, cap in limits:
@@ -1281,6 +1283,16 @@ class TraeCodingWorker:
                 raise CodingWorkerError(
                     "CODING_LIMIT_INVALID", f"{field} must be in [1, {cap}]"
                 )
+        token_limit = _context_optional_positive_int(context, "token_limit")
+        if (
+            token_limit is not None
+            and self.config.max_token_cap is not None
+            and token_limit > self.config.max_token_cap
+        ):
+            raise CodingWorkerError(
+                "CODING_LIMIT_INVALID",
+                "token_limit exceeds the reviewed coding token cap",
+            )
 
     def _validate_config(self) -> None:
         config = self.config
@@ -1373,10 +1385,8 @@ class TraeCodingWorker:
                 )
         integer_fields = (
             "max_steps_cap",
-            "max_token_cap",
             "max_wall_time_seconds_cap",
             "repair_step_limit",
-            "repair_token_limit",
             "repair_wall_time_limit_seconds",
             "version_timeout_seconds",
             "termination_grace_seconds",
@@ -1388,9 +1398,21 @@ class TraeCodingWorker:
             value = getattr(config, field)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise CodingWorkerError("TRAE_CONFIG_INVALID", f"invalid {field}")
+        for field in ("max_token_cap", "repair_token_limit"):
+            value = getattr(config, field)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise CodingWorkerError("TRAE_CONFIG_INVALID", f"invalid {field}")
         if config.repair_step_limit > config.max_steps_cap:
             raise CodingWorkerError("TRAE_CONFIG_INVALID", "repair step limit exceeds cap")
-        if config.repair_token_limit > config.max_token_cap:
+        if (
+            config.max_token_cap is not None
+            and (
+                config.repair_token_limit is None
+                or config.repair_token_limit > config.max_token_cap
+            )
+        ):
             raise CodingWorkerError("TRAE_CONFIG_INVALID", "repair token limit exceeds cap")
         if config.repair_wall_time_limit_seconds > config.max_wall_time_seconds_cap:
             raise CodingWorkerError("TRAE_CONFIG_INVALID", "repair wall limit exceeds cap")
@@ -1886,7 +1908,10 @@ class TraeCodingWorker:
             isinstance(max_tokens, bool)
             or not isinstance(max_tokens, int)
             or max_tokens < 1
-            or max_tokens > self.config.max_token_cap
+            or (
+                self.config.max_token_cap is not None
+                and max_tokens > self.config.max_token_cap
+            )
         ):
             raise CodingWorkerError(
                 "TRAE_CONFIG_INVALID", "model max_tokens exceeds the reviewed token cap"
@@ -2285,6 +2310,22 @@ def _context_int(context: Any, field: str) -> int:
     value = getattr(context, field, None)
     if isinstance(value, bool) or not isinstance(value, int):
         raise CodingWorkerError("CONTEXT_INVALID", f"missing or invalid {field}")
+    return value
+
+
+def _context_optional_positive_int(context: Any, field: str) -> Optional[int]:
+    try:
+        value = getattr(context, field)
+    except AttributeError as exc:
+        raise CodingWorkerError(
+            "CONTEXT_INVALID", f"missing or invalid {field}"
+        ) from exc
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise CodingWorkerError(
+            "CONTEXT_INVALID", f"{field} must be null or a positive integer"
+        )
     return value
 
 

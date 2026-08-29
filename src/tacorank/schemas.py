@@ -1051,7 +1051,7 @@ class CoderContext(ContextDocument):
     selected_method_cards: List[Dict[str, Any]] = Field(default_factory=list)
     active_lessons: List[Dict[str, Any]] = Field(default_factory=list)
     step_limit: int = Field(gt=0)
-    token_limit: int = Field(gt=0)
+    token_limit: Optional[int] = Field(gt=0)
     wall_time_limit_seconds: int = Field(gt=0)
 
 

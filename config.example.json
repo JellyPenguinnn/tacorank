@@ -14,7 +14,7 @@
   "deepseek_api_key_env": "DEEPSEEK_API_KEY",
   "deepseek_base_url": "https://api.deepseek.com",
   "deepseek_max_output_tokens": 8192,
-  "deepseek_model": "deepseek-v4-pro",
+  "deepseek_model": "deepseek-v4-flash",
   "deepseek_reasoning_effort": "high",
   "deepseek_thinking_enabled": true,
   "deepseek_timeout_seconds": 120,

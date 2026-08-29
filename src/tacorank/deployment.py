@@ -22,7 +22,7 @@ from .evaluation.proxy import split_validation_indices
 TRAE_SOURCE_REVISION = "e839e559ac61bdd0e057c375dd1dee391fee797d"
 TRAE_READ_ONLY_TOOL_MARKER = "TacoRank: use manifest-verified pre-mounted tools"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_MODEL = "deepseek-v4-pro"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
 DATA_URL = "https://zenodo.org/records/10439422/files/KuaiRand-Pure.tar.gz"
 DATA_ARCHIVE_MD5 = "0820331067a3784d9691136f772b35a7"
 RAW_REQUIRED = (
@@ -445,7 +445,7 @@ model_providers:
 models:
   tacorank_coder:
     model_provider: openai
-    model: deepseek-v4-pro
+    model: deepseek-v4-flash
     max_tokens: 4096
     temperature: 0
     top_p: 1

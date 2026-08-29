@@ -92,7 +92,7 @@ the other adapters, so an omitted field cannot silently fall back to the fake pl
 ```json
 {
   "research_provider": "deepseek",
-  "deepseek_model": "deepseek-v4-pro",
+  "deepseek_model": "deepseek-v4-flash",
   "deepseek_base_url": "https://api.deepseek.com",
   "deepseek_api_key_env": "DEEPSEEK_API_KEY",
   "deepseek_timeout_seconds": 120,

@@ -7,7 +7,7 @@
     "trae_version": "0.1.0",
     "provider": "openai",
     "provider_base_url": "https://api.deepseek.com",
-    "model_id": "deepseek-v4-pro",
+    "model_id": "deepseek-v4-flash",
     "config_file": "/absolute/path/outside/repository/trae-agent.yaml",
     "config_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "max_steps_cap": 20,
