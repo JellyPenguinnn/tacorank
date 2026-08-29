@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import subprocess
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +27,52 @@ def _row(index: int, label: int):
         float(1000 + index),
         label,
     )
+
+
+def test_download_data_uses_certifi_and_extracts_pinned_archive(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = (tmp_path / "repository").resolve()
+    (root / "KuaiRand-Pure").mkdir(parents=True)
+    bundle_bytes = io.BytesIO()
+    with tarfile.open(fileobj=bundle_bytes, mode="w:gz") as bundle:
+        for name in deployment_module.RAW_REQUIRED:
+            content = (name + "\n").encode("utf-8")
+            member = tarfile.TarInfo("KuaiRand-Pure/data/" + name)
+            member.size = len(content)
+            bundle.addfile(member, io.BytesIO(content))
+    archive = bundle_bytes.getvalue()
+    monkeypatch.setattr(
+        deployment_module,
+        "DATA_ARCHIVE_MD5",
+        hashlib.md5(archive, usedforsecurity=False).hexdigest(),
+    )
+    tls_context = object()
+    observed = {}
+    monkeypatch.setattr(deployment_module.certifi, "where", lambda: "/trusted/ca.pem")
+
+    def create_context(*, cafile):
+        observed["cafile"] = cafile
+        return tls_context
+
+    def urlopen(request, *, timeout, context):
+        observed.update(url=request.full_url, timeout=timeout, context=context)
+        return io.BytesIO(archive)
+
+    monkeypatch.setattr(deployment_module.ssl, "create_default_context", create_context)
+    monkeypatch.setattr(deployment_module.urllib.request, "urlopen", urlopen)
+
+    data = root / "KuaiRand-Pure" / "data"
+    deployment_module._download_data(root, data)
+
+    assert observed == {
+        "cafile": "/trusted/ca.pem",
+        "url": deployment_module.DATA_URL,
+        "timeout": 120,
+        "context": tls_context,
+    }
+    for name in deployment_module.RAW_REQUIRED:
+        assert (data / name).read_text(encoding="utf-8") == name + "\n"
 
 
 def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(

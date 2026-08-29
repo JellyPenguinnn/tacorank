@@ -8,12 +8,15 @@ import importlib.util
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
 import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, Mapping, Sequence, Tuple
+
+import certifi
 
 from .coding import (
     TRAE_DEEPSEEK_REASONING_MARKER,
@@ -1058,8 +1061,13 @@ def _download_data(root: Path, data: Path) -> None:
     total_bytes = 0
     try:
         request = urllib.request.Request(DATA_URL, method="GET")
+        tls_context = ssl.create_default_context(cafile=certifi.where())
         with os.fdopen(descriptor, "wb") as output:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=120,
+                context=tls_context,
+            ) as response:
                 while True:
                     block = response.read(1024 * 1024)
                     if not block:
