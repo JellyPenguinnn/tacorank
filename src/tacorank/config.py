@@ -25,6 +25,17 @@ class ContractError(RuntimeError):
     pass
 
 
+DEFAULT_TARGET_INTERFACE_EXCERPTS = {
+    "solution/candidate.py": (
+        "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
+        "-> None; include this file in target_files; read only "
+        "invocation.input_root and write exactly invocation.output_path as "
+        "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
+        "invocation.seed; return None"
+    )
+}
+
+
 class RunConfig(StrictModel):
     schema_version: Literal["1.0"] = "1.0"
     run_id: NonEmptyStr
@@ -86,7 +97,9 @@ class RunConfig(StrictModel):
     research_capabilities: List[NonEmptyStr] = Field(default_factory=list)
     active_research_prohibitions: List[NonEmptyStr] = Field(default_factory=list)
     prediction_change_no_op_threshold: float = Field(default=0.001, ge=0.0, le=1.0)
-    target_interface_excerpts: Dict[str, str] = Field(default_factory=dict)
+    target_interface_excerpts: Dict[str, str] = Field(
+        default_factory=lambda: dict(DEFAULT_TARGET_INTERFACE_EXCERPTS)
+    )
     coding_step_limit: int = Field(default=20, gt=0)
     # ``None`` explicitly disables TacoRank's cumulative coding-trajectory
     # token gate. Provider/model request limits remain independently enforced.
@@ -155,6 +168,21 @@ class RunConfig(StrictModel):
         if not self.allowed_research_data:
             raise ValueError("allowed_research_data must not be empty")
         return self
+
+    @field_validator("target_interface_excerpts")
+    @classmethod
+    def validate_target_interfaces(cls, values: Dict[str, str]) -> Dict[str, str]:
+        if not values:
+            raise ValueError("target_interface_excerpts must not be empty")
+        normalized: Dict[str, str] = {}
+        for path, excerpt in values.items():
+            target = normalize_relative_path(path)
+            if not excerpt.strip():
+                raise ValueError("target interface excerpts must not be blank")
+            if target in normalized:
+                raise ValueError("target interface paths must be unique")
+            normalized[target] = excerpt.strip()
+        return normalized
 
     @field_validator("data_manifest_sha256", "evaluator_sha256")
     @classmethod

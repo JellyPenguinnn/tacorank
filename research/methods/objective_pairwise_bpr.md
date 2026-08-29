@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"objective_pairwise_bpr","family":"objective","status":"candidate","tags":["pairwise","within_user","ranking"],"cost_tier":"medium","prerequisites":["baseline_parity","within_user_positive_negative_pairs"],"allowed_data":["train_interactions","user_id","long_view"],"prohibition_conditions":["evaluator_or_split_change_required"],"sources":[]}
+{"schema_version":"1.0","method_id":"objective_pairwise_bpr","family":"objective","status":"candidate","tags":["pairwise","within_user","ranking"],"cost_tier":"medium","prerequisites":["baseline_parity","within_user_positive_negative_pairs"],"allowed_data":["train_interactions","user_id","long_view"],"prohibition_conditions":["evaluator_or_split_change_required"],"implementation_targets":["solution/candidate.py"],"sources":[]}
 ```
 
 ## Mechanism
@@ -28,7 +28,10 @@ The evaluator or split definitions would need to change.
 
 ## Minimal implementation
 
-Use deterministic, capped within-user positive/negative pairing.
+Use deterministic, capped within-user positive/negative pairing. Implement and
+wire the mechanism through the existing `solution/candidate.py` production
+entrypoint; helper modules may be added only when that entrypoint imports and
+uses them. Do not invent `solution/train.py` as a replacement entrypoint.
 
 ## Sources
 

@@ -43,6 +43,7 @@ class MethodCard:
     expected_effect: str = ""
     falsifier: str = ""
     prohibition_conditions: tuple[str, ...] = ()
+    implementation_targets: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
     source_path: str | None = None
 
@@ -84,6 +85,7 @@ def default_portfolio() -> ExperimentPortfolio:
                 expected_effect="Improve GAUC and nDCG-aligned ordering.",
                 falsifier="No stable primary-score improvement over the pointwise parent.",
                 prohibition_conditions=("evaluator_or_split_change_required",),
+                implementation_targets=("solution/candidate.py",),
             ),
             MethodCard(
                 method_id="temporal_history_compact",
@@ -247,6 +249,7 @@ def load_method_cards(directory: str | Path) -> ExperimentPortfolio:
         prerequisites = list_value("prerequisites") or ((section_value("Preconditions"),) if section_value("Preconditions") else ())
         allowed_data = list_value("allowed_data") or ((section_value("Allowed data"),) if section_value("Allowed data") else ())
         prohibition = list_value("prohibition_conditions") or ((section_value("Do not use when"),) if section_value("Do not use when") else ())
+        implementation_targets = list_value("implementation_targets")
         sources = list_value("sources")
         if not sources and section_value("Sources"):
             sources = (section_value("Sources"),)
@@ -284,6 +287,7 @@ def load_method_cards(directory: str | Path) -> ExperimentPortfolio:
                 expected_effect=expected_effect,
                 falsifier=falsifier,
                 prohibition_conditions=prohibition,
+                implementation_targets=implementation_targets,
                 sources=sources,
                 source_path=str(path),
             )

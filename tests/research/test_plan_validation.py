@@ -18,7 +18,7 @@ def make_spec(planner_context, **overrides):
         family="objective",
         change_summary="Replace pointwise loss with bounded pairwise loss.",
         target_stage="objective",
-        target_files=["solution/loss.py"],
+        target_files=["solution/candidate.py"],
         fidelity_plan=["smoke", "proxy", "full"],
         expected_mechanism="Optimize within-user relative ordering.",
         success_criteria=SimpleNamespace(full_parent_delta_min=0.002),
@@ -67,6 +67,39 @@ def test_validator_rejects_target_outside_editable_paths(planner_context):
 
     assert not result.accepted
     assert "TARGET_OUTSIDE_EDITABLE_PATHS" in result.errors
+
+
+def test_validator_rejects_plan_that_does_not_touch_real_entrypoint(
+    planner_context,
+):
+    spec = make_spec(planner_context, target_files=["solution/train.py"])
+
+    result = PlanValidator().validate(spec, planner_context)
+
+    assert not result.accepted
+    assert "TARGET_INTERFACE_NOT_TOUCHED" in result.errors
+    assert "METHOD_IMPLEMENTATION_TARGET_NOT_TOUCHED" in result.errors
+
+
+def test_validator_allows_helper_only_alongside_real_entrypoint(planner_context):
+    spec = make_spec(
+        planner_context,
+        target_files=["solution/candidate.py", "solution/train.py"],
+    )
+
+    result = PlanValidator().validate(spec, planner_context)
+
+    assert result.accepted
+
+
+def test_validator_fails_closed_without_target_interfaces(planner_context):
+    planner_context.target_interface_excerpts = {}
+
+    result = PlanValidator().validate(make_spec(planner_context), planner_context)
+
+    assert not result.accepted
+    assert "TARGET_INTERFACES_MISSING" in result.errors
+    assert "METHOD_IMPLEMENTATION_TARGET_UNAUTHORIZED" in result.errors
 
 
 def test_validator_fails_closed_without_editable_paths(planner_context):

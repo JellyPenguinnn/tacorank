@@ -237,6 +237,25 @@ class ContextBuilder:
                     values.append(candidate)
         return list(dict.fromkeys(values))
 
+    def _target_interface_excerpts(self) -> Dict[str, str]:
+        """Return only configured interfaces backed by real repository files."""
+
+        root = self.config.repository_root.resolve(strict=True)
+        interfaces: Dict[str, str] = {}
+        for relative, excerpt in self.config.target_interface_excerpts.items():
+            candidate = root / relative
+            if candidate.is_symlink() or not candidate.is_file():
+                raise ContextBuildError(
+                    "planner target interface file is unavailable: %s" % relative
+                )
+            resolved = candidate.resolve(strict=True)
+            if root not in resolved.parents:
+                raise ContextBuildError(
+                    "planner target interface escapes repository: %s" % relative
+                )
+            interfaces[relative] = excerpt
+        return interfaces
+
     def _trace_tail(self, failed_value: object, fallback: str) -> str:
         """Read only a bounded tail from a hash-verified failure log."""
 
@@ -436,6 +455,7 @@ class ContextBuilder:
                     expected_effect=card.expected_effect,
                     falsifier=card.falsifier,
                     prohibition_conditions=list(card.prohibition_conditions),
+                    implementation_targets=list(card.implementation_targets),
                     source_path=source_path,
                 )
             )
@@ -491,6 +511,7 @@ class ContextBuilder:
                     for family, methods in playbook.method_order.items()
                 },
             ),
+            "target_interface_excerpts": self._target_interface_excerpts(),
             "remaining_budget": PlannerBudgetSummary(
                 remaining_experiments=state.remaining_experiments,
                 remaining_public_queries=None,
@@ -543,6 +564,10 @@ class ContextBuilder:
                         "method_order": playbook.method_order,
                     }
                 ),
+            ),
+            (
+                "Authorized implementation interfaces",
+                compact_json(self._target_interface_excerpts()),
             ),
             (
                 "Current objective and budget",

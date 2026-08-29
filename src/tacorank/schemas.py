@@ -993,7 +993,16 @@ class PlannerMethodCardSummary(StrictModel):
     expected_effect: NonEmptyStr
     falsifier: NonEmptyStr
     prohibition_conditions: List[NonEmptyStr] = Field(default_factory=list)
+    implementation_targets: List[str] = Field(default_factory=list)
     source_path: NonEmptyStr
+
+    @field_validator("implementation_targets")
+    @classmethod
+    def validate_implementation_targets(cls, values: List[str]) -> List[str]:
+        normalized = [normalize_relative_path(value) for value in values]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("implementation_targets must be unique")
+        return normalized
 
 
 class PlannerPlaybookSummary(StrictModel):
@@ -1116,8 +1125,24 @@ class PlannerContext(ContextDocument):
     family_history: List[PlannerExperimentSummary] = Field(default_factory=list)
     method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
     playbook: PlannerPlaybookSummary
+    target_interface_excerpts: Dict[str, NonEmptyStr]
     remaining_budget: PlannerBudgetSummary
     convergence: PlannerConvergenceSummary
+
+    @field_validator("target_interface_excerpts")
+    @classmethod
+    def validate_planner_target_interfaces(
+        cls, values: Dict[str, str]
+    ) -> Dict[str, str]:
+        if not values:
+            raise ValueError("planner target interfaces must not be empty")
+        normalized: Dict[str, str] = {}
+        for path, excerpt in values.items():
+            target = normalize_relative_path(path)
+            if target in normalized:
+                raise ValueError("planner target interface paths must be unique")
+            normalized[target] = excerpt
+        return normalized
 
 
 class CoderContext(ContextDocument):

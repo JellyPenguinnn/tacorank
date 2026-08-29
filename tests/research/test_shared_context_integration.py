@@ -23,7 +23,7 @@ def test_planner_consumes_context_builder_output(harness, baseline_evaluation):
             "family": choice.family,
             "change_summary": "Replace pointwise loss with bounded pairwise BPR.",
             "target_stage": "objective",
-            "target_files": ["solution/model.py"],
+            "target_files": ["solution/candidate.py"],
             "fidelity_plan": [Fidelity.SMOKE, Fidelity.PROXY, Fidelity.FULL],
             "expected_mechanism": "Improve within-user relative ordering.",
             "success_criteria": "Trusted full score improves beyond epsilon.",
