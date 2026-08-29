@@ -663,12 +663,31 @@ class DockerSandbox:
 
         extraction = None
         if portable_tmpfs:
+            allowed_outputs = tuple(
+                sorted(item.relative_path for item in command.expected_artifacts)
+            )
+            export_arguments = tuple(
+                argument
+                for relative in allowed_outputs
+                for argument in ("--allowed-output", relative)
+            )
             extraction = RuntimeOutputExtractionSpec(
-                argv=(str(docker), "cp", name + ":/artifacts/.", "-"),
-                destination=artifact_directory,
-                allowed_relative_paths=tuple(
-                    sorted(item.relative_path for item in command.expected_artifacts)
+                argv=(
+                    str(docker),
+                    "exec",
+                    "--user",
+                    "0:0",
+                    name,
+                    container_executable,
+                    "-m",
+                    "tacorank.execution.container_supervisor",
+                    "export",
+                    "--control-directory",
+                    control_directory,
+                    *export_arguments,
                 ),
+                destination=artifact_directory,
+                allowed_relative_paths=allowed_outputs,
                 max_bytes=output_quota.enforced_max_bytes,
             )
         cleanup = RuntimeCleanupSpec(

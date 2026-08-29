@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import io
 import os
 import secrets
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
 
@@ -20,6 +22,29 @@ def test_self_test_command_does_not_require_control_directory(
     monkeypatch.setattr(container_supervisor, "_self_test", self_test)
 
     assert container_supervisor.main(("self-test", "--uid", "501", "--gid", "20")) == 0
+
+
+def test_exporter_streams_only_reviewed_regular_outputs(tmp_path: Path) -> None:
+    artifact_root = (tmp_path / "artifacts").resolve()
+    artifact_root.mkdir()
+    (artifact_root / "tmp").mkdir()
+    (artifact_root / "tmp" / "scratch").write_text("ignored", encoding="utf-8")
+    prediction = artifact_root / "predictions.csv"
+    prediction.write_text("row_id,score\n0,0.5\n", encoding="utf-8")
+    payload = io.BytesIO()
+
+    container_supervisor._write_archive(
+        payload,
+        artifact_root,
+        ("predictions.csv",),
+    )
+
+    payload.seek(0)
+    with tarfile.open(fileobj=payload, mode="r:") as archive:
+        assert archive.getnames() == ["artifacts", "artifacts/predictions.csv"]
+        extracted = archive.extractfile("artifacts/predictions.csv")
+        assert extracted is not None
+        assert extracted.read() == b"row_id,score\n0,0.5\n"
 
 
 def test_supervisor_holds_candidate_container_until_controller_release(

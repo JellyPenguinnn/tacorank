@@ -9,9 +9,10 @@ import signal
 import stat
 import subprocess
 import sys
+import tarfile
 import time
-from pathlib import Path
-from typing import Optional, Sequence
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO, Optional, Sequence
 
 
 _CONTROL_DIRECTORY = re.compile(r"^/tmp/tacorank-[0-9a-f]{24}-control$")
@@ -35,6 +36,9 @@ def _parser() -> argparse.ArgumentParser:
     self_test = commands.add_parser("self-test", allow_abbrev=False)
     self_test.add_argument("--uid", type=int, required=True)
     self_test.add_argument("--gid", type=int, required=True)
+    export = commands.add_parser("export", allow_abbrev=False)
+    export.add_argument("--control-directory", required=True)
+    export.add_argument("--allowed-output", action="append", required=True)
     for name in ("probe", "release"):
         command = commands.add_parser(name, allow_abbrev=False)
         command.add_argument("--control-directory", required=True)
@@ -156,16 +160,123 @@ def _probe(path: Path) -> int:
     return 0 if ready else NOT_READY_EXIT_CODE
 
 
-def _release(path: Path) -> int:
+def _completed_control(path: Path) -> None:
     _owned_control_directory(path)
-    complete = path / _COMPLETE
     try:
-        identity = complete.lstat()
+        identity = (path / _COMPLETE).lstat()
     except OSError as error:
         raise SupervisorError("candidate completion is unavailable") from error
     if not stat.S_ISREG(identity.st_mode) or identity.st_uid != os.geteuid():
         raise SupervisorError("candidate completion identity is invalid")
+
+
+def _release(path: Path) -> int:
+    _completed_control(path)
     _write_exclusive(path / _RELEASE, b"captured\n")
+    return 0
+
+
+def _normalized_output(value: str) -> str:
+    path = PurePosixPath(value)
+    if (
+        not value
+        or "\\" in value
+        or "\x00" in value
+        or path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise SupervisorError("allowed output path is invalid")
+    return value
+
+
+def _write_archive(
+    output: BinaryIO,
+    artifact_root: Path,
+    allowed_outputs: Sequence[str],
+) -> None:
+    root = Path(artifact_root)
+    if root.is_symlink() or not root.is_dir() or root.resolve(strict=True) != root:
+        raise SupervisorError("artifact root is not a canonical directory")
+    allowed = tuple(_normalized_output(value) for value in allowed_outputs)
+    if len(allowed) != len(set(allowed)):
+        raise SupervisorError("allowed output paths must be unique")
+    allowed_set = set(allowed)
+    allowed_directories = {
+        parent.as_posix()
+        for value in allowed
+        for parent in PurePosixPath(value).parents
+        if parent != PurePosixPath(".")
+    }
+    files = {}
+    for current, directories, names in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        relative_current = current_path.relative_to(root).as_posix()
+        if relative_current == ".":
+            relative_current = ""
+        retained = []
+        for name in sorted(directories):
+            candidate = current_path / name
+            relative = candidate.relative_to(root).as_posix()
+            if candidate.is_symlink():
+                raise SupervisorError("artifact output tree contains a symlink")
+            if relative == "tmp":
+                continue
+            if relative not in allowed_directories:
+                raise SupervisorError("artifact output tree contains an unexpected directory")
+            retained.append(name)
+        directories[:] = retained
+        for name in sorted(names):
+            candidate = current_path / name
+            relative = candidate.relative_to(root).as_posix()
+            if relative_current == "tmp" or relative.startswith("tmp/"):
+                continue
+            try:
+                identity = candidate.lstat()
+            except OSError as error:
+                raise SupervisorError("artifact output could not be inspected") from error
+            if relative not in allowed_set or not stat.S_ISREG(identity.st_mode):
+                raise SupervisorError("artifact output tree contains an unexpected member")
+            files[relative] = (candidate, identity)
+
+    with tarfile.open(fileobj=output, mode="w|") as archive:
+        root_info = tarfile.TarInfo("artifacts")
+        root_info.type = tarfile.DIRTYPE
+        root_info.mode = 0o700
+        root_info.mtime = 0
+        archive.addfile(root_info)
+        for relative in sorted(files):
+            candidate, expected = files[relative]
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(str(candidate), flags)
+            try:
+                actual = os.fstat(descriptor)
+                if (actual.st_dev, actual.st_ino) != (
+                    expected.st_dev,
+                    expected.st_ino,
+                ) or not stat.S_ISREG(actual.st_mode):
+                    raise SupervisorError("artifact output identity changed during export")
+                info = tarfile.TarInfo("artifacts/" + relative)
+                info.size = actual.st_size
+                info.mode = 0o600
+                info.mtime = 0
+                info.uid = 0
+                info.gid = 0
+                info.uname = ""
+                info.gname = ""
+                with os.fdopen(descriptor, "rb") as source:
+                    descriptor = -1
+                    archive.addfile(info, source)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+    output.flush()
+
+
+def _export(path: Path, allowed_outputs: Sequence[str]) -> int:
+    _completed_control(path)
+    _write_archive(sys.stdout.buffer, Path("/artifacts"), allowed_outputs)
     return 0
 
 
@@ -219,6 +330,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _probe(control)
         if arguments.command == "release":
             return _release(control)
+        if arguments.command == "export":
+            return _export(control, arguments.allowed_output)
         raise SupervisorError("unknown supervisor command")
     except SupervisorError as error:
         print("tacorank container supervisor: {0}".format(error), file=sys.stderr)

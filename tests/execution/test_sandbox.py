@@ -14,7 +14,12 @@ from typing import Optional
 
 import pytest
 
-from tacorank.execution.commands import CommandContext, CommandProfile, CommandRegistry
+from tacorank.execution.commands import (
+    CommandContext,
+    CommandProfile,
+    CommandRegistry,
+    ExpectedArtifact,
+)
 from tacorank.execution.sandbox import (
     ContainerMountPolicy,
     ContainerReadOnlyMount,
@@ -515,6 +520,17 @@ def test_docker_portable_quota_uses_bounded_tmpfs_and_output_copy(
     tmp_path: Path,
 ) -> None:
     command, config, worktree, artifacts = _resolved(tmp_path)
+    command = replace(
+        command,
+        expected_artifacts=(
+            ExpectedArtifact(
+                role="prediction",
+                relative_path="prediction.csv",
+                kind="predictions",
+                content_type="text/csv",
+            ),
+        ),
+    )
     sandbox = DockerSandbox(
         _policy(worktree, artifacts),
         image=IMAGE,
@@ -561,8 +577,10 @@ def test_docker_portable_quota_uses_bounded_tmpfs_and_output_copy(
     assert "tacorank.execution.container_supervisor" in launch.argv
     extraction = launch.runtime_cleanup.output_extraction
     assert extraction is not None
-    assert extraction.argv[1] == "cp"
-    assert extraction.argv[-1] == "-"
+    assert extraction.argv[1:4] == ("exec", "--user", "0:0")
+    assert "tacorank.execution.container_supervisor" in extraction.argv
+    assert "export" in extraction.argv
+    assert extraction.argv[-2:] == ("--allowed-output", "prediction.csv")
     assert launch.runtime_cleanup.completion_argv is not None
     assert launch.runtime_cleanup.release_argv is not None
     assert launch.runtime_cleanup.completion_argv[1:4] == (
