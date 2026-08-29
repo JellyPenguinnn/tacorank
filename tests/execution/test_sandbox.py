@@ -577,7 +577,7 @@ def test_docker_portable_quota_uses_bounded_tmpfs_and_output_copy(
     assert "tacorank.execution.container_supervisor" in launch.argv
     extraction = launch.runtime_cleanup.output_extraction
     assert extraction is not None
-    assert extraction.argv[1:4] == ("exec", "--user", "0:0")
+    assert extraction.argv[1:4] == ("exec", "--user", sandbox.container_user)
     assert "tacorank.execution.container_supervisor" in extraction.argv
     assert "export" in extraction.argv
     assert extraction.argv[-2:] == ("--allowed-output", "prediction.csv")

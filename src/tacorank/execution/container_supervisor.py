@@ -37,7 +37,6 @@ def _parser() -> argparse.ArgumentParser:
     self_test.add_argument("--uid", type=int, required=True)
     self_test.add_argument("--gid", type=int, required=True)
     export = commands.add_parser("export", allow_abbrev=False)
-    export.add_argument("--control-directory", required=True)
     export.add_argument("--allowed-output", action="append", required=True)
     for name in ("probe", "release"):
         command = commands.add_parser(name, allow_abbrev=False)
@@ -274,8 +273,7 @@ def _write_archive(
     output.flush()
 
 
-def _export(path: Path, allowed_outputs: Sequence[str]) -> int:
-    _completed_control(path)
+def _export(allowed_outputs: Sequence[str]) -> int:
     _write_archive(sys.stdout.buffer, Path("/artifacts"), allowed_outputs)
     return 0
 
@@ -318,6 +316,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if arguments.command == "self-test":
             return _self_test(arguments.uid, arguments.gid)
+        if arguments.command == "export":
+            return _export(arguments.allowed_output)
         control = _control_directory(arguments.control_directory)
         if arguments.command == "run":
             return _run(
@@ -330,8 +330,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _probe(control)
         if arguments.command == "release":
             return _release(control)
-        if arguments.command == "export":
-            return _export(control, arguments.allowed_output)
         raise SupervisorError("unknown supervisor command")
     except SupervisorError as error:
         print("tacorank container supervisor: {0}".format(error), file=sys.stderr)

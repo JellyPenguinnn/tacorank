@@ -24,6 +24,21 @@ def test_self_test_command_does_not_require_control_directory(
     assert container_supervisor.main(("self-test", "--uid", "501", "--gid", "20")) == 0
 
 
+def test_export_command_does_not_require_root_control_access(monkeypatch) -> None:
+    def export(allowed_outputs) -> int:
+        assert allowed_outputs == ["predictions.csv"]
+        return 0
+
+    monkeypatch.setattr(container_supervisor, "_export", export)
+
+    assert (
+        container_supervisor.main(
+            ("export", "--allowed-output", "predictions.csv")
+        )
+        == 0
+    )
+
+
 def test_exporter_streams_only_reviewed_regular_outputs(tmp_path: Path) -> None:
     artifact_root = (tmp_path / "artifacts").resolve()
     artifact_root.mkdir()
