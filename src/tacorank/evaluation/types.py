@@ -1,58 +1,26 @@
 """Typed values produced by TacoRank's deterministic evaluation layer.
 
-These dataclasses mirror the shared RankForge schema without taking ownership of
-the orchestrator's Pydantic models.  Adapters can translate them with
-``dataclasses.asdict`` or by reading attributes with the same names.
+These domain dataclasses add evaluation-only evidence around TacoRank's shared
+enums. Canonical ledger payloads are built with ``tacorank.schemas`` models.
 """
 
 from dataclasses import dataclass, field
-from enum import Enum
 import math
 from typing import Dict, List, Mapping, Optional, Tuple
 
-
-class Population(str, Enum):
-    INTERNAL_PROXY = "internal_proxy"
-    PUBLIC_VALIDATION = "public_validation"
-    UNBIASED_AUDIT = "unbiased_audit"
-    HIDDEN_FINAL = "hidden_final"
-
-
-class Fidelity(str, Enum):
-    SMOKE = "smoke"
-    PROXY = "proxy"
-    FULL = "full"
-    FINAL = "final"
-
-
-class Verdict(str, Enum):
-    ACCEPTED = "accepted"
-    INCONCLUSIVE = "inconclusive"
-    NEGATIVE = "negative"
-    NO_OP = "no_op"
-    SUSPICIOUS = "suspicious"
-    REDUNDANT = "redundant"
-
-
-class Stability(str, Enum):
-    SINGLE_SEED = "single_seed"
-    CONFIRMED = "confirmed"
-    UNSTABLE = "unstable"
-    NOT_APPLICABLE = "not_applicable"
-
-
-class Integrity(str, Enum):
-    CLEAN = "clean"
-    COMPROMISED = "compromised"
-    INCONCLUSIVE = "inconclusive"
-
-
-class Decision(str, Enum):
-    PROMOTE = "promote"
-    ACCEPT = "accept"
-    REJECT = "reject"
-    PRUNE = "prune"
-    INVALID = "invalid"
+from tacorank.schemas import (
+    Decision,
+    EvaluationResult as CanonicalEvaluationResult,
+    ExperimentDecision as CanonicalExperimentDecision,
+    Fidelity,
+    Integrity,
+    MetricSet as CanonicalMetricSet,
+    Population,
+    PredictionChange as CanonicalPredictionChange,
+    Stability,
+    TrustAssessment as CanonicalTrustAssessment,
+    TrustVerdict as Verdict,
+)
 
 
 @dataclass(frozen=True)
@@ -79,6 +47,13 @@ class MetricSet:
             raise ValueError("primary_score must be finite")
         object.__setattr__(self, "metrics", normalized)
         object.__setattr__(self, "primary_score", primary)
+
+    def to_canonical(self) -> CanonicalMetricSet:
+        return CanonicalMetricSet(
+            metrics=dict(self.metrics),
+            primary_metric_name=self.primary_metric_name,
+            primary_score=self.primary_score,
+        )
 
 
 @dataclass(frozen=True)
@@ -139,6 +114,44 @@ class EvaluationResult:
     prediction_change: PredictionChange
     trust: TrustAssessment
     diagnostic_metrics: Mapping[str, float] = field(default_factory=dict)
+    seed_evidence_event_ids: Tuple[str, ...] = ()
+
+    def to_canonical(self) -> CanonicalEvaluationResult:
+        if (
+            self.prediction_change.spearman_vs_parent is None
+            or self.prediction_change.changed_row_fraction is None
+        ):
+            raise ValueError("canonical evaluation requires parent prediction evidence")
+        return CanonicalEvaluationResult(
+            run_id=self.run_id,
+            experiment_id=self.experiment_id,
+            attempt=self.attempt,
+            population=self.population,
+            fidelity=self.fidelity,
+            seed=self.seed,
+            public_query_index=self.public_query_index,
+            evaluator_sha256=self.evaluator_sha256,
+            contract_sha256=self.contract_sha256,
+            metric_set=self.metric_set.to_canonical(),
+            baseline_delta=self.baseline_delta.primary,
+            parent_delta=self.parent_delta.primary,
+            previous_best_delta=self.previous_best_delta.primary,
+            prediction_change=CanonicalPredictionChange(
+                spearman_vs_parent=self.prediction_change.spearman_vs_parent,
+                changed_row_fraction=self.prediction_change.changed_row_fraction,
+            ),
+            trust=CanonicalTrustAssessment(
+                verdict=self.trust.verdict,
+                stability=self.trust.stability,
+                integrity=self.trust.integrity,
+                flags=list(self.trust.flags),
+                eta_applied=self.trust.eta_applied,
+                seed_mean=self.trust.seed_mean,
+                seed_stderr=self.trust.seed_stderr,
+                seed_count=self.trust.seed_count,
+            ),
+            seed_evidence_event_ids=list(self.seed_evidence_event_ids),
+        )
 
 
 @dataclass(frozen=True)
@@ -155,3 +168,20 @@ class ExperimentDecision:
     supporting_event_ids: Tuple[str, ...]
     seed_evidence_event_ids: Tuple[str, ...] = ()
 
+    def to_canonical(self) -> CanonicalExperimentDecision:
+        supporting = tuple(
+            dict.fromkeys(self.supporting_event_ids + self.seed_evidence_event_ids)
+        )
+        return CanonicalExperimentDecision(
+            run_id=self.run_id,
+            experiment_id=self.experiment_id,
+            evaluation_event_id=self.evaluation_event_id,
+            decision=self.decision,
+            reason_code=self.reason_code,
+            fidelity_completed=self.fidelity_completed,
+            parent_eligible=self.parent_eligible,
+            best_eligible=self.best_eligible,
+            next_fidelity=self.next_fidelity,
+            supporting_event_ids=list(supporting),
+            lesson_candidate=None,
+        )

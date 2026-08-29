@@ -47,6 +47,14 @@ class SliceTests(unittest.TestCase):
             all(0.0 <= value.mean_normalized_rank <= 1.0 for value in diagnostics.values())
         )
 
+    def test_slice_diagnostics_reject_fractional_labels(self):
+        with self.assertRaisesRegex(ValueError, "exact numeric binary"):
+            user_metrics(["u", "u"], [0.9, 0.1], [0.9, 0.1])
+        with self.assertRaisesRegex(ValueError, "exact numeric binary"):
+            positive_rank_diagnostics(
+                ["u", "u"], [0.9, 0.1], [0.9, 0.1], ["a", "b"]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

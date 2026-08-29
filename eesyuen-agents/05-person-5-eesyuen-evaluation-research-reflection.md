@@ -46,7 +46,7 @@ At run start, Person 2 provides a frozen `ContractSummary` and hashes. Your adap
 ## 3. Owned paths
 
 ```text
-src/rankforge/evaluation/
+src/tacorank/evaluation/
   adapter.py
   baseline.py
   proxy.py
@@ -58,11 +58,11 @@ src/rankforge/evaluation/
   decisions.py
   final_selection.py
 
-src/rankforge/reflection/
+src/tacorank/reflection/
   research.py
   lesson_rules.py
 
-src/rankforge/reporting/
+src/tacorank/reporting/
   results.py
   resources.py
   experiment_tree.py
@@ -87,6 +87,7 @@ Import shared schemas from Person 2. Do not create alternative metric/verdict/de
 run_id, experiment_id, attempt
 output_checked_event_id
 prediction_artifact: ArtifactRef
+ordered_row_identity_sha256, ordered_prediction_sha256 from verified Gate B
 population: internal_proxy | public_validation | hidden_final
 fidelity: proxy | full | final
 seed
@@ -110,6 +111,7 @@ metric_set: MetricSet
 baseline_delta, parent_delta, previous_best_delta
 prediction_change: PredictionChange
 trust: TrustAssessment
+seed_evidence_event_ids: verified prior evaluation events for this experiment
 ```
 
 `MetricSet`:
@@ -180,6 +182,7 @@ Person 2 validates/deduplicates and appends it. You never write `LESSONS.md`.
 - retrieve labels through a protected evaluator-only data path;
 - candidate process never sees protected validation labels;
 - call official functions directly where possible;
+- execute the official call in a clean isolated interpreter with candidate paths removed;
 - never reimplement a “faster equivalent” as the production scoring path;
 - any independent metric implementation is a parity test only.
 

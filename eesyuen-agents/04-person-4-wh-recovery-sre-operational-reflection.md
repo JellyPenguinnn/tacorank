@@ -56,14 +56,14 @@ Monitoring must work for CPU-only baseline runs. GPU absence is normal, not an e
 ## 3. Owned paths
 
 ```text
-src/rankforge/sre/
+src/tacorank/sre/
   observer.py
   health_policy.py
   telemetry_window.py
   anomaly_detection.py
   heartbeat.py
 
-src/rankforge/recovery/
+src/tacorank/recovery/
   classifier.py
   policy.py
   self_debug.py
@@ -76,7 +76,7 @@ tests/recovery/
 tests/failure_injection/
 ```
 
-Import shared models from `src/rankforge/schemas.py`. Do not redefine them.
+Import shared models from `src/tacorank/schemas.py`. Do not redefine them.
 
 ## 4. Shared interfaces
 

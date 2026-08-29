@@ -6,18 +6,36 @@ functions here exist for parity tests and per-user diagnostics only.
 
 from collections import defaultdict
 import math
+from numbers import Number
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from .types import MetricSet
+
+
+def normalize_binary_labels(
+    labels: Sequence[object], context: str = "labels"
+) -> Tuple[int, ...]:
+    """Validate exact numeric binary values before normalizing their type."""
+    normalized = []
+    for value in labels:
+        if isinstance(value, (bool, str, bytes)) or not isinstance(value, Number):
+            raise ValueError("%s must be exact numeric binary values" % context)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("%s must be exact numeric binary values" % context)
+        if not math.isfinite(numeric) or numeric not in (0.0, 1.0):
+            raise ValueError("%s must be exact numeric binary values" % context)
+        normalized.append(int(numeric))
+    return tuple(normalized)
 
 
 def auc(labels: Sequence[int], scores: Sequence[float]) -> float:
     """Mann-Whitney AUC with average ranks for tied scores."""
     if len(labels) != len(scores):
         raise ValueError("labels and scores must have the same length")
-    pairs = sorted(zip((float(s) for s in scores), (int(y) for y in labels)))
-    if any(y not in (0, 1) for _, y in pairs):
-        raise ValueError("AUC labels must be binary")
+    normalized_labels = normalize_binary_labels(labels, "AUC labels")
+    pairs = sorted(zip((float(s) for s in scores), normalized_labels))
     ranks = [0.0] * len(pairs)
     index = 0
     while index < len(pairs):
@@ -43,9 +61,7 @@ def auc(labels: Sequence[int], scores: Sequence[float]) -> float:
 def ndcg_at_k(ranked_labels: Sequence[int], k: int = 5) -> float:
     if k <= 0:
         raise ValueError("k must be positive")
-    labels = [int(value) for value in ranked_labels]
-    if any(value not in (0, 1) for value in labels):
-        raise ValueError("nDCG labels must be binary")
+    labels = normalize_binary_labels(ranked_labels, "nDCG labels")
     discounts = [math.log2(position + 2) for position in range(k)]
     dcg = sum(
         ((2 ** label) - 1) / discounts[index]
@@ -67,12 +83,13 @@ def evaluate_independent(
 ) -> Mapping[str, float]:
     """Reproduce the starter kit evaluator for parity checks."""
     _validate_equal_nonempty(user_ids, labels, scores)
+    normalized_labels = normalize_binary_labels(labels)
     grouped: Dict[str, List[Tuple[float, int]]] = defaultdict(list)
-    for user_id, label, score in zip(user_ids, labels, scores):
+    for user_id, label, score in zip(user_ids, normalized_labels, scores):
         numeric_score = float(score)
         if not math.isfinite(numeric_score):
             raise ValueError("scores must be finite")
-        grouped[str(user_id)].append((numeric_score, int(label)))
+        grouped[str(user_id)].append((numeric_score, label))
 
     weighted_auc = 0.0
     positive_weight = 0.0
@@ -112,9 +129,10 @@ def per_user_contributions(
     used alone for single-class groups.
     """
     _validate_equal_nonempty(user_ids, labels, scores)
+    normalized_labels = normalize_binary_labels(labels)
     grouped: Dict[str, List[Tuple[float, int]]] = defaultdict(list)
-    for user_id, label, score in zip(user_ids, labels, scores):
-        grouped[str(user_id)].append((float(score), int(label)))
+    for user_id, label, score in zip(user_ids, normalized_labels, scores):
+        grouped[str(user_id)].append((float(score), label))
     output: Dict[str, Tuple[float, float, float]] = {}
     for user_id, rows in grouped.items():
         rows.sort(key=lambda row: -row[0])

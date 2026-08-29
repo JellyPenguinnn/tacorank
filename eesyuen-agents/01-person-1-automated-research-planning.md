@@ -2,13 +2,13 @@
 
 ## Codex implementation brief
 
-You own RankForge's research intelligence: interpreting verified evidence, maintaining an AIDE-style view of the experiment tree, deciding which trusted code state should be explored next, and producing one bounded `ExperimentSpec` at a time.
+You own TacoRank's research intelligence: interpreting verified evidence, maintaining an AIDE-style view of the experiment tree, deciding which trusted code state should be explored next, and producing one bounded `ExperimentSpec` at a time.
 
 You do **not** own orchestration, durable memory, context assembly, code editing, sandbox execution, recovery, metric computation, or final stop enforcement. Those boundaries are deliberate. Return strict typed objects to Person 2's harness; never directly call another component or write shared state.
 
 ## 1. System objective and hard constraints
 
-RankForge must autonomously reproduce the official recommender baseline, propose code-level improvements, evaluate them on public validation only, learn from verified outcomes, recover from failures, converge under the frozen rule, and submit the validation-best trusted candidate once to hidden test.
+TacoRank must autonomously reproduce the official recommender baseline, propose code-level improvements, evaluate them on public validation only, learn from verified outcomes, recover from failures, converge under the frozen rule, and submit the validation-best trusted candidate once to hidden test.
 
 The supplied problem material contains conflicting descriptions of the target label and metrics. Therefore:
 
@@ -40,7 +40,7 @@ Only Person 2's orchestrator writes `events.jsonl`. Every other component return
 
 ## 3. Shared interface freeze
 
-All shared models live in `src/rankforge/schemas.py`, owned by Person 2. Import them; do not redefine local dataclasses with similar fields.
+All shared models live in `src/tacorank/schemas.py`, owned by Person 2. Import them; do not redefine local dataclasses with similar fields.
 
 ### 3.1 Models consumed by Person 1
 
@@ -144,7 +144,7 @@ This is the sole return type of `ResearchPlanner.propose`. Enforce it as a discr
 ## 4. Owned repository paths
 
 ```text
-src/rankforge/research/
+src/tacorank/research/
   graph_view.py
   search_policy.py
   duplicate_detection.py
@@ -152,10 +152,10 @@ src/rankforge/research/
   method_cards.py
   plan_validation.py
 
-src/rankforge/agents/
+src/tacorank/agents/
   research_planner.py
 
-src/rankforge/providers/
+src/tacorank/providers/
   research_provider.py
 
 research/methods/
@@ -402,7 +402,7 @@ Person 1 never calls Trae. Person 2 converts the accepted spec into a Coder cont
 
 ### P0 — interface-compatible deterministic core
 
-1. Import shared models from `src/rankforge/schemas.py`.
+1. Import shared models from `src/tacorank/schemas.py`.
 2. Implement `GraphView` using only `PlannerContext` summaries.
 3. Implement parent eligibility.
 4. Implement breadth tracking by family.

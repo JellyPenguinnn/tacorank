@@ -1,6 +1,13 @@
 """Deterministic evaluation, trust, and experiment-decision APIs."""
 
-from .adapter import ContractSpec, EvaluationInputs, EvaluationService, ProtectedEvaluatorAdapter
+from .adapter import (
+    ContractSpec,
+    EvaluationInputs,
+    EvaluationService,
+    OutputGateEvidence,
+    PredictionBatch,
+    ProtectedEvaluatorAdapter,
+)
 from .decisions import DecisionContext, NoOpRecoveryRequired, decide
 from .types import (
     Decision,
@@ -28,7 +35,9 @@ __all__ = [
     "Integrity",
     "MetricSet",
     "NoOpRecoveryRequired",
+    "OutputGateEvidence",
     "Population",
+    "PredictionBatch",
     "PredictionChange",
     "ProtectedEvaluatorAdapter",
     "Stability",

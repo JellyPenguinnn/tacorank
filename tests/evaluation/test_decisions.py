@@ -17,14 +17,25 @@ from tacorank.evaluation.types import (
 )
 
 
-def result(verdict, stability, best_delta=0.01, fidelity=Fidelity.FULL):
-    metric_set = MetricSet({"GAUC": 0.67, "nDCG@5": 0.55}, "primary", 0.61)
+def result(
+    verdict,
+    stability,
+    best_delta=0.01,
+    fidelity=Fidelity.FULL,
+    current_primary=0.61,
+    seed_mean=0.61,
+):
+    metric_set = MetricSet(
+        {"GAUC": current_primary, "nDCG@5": current_primary},
+        "primary",
+        current_primary,
+    )
     trust = TrustAssessment(
         verdict,
         stability,
         Integrity.CLEAN,
         eta_applied=0.0016,
-        seed_mean=0.61,
+        seed_mean=seed_mean,
         seed_stderr=0.0002,
         seed_count=3,
     )
@@ -61,6 +72,18 @@ class DecisionTests(unittest.TestCase):
         self.assertTrue(decision.parent_eligible)
         self.assertFalse(decision.best_eligible)
         self.assertEqual(decision.decision, Decision.REJECT)
+
+    def test_confirmed_decision_compares_aggregate_seed_mean_to_best(self):
+        confirmed = result(
+            Verdict.ACCEPTED,
+            Stability.CONFIRMED,
+            best_delta=-0.0001,
+            current_primary=0.5999,
+            seed_mean=0.6020,
+        )
+        decision = decide(confirmed, CTX)
+        self.assertEqual(decision.decision, Decision.ACCEPT)
+        self.assertTrue(decision.best_eligible)
 
     def test_no_op_requires_recovery_before_decision(self):
         with self.assertRaises(NoOpRecoveryRequired):

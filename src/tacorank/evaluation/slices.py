@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .metrics import auc, evaluate_independent, ndcg_at_k
+from .metrics import auc, evaluate_independent, ndcg_at_k, normalize_binary_labels
 
 
 @dataclass(frozen=True)
@@ -53,12 +53,13 @@ def user_metrics(
 ) -> Tuple[UserMetric, ...]:
     if not (len(user_ids) == len(labels) == len(scores)) or not scores:
         raise ValueError("user IDs, labels and scores must align and be non-empty")
+    normalized_labels = normalize_binary_labels(labels)
     grouped: Dict[str, List[Tuple[float, int]]] = defaultdict(list)
-    for user_id, label, score in zip(user_ids, labels, scores):
+    for user_id, label, score in zip(user_ids, normalized_labels, scores):
         numeric_score = float(score)
         if not math.isfinite(numeric_score):
             raise ValueError("scores must be finite")
-        grouped[str(user_id)].append((numeric_score, int(label)))
+        grouped[str(user_id)].append((numeric_score, label))
     output = []
     for user_id, rows in grouped.items():
         rows.sort(key=lambda row: -row[0])
@@ -215,11 +216,12 @@ def positive_rank_diagnostics(
         len(user_ids) == len(labels) == len(scores) == len(bucket_values)
     ) or not scores:
         raise ValueError("rank diagnostic inputs must align and be non-empty")
+    normalized_labels = normalize_binary_labels(labels)
     grouped: Dict[str, List[Tuple[int, float, int, str]]] = defaultdict(list)
     for index, (user_id, label, score, bucket) in enumerate(
-        zip(user_ids, labels, scores, bucket_values)
+        zip(user_ids, normalized_labels, scores, bucket_values)
     ):
-        grouped[str(user_id)].append((index, float(score), int(label), str(bucket)))
+        grouped[str(user_id)].append((index, float(score), label, str(bucket)))
     by_bucket: Dict[str, List[float]] = defaultdict(list)
     for rows in grouped.values():
         descending = sorted(rows, key=lambda row: -row[1])

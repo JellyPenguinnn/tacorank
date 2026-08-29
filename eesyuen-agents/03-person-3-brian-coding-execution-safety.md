@@ -36,18 +36,18 @@ Candidate code may use training labels allowed by the contract. It must not read
 ## 3. Owned paths
 
 ```text
-src/rankforge/coding/
+src/tacorank/coding/
   trae_adapter.py
   prompts.py
   output_parser.py
   redaction.py
 
-src/rankforge/git/
+src/tacorank/git/
   worktrees.py
   refs.py
   patches.py
 
-src/rankforge/safety/
+src/tacorank/safety/
   protected_manifest.py
   patch_gate.py
   path_policy.py
@@ -56,7 +56,7 @@ src/rankforge/safety/
   output_gate.py
   receipts.py
 
-src/rankforge/execution/
+src/tacorank/execution/
   runner.py
   sandbox.py
   commands.py
@@ -175,6 +175,8 @@ resource_delta
 ```text
 run_id, experiment_id, attempt
 prediction_artifact
+ordered_row_identity_sha256
+ordered_prediction_sha256
 accepted
 checks
 score_stats
@@ -343,9 +345,9 @@ At minimum protect:
 ```text
 contract/
 runs/
-src/rankforge/memory/
-src/rankforge/orchestrator/
-src/rankforge/safety/
+src/tacorank/memory/
+src/tacorank/orchestrator/
+src/tacorank/safety/
 official evaluate.py
 official data split/load logic
 official submit.py

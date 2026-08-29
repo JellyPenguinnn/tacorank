@@ -24,7 +24,7 @@ The supplied problem material contains conflicting label/metric descriptions. Yo
 
 You own:
 
-- `src/rankforge/schemas.py` and all shared enums/models;
+- `src/tacorank/schemas.py` and all shared enums/models;
 - event validation, canonical JSON serialization, append, hash chain, and replay;
 - derived `RunState`, experiment graph view, active lessons, status and summary views;
 - exact context bundles for Planner, Coder, Recovery, and evaluation handoffs;
@@ -60,21 +60,21 @@ Do not add SQLite, Redis, a vector database, a mutable `state.json`, an experime
 ## 4. Owned repository paths
 
 ```text
-src/rankforge/
+src/tacorank/
   schemas.py
   config.py
   artifacts.py
   accounting.py
   cli.py
 
-src/rankforge/memory/
+src/tacorank/memory/
   event_store.py
   canonical_json.py
   replay.py
   projections.py
   retrieval.py
 
-src/rankforge/orchestrator/
+src/tacorank/orchestrator/
   ports.py
   state.py
   state_machine.py
@@ -82,7 +82,7 @@ src/rankforge/orchestrator/
   convergence.py
   finalize.py
 
-src/rankforge/context/
+src/tacorank/context/
   builder.py
   redaction.py
   token_estimator.py
@@ -113,7 +113,7 @@ Implement strict Pydantic v2 models with `extra="forbid"`, finite-number validat
 ```text
 artifact_id: str
 kind: diff | trajectory | context | log | checkpoint | predictions |
-      metrics | verification_receipt | submission | report | other
+      metrics | delta_vector | verification_receipt | submission | report | other
 path: str                              # normalized repository-relative path
 sha256: str                            # lowercase 64 hex
 size_bytes: int >= 0
@@ -283,7 +283,7 @@ lesson_candidate: LessonCandidate | null
 ```text
 run_id, experiment_id, attempt
 output_checked_event_id, prediction_artifact
-population: internal_proxy | public_validation | hidden_final
+population: internal_proxy | public_validation | unbiased_audit | hidden_final
 fidelity, seed
 contract_sha256, evaluator_sha256
 baseline_summary, parent_summary, previous_best_summary
@@ -305,7 +305,7 @@ trust: TrustAssessment
 `TrustAssessment` contains:
 
 ```text
-verdict: accepted | inconclusive | negative | no_op | suspicious
+verdict: accepted | inconclusive | negative | no_op | suspicious | redundant
 stability: single_seed | confirmed | unstable | not_applicable
 integrity: clean | compromised | inconclusive
 flags: list[str]
@@ -389,7 +389,7 @@ Provide deterministic fake implementations for all ports. The real orchestrator 
 
 ## 7. Event ledger
 
-Implement the complete schema in `RankForge-Memory-Schema-v1.md`. Required properties:
+Implement the complete schema in `TacoRank-Memory-Schema-v1.md`. Required properties:
 
 - compact UTF-8 JSON, one object per newline;
 - contiguous `seq` and `event_id = evt_{seq:06d}`;
@@ -649,7 +649,7 @@ Do not use an LLM summarizer in the core. Use deterministic templates and compac
 
 ### 11.2 Planner context
 
-Include contract digest, budgets, baseline, current best, eligible frontier, same-family verified history, up to five active tag-matching lessons, method cards, public-query count and convergence pressure. Exclude hidden-final, invalid/provisional evidence, secrets, full logs, unrelated trajectories, superseded lessons and suspicious metrics as positive rewards. Target 4,000–6,000 tokens.
+Include contract digest, budgets, baseline, current best, eligible frontier, same-family verified history, up to five active tag-matching lessons, method cards, public-query count, convergence pressure, and bounded delta-vector orthogonality. Exclude hidden-final, unbiased-audit numbers, inconclusive or invalid/provisional evidence, secrets, full logs, unrelated trajectories, superseded lessons and suspicious metrics as positive rewards. Target 4,000–6,000 tokens.
 
 ### 11.3 Coder context
 
@@ -706,12 +706,12 @@ Never rerun an expensive action because an acknowledgement was lost.
 ## 14. CLI
 
 ```text
-rankforge run --config <path>
-rankforge resume --run-id <id>
-rankforge status --run-id <id>
-rankforge validate-ledger --run-id <id>
-rankforge rebuild-views --run-id <id>
-rankforge finalize --run-id <id>
+tacorank run --config <path>
+tacorank resume --run-id <id>
+tacorank status --run-id <id>
+tacorank validate-ledger --run-id <id>
+tacorank rebuild-views --run-id <id>
+tacorank finalize --run-id <id>
 ```
 
 After `run.started`, execution is non-interactive except emergency stop. Configuration is frozen and hashed.

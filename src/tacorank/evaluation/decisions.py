@@ -32,21 +32,52 @@ def decide(
     context: DecisionContext,
 ) -> ExperimentDecision:
     trust = result.trust
-    if result.population == Population.HIDDEN_FINAL or result.fidelity == Fidelity.FINAL:
+    if tuple(context.seed_evidence_event_ids) != tuple(
+        result.seed_evidence_event_ids
+    ):
+        raise ValueError("decision seed evidence does not match evaluation")
+    if (
+        result.population == Population.HIDDEN_FINAL
+        or result.fidelity == Fidelity.FINAL
+    ):
         raise ValueError("hidden-final results do not produce experiment decisions")
     if result.population == Population.UNBIASED_AUDIT:
-        raise ValueError("unbiased-audit results support trust but do not produce decisions")
+        raise ValueError(
+            "unbiased-audit results support trust but do not produce decisions"
+        )
     if trust.verdict == Verdict.NO_OP:
         raise NoOpRecoveryRequired("no-op requires implementation recovery")
 
-    if result.fidelity == Fidelity.PROXY or result.population == Population.INTERNAL_PROXY:
+    if (
+        result.fidelity == Fidelity.PROXY
+        or result.population == Population.INTERNAL_PROXY
+    ):
         if trust.verdict == Verdict.ACCEPTED and trust.integrity == Integrity.CLEAN:
-            return _decision(result, context, Decision.PROMOTE, "PROXY_PASSED", False, False, Fidelity.FULL)
-        reason = "PROXY_FAILED" if trust.verdict == Verdict.NEGATIVE else "INTEGRITY_UNVERIFIED"
-        action = Decision.PRUNE if trust.verdict == Verdict.NEGATIVE else Decision.INVALID
+            return _decision(
+                result,
+                context,
+                Decision.PROMOTE,
+                "PROXY_PASSED",
+                False,
+                False,
+                Fidelity.FULL,
+            )
+        reason = (
+            "PROXY_FAILED"
+            if trust.verdict == Verdict.NEGATIVE
+            else "INTEGRITY_UNVERIFIED"
+        )
+        action = (
+            Decision.PRUNE
+            if trust.verdict == Verdict.NEGATIVE
+            else Decision.INVALID
+        )
         return _decision(result, context, action, reason, False, False, None)
 
-    if result.population != Population.PUBLIC_VALIDATION or result.fidelity != Fidelity.FULL:
+    if (
+        result.population != Population.PUBLIC_VALIDATION
+        or result.fidelity != Fidelity.FULL
+    ):
         raise ValueError("full experiment decisions require public validation")
 
     if trust.verdict == Verdict.ACCEPTED and trust.stability == Stability.SINGLE_SEED:
@@ -75,8 +106,17 @@ def decide(
         and trust.stability == Stability.CONFIRMED
         and trust.integrity == Integrity.CLEAN
     ):
-        # previous_best_delta = candidate - best, so the comparison simplifies.
-        best_eligible = result.previous_best_delta.primary > (trust.eta_applied or 0.0)
+        current_best = (
+            result.metric_set.primary_score - result.previous_best_delta.primary
+        )
+        candidate_primary = (
+            trust.seed_mean
+            if trust.seed_mean is not None
+            else result.metric_set.primary_score
+        )
+        best_eligible = (
+            candidate_primary - current_best > (trust.eta_applied or 0.0)
+        )
         reason = "TRUSTED_IMPROVEMENT" if best_eligible else "TRUSTED_NO_IMPROVEMENT"
         action = Decision.ACCEPT if best_eligible else Decision.REJECT
         return _decision(result, context, action, reason, True, best_eligible, None)
@@ -92,7 +132,11 @@ def decide(
         Verdict.SUSPICIOUS: "INTEGRITY_UNVERIFIED",
     }
     reason = reason_by_verdict.get(trust.verdict, "INTEGRITY_UNVERIFIED")
-    action = Decision.INVALID if trust.verdict == Verdict.SUSPICIOUS else Decision.REJECT
+    action = (
+        Decision.INVALID
+        if trust.verdict == Verdict.SUSPICIOUS
+        else Decision.REJECT
+    )
     return _decision(result, context, action, reason, False, False, None)
 
 

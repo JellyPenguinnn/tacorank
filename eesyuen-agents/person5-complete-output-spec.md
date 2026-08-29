@@ -1,6 +1,6 @@
 # Person 5 — Complete Output Specification
 
-**Against RankForge Memory Schema v1.0.**
+**Against TacoRank Memory Schema v1.0.**
 Every artifact Person 5 produces, fully specified. This is the reference the orchestrator validates against and Person 1 codes against.
 
 ---
@@ -485,7 +485,7 @@ Delta vector definition:
 Pure function of the folded ledger. Never persisted (§20). Recomputed on restart.
 
 ```python
-from rankforge.evaluation.projection import evaluation_projection
+from tacorank.evaluation.projection import evaluation_projection
 proj = evaluation_projection(fold, experiment_id)
 ```
 

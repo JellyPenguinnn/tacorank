@@ -24,3 +24,66 @@ Use standard-library `unittest`; name files `test_<module>.py` and tests `test_<
 
 ## Commits & Pull Requests
 Use concise imperative subjects, optionally with the existing `[fea]:` prefix. Keep submodule pointer changes explicit. Pull requests should state motivation, affected subsystem, commands run, data/split assumptions, seed values, and metric deltas; link issues and attach report screenshots only when relevant.
+
+# Pull Request Review Workflow
+
+When asked to address PR feedback, do NOT blindly implement reviewer comments.
+
+For every review comment:
+
+1. Retrieve the full PR context, including:
+   - PR description
+   - review comments
+   - inline code comments
+   - relevant commits and diffs
+
+2. Inspect the surrounding implementation before making changes.
+   Understand:
+   - what the current code is trying to achieve
+   - why it may have been implemented this way
+   - where this code sits in the overall execution/data flow
+   - its callers, downstream consumers, interfaces, invariants, and tests
+
+3. Interpret the reviewer's suggestion.
+   Identify:
+   - what problem the reviewer is trying to prevent or solve
+   - what assumptions their suggestion makes
+   - how their proposed logic would change the existing flow
+
+4. Compare the two approaches rather than assuming the reviewer is correct.
+
+   Evaluate both against:
+   - intended application flow
+   - product/business requirements
+   - existing architecture
+   - correctness and edge cases
+   - consistency with related code
+   - backward compatibility
+   - tests
+   - maintainability and unnecessary complexity
+
+5. Classify each comment as one of:
+   - ACCEPT: reviewer logic is more correct
+   - PARTIAL: reviewer identified a valid issue, but the suggested solution is not ideal
+   - KEEP CURRENT: current implementation is correct and reviewer suggestion would break or weaken the intended flow
+   - NEEDS CONTEXT: repository evidence is insufficient to determine the correct behavior
+
+6. Before modifying code, explain:
+   - current logic
+   - reviewer logic
+   - relevant execution/data flow
+   - trade-offs
+   - your conclusion
+   - evidence supporting the conclusion
+
+7. If the reviewer is correct, implement the change.
+
+8. If the reviewer identified a real problem but proposed the wrong fix, implement a better fix and explain why.
+
+9. If the current implementation is correct, do not change it merely to satisfy the comment. Explain clearly why the existing behavior should remain.
+
+10. Check for semantic consequences outside the commented lines. A locally reasonable change may break another part of the system.
+
+11. Run relevant tests, linting, and type checks after changes.
+
+Never commit, push, merge, force-push, or resolve/close review conversations without explicit approval.

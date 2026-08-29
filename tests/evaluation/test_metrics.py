@@ -42,6 +42,12 @@ class MetricTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "binary"):
             ndcg_at_k([2, 0], 5)
 
+    def test_metrics_reject_fractional_string_and_boolean_labels(self):
+        for labels in ([0.9, 0.1], ["1", "0"], [True, False]):
+            with self.subTest(labels=labels):
+                with self.assertRaisesRegex(ValueError, "exact numeric binary"):
+                    evaluate_independent(["u", "u"], labels, [0.9, 0.1])
+
 
 if __name__ == "__main__":
     unittest.main()
