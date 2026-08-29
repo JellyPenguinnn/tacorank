@@ -1,6 +1,6 @@
 # TacoRank
 
-TacoRank is the repository scaffold for **RankForge**, an autonomous recommender-system research harness for KuaiRand-Pure. This commit defines architecture and ownership paths only; the modules are intentionally empty.
+TacoRank is an autonomous recommender-system research harness for KuaiRand-Pure. This repository currently defines architecture and ownership paths only; the modules are intentionally empty.
 
 ## Architecture
 
@@ -19,7 +19,7 @@ The orchestrator owns run state, budgets, convergence, final selection, and the 
 
 ```text
 contract/                    Frozen competition contract
-src/rankforge/
+src/tacorank/
   agents/ providers/ research/   Research planning
   memory/ orchestrator/ context/ Control plane and context assembly
   coding/ git/ safety/ execution/ Coding and trusted execution
