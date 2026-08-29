@@ -1038,11 +1038,18 @@ def _require_live_files(config: RunConfig, live: LiveAdapterConfig) -> None:
         raise ContractError("coding and execution must use the same Docker host socket")
     for field, configured in (
         ("max_steps_cap", config.coding_step_limit),
-        ("max_token_cap", config.coding_token_limit),
         ("max_wall_time_seconds_cap", config.coding_wall_time_limit_seconds),
     ):
         if int(live.trae.get(field, 0)) < configured:
             raise ContractError("run coding limit exceeds the reviewed Trae %s" % field)
+    reviewed_token_cap = live.trae.get("max_token_cap")
+    if config.coding_token_limit is None:
+        if reviewed_token_cap is not None:
+            raise ContractError(
+                "uncapped run coding tokens require a null reviewed Trae token cap"
+            )
+    elif reviewed_token_cap is not None and int(reviewed_token_cap) < config.coding_token_limit:
+        raise ContractError("run coding limit exceeds the reviewed Trae max_token_cap")
 
 
 def _require_clean_baseline(root: Path, baseline_commit_sha: str) -> None:

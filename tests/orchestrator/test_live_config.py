@@ -23,7 +23,7 @@ def test_trae_config_normalizes_json_path_and_tuple_values(tmp_path: Path) -> No
             "command_prefix": [str(executable)],
             "trae_version": "0.1.0",
             "provider": "openai",
-            "model_id": "deepseek-v4-pro",
+            "model_id": "deepseek-v4-flash",
             "config_file": str(config_file),
             "config_sha256": "a" * 64,
             "max_steps_cap": 20,

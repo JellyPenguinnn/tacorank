@@ -171,6 +171,16 @@ def test_coding_prompt_is_exact_bounded_and_credential_free() -> None:
         build_coding_prompt(context, changed_spec)
 
 
+def test_coding_prompt_records_an_unbounded_cumulative_token_limit() -> None:
+    context, spec = _coding_inputs()
+    context.token_limit = None
+
+    prompt = build_coding_prompt(context, spec)
+
+    assert "max_provider_tokens: null" in prompt
+    assert "does not impose a cumulative trajectory token limit" in prompt
+
+
 def test_repair_prompt_preserves_original_hypothesis_and_exact_failure() -> None:
     _, spec = _coding_inputs()
     context = SimpleNamespace(
@@ -213,6 +223,41 @@ def test_repair_prompt_preserves_original_hypothesis_and_exact_failure() -> None
             wall_time_limit_seconds=8,
             allowed_command_ids=("candidate_smoke",),
         )
+
+
+def test_repair_prompt_records_an_unbounded_cumulative_token_limit() -> None:
+    _, spec = _coding_inputs()
+    context = SimpleNamespace(
+        context_id="repair-ctx",
+        run_id="run1",
+        experiment_id="exp1",
+        repair_attempt=2,
+        original_experiment_spec=spec,
+        current_patch_commit_sha="c" * 40,
+        accepted_patch_receipt_id="receipt-1",
+        failure_class="code_error",
+        error_fingerprint="fingerprint",
+        error_summary="NameError in candidate",
+        relevant_trace_tail="candidate.py:4",
+        failed_checks=({"name": "smoke", "status": "fail"},),
+        previous_repair_fingerprints=(),
+        recovery_instructions="Import the missing symbol.",
+        remaining_repair_budget=1,
+        editable_roots=("solution",),
+        protected_paths=("contract",),
+    )
+
+    prompt = build_repair_prompt(
+        context,
+        {"action": "trae_repair", "instructions": "fix import"},
+        step_limit=3,
+        token_limit=None,
+        wall_time_limit_seconds=8,
+        allowed_command_ids=("candidate_smoke",),
+    )
+
+    assert '"max_provider_tokens": null' in prompt
+    assert "does not impose a cumulative trajectory token limit" in prompt
 
 
 def test_gate_a_repair_has_explicitly_absent_receipt() -> None:

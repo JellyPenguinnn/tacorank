@@ -22,7 +22,7 @@ from .evaluation.proxy import split_validation_indices
 TRAE_SOURCE_REVISION = "e839e559ac61bdd0e057c375dd1dee391fee797d"
 TRAE_READ_ONLY_TOOL_MARKER = "TacoRank: use manifest-verified pre-mounted tools"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_MODEL = "deepseek-v4-pro"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
 DATA_URL = "https://zenodo.org/records/10439422/files/KuaiRand-Pure.tar.gz"
 DATA_ARCHIVE_MD5 = "0820331067a3784d9691136f772b35a7"
 RAW_REQUIRED = (
@@ -103,10 +103,10 @@ def setup_live_deployment(
             "config_file": str(trae_yaml),
             "config_sha256": _sha256_file(trae_yaml),
             "max_steps_cap": 20,
-            "max_token_cap": 4096,
+            "max_token_cap": None,
             "max_wall_time_seconds_cap": 900,
             "repair_step_limit": 12,
-            "repair_token_limit": 2048,
+            "repair_token_limit": None,
             "repair_wall_time_limit_seconds": 600,
             "repair_allowed_command_ids": ["candidate_smoke"],
             "approved_environment_names": ["DEEPSEEK_API_KEY"],
@@ -212,7 +212,7 @@ def setup_live_deployment(
             )
         },
         "coding_step_limit": 20,
-        "coding_token_limit": 4096,
+        "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 900,
         "research_provider": "deepseek",
         "deepseek_model": DEEPSEEK_MODEL,
@@ -445,7 +445,7 @@ model_providers:
 models:
   tacorank_coder:
     model_provider: openai
-    model: deepseek-v4-pro
+    model: deepseek-v4-flash
     max_tokens: 4096
     temperature: 0
     top_p: 1

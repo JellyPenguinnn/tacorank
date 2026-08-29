@@ -394,7 +394,7 @@ class ContextBuilder:
                 resolved=True,
                 allowed_families=list(ALL_FAMILIES),
                 protected_paths=self._protected_paths(),
-                editable_paths=[],
+                editable_paths=list(self.config.editable_roots),
                 epsilon=self.config.convergence_epsilon,
             ),
             "baseline": baseline,

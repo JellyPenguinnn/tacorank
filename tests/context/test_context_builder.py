@@ -16,6 +16,7 @@ def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_e
     assert first.content.encode() == second.content.encode()
     assert first.artifact.sha256 == second.artifact.sha256
     assert first.estimated_tokens <= harness.config.context_token_limit
+    assert first.contract_summary.editable_paths == harness.config.editable_roots
 
 
 def test_mandatory_context_cannot_be_silently_truncated(harness, baseline_evaluation):

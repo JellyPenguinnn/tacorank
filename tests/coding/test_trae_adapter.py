@@ -545,6 +545,28 @@ def test_adapter_fails_closed_for_invalid_coding_results(
     assert parts.secret not in (failure.value.output_tail or "")
 
 
+def test_adapter_allows_all_reported_tokens_when_limit_is_null(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    parts.config = replace(
+        parts.config,
+        max_token_cap=None,
+        repair_token_limit=None,
+    )
+    parts.context.token_limit = None
+    parts.environment["FAKE_TRAE_BEHAVIOR"] = "over_tokens"
+
+    candidate = asyncio.run(_worker(parts).create_patch(parts.context, parts.spec))
+
+    assert candidate.resource_delta.llm_input_tokens == 70
+    assert candidate.resource_delta.llm_output_tokens == 40
+    trajectory = json.loads(
+        (parts.repository / candidate.trajectory_artifact.path).read_bytes()
+    )
+    assert trajectory["tacorank_adapter"]["max_provider_tokens"] is None
+
+
 def test_candidate_identity_is_required_before_worktree_or_trae(
     adapter_parts: SimpleNamespace,
 ) -> None:
