@@ -1,0 +1,19 @@
+{
+  "action": "propose",
+  "reason": "This must be rejected because there is no spec.",
+  "reason_code": "missing_spec",
+  "resource_delta": {
+    "cpu_time_ms": 0,
+    "gpu_count": 0,
+    "gpu_time_ms": 0,
+    "llm_input_tokens": 0,
+    "llm_output_tokens": 0,
+    "manual_interventions": 0,
+    "peak_gpu_memory_mb": null,
+    "peak_rss_mb": null,
+    "token_measurement": "none",
+    "wall_time_ms": 0
+  },
+  "spec": null,
+  "supporting_event_ids": []
+}
