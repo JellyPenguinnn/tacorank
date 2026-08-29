@@ -17,6 +17,7 @@ from ..memory.retrieval import (
 )
 from ..recovery.classifier import classify_failure
 from ..recovery.fingerprints import fingerprint_result
+from ..run_layout import run_relative_directory
 from ..schemas import (
     ArtifactKind,
     CoderContext,
@@ -172,7 +173,9 @@ class ContextBuilder:
         excluded: Dict[str, str],
         context_fields: Optional[Dict[str, object]] = None,
     ) -> ContextT:
-        relative_path = "runs/%s/contexts/%s.md" % (self.config.run_id, context_id)
+        relative_path = (
+            run_relative_directory(self.config.run_id) / "contexts" / (context_id + ".md")
+        ).as_posix()
         artifact = self.artifact_store.write(
             artifact_id="artifact_" + context_id,
             kind=ArtifactKind.CONTEXT,

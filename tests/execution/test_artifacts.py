@@ -84,6 +84,30 @@ def test_canonical_person2_artifact_store_adapter(tmp_path: Path) -> None:
     assert adapter.verify(reference).read_text(encoding="utf-8") == "canonical\n"
 
 
+def test_canonical_adapter_supports_run_scoped_production_layout(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    adapter = CanonicalArtifactStoreAdapter(
+        ArtifactStore(repository),
+        artifact_root="runs/run_001/artifacts",
+        include_run_id=False,
+    )
+
+    attempt = adapter.attempt_directory("run_001", "exp_0001", 2)
+    assert attempt == repository / "runs/run_001/artifacts/exp_0001/attempt_002"
+    reference = adapter.write_text(
+        "exp_0001/attempt_002/result.txt",
+        "production\n",
+        kind="other",
+    )
+    assert reference.path == (
+        "runs/run_001/artifacts/exp_0001/attempt_002/result.txt"
+    )
+    assert adapter.verify(reference) == attempt / "result.txt"
+
+
 def test_default_factory_builds_the_canonical_artifact_schema() -> None:
     reference = default_model_factory(
         "ArtifactRef",

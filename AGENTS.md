@@ -20,11 +20,10 @@ KuaiRand-specific adapters live in `benchmarks/kuairand_pure/`. The official sta
 The contract and protected-path files must be frozen, all placeholder hashes in copies of `config.example.json` and `live-adapters.example.json` must be replaced, and the live worktree/data/runtime prerequisites must pass preflight before starting a production run.
 
 - `tacorank run --config run-config.json --live-config live-adapters.json`: start one production experiment using the hash-bound live adapters. The command fails closed before creating ledger state when prerequisites are missing.
-- `tacorank run --config test-config.json --allow-test-adapters`: run deterministic fake adapters only when the config explicitly sets `adapter_mode` to `fake`; this mode is for tests, not benchmark evidence.
 - `tacorank resume --run-id run_001 --repository-root .`: repair a truncated ledger tail if necessary and print the phase from which orchestration can be resumed; it does not yet restart adapter execution.
 - `tacorank status --run-id run_001 --repository-root .`: print the current projected run state.
 - `tacorank validate-ledger --run-id run_001 --repository-root .`: validate schema, sequence, hashes, transitions, and referenced artifacts.
-- `tacorank rebuild-views --run-id run_001 --repository-root .`: regenerate `STATUS.md`, `LESSONS.md`, and `SUMMARY.md` from the ledger.
+- `tacorank rebuild-views --run-id run_001 --repository-root .`: regenerate `state.json`, `STATUS.md`, `lessons/`, `experiment-graph/`, and `reports/` from the ledger.
 - `tacorank finalize --run-id run_001 --repository-root .`: validate that the run is stopped, then fail closed because the standalone reproduction/final-selection command is not implemented yet.
 
 ## Coding Style & Naming

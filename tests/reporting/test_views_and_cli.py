@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 
-from tacorank.cli import main
+import pytest
+from pydantic import ValidationError
+
+from tacorank.cli import build_parser, main
+from tacorank.config import RunConfig
 from tacorank.reporting import rebuild_views
 
 
@@ -15,14 +19,29 @@ def test_views_are_derived_and_cli_validates(harness, baseline_evaluation, capsy
     )
     rebuild_views(run_directory, harness.events())
 
-    summary = (run_directory / "SUMMARY.md").read_text()
+    summary = (run_directory / "reports/SUMMARY.md").read_text()
     assert "exp_001" in summary
     assert "Unmeasured tokens:" in summary
     assert "Total reported tokens:" in summary
-    assert "No active lessons" in (run_directory / "LESSONS.md").read_text()
+    assert "No lessons recorded" in (run_directory / "lessons/INDEX.md").read_text()
     assert '"best_experiment_id": "exp_001"' in (
         run_directory / "STATUS.md"
     ).read_text()
+    state = json.loads((run_directory / "state.json").read_text())
+    assert state["derived_from"]["event_id"] == harness.events()[-1].event_id
+    assert state["execution_mode"] == "sequential"
+    assert state["active_jobs"] == []
+    graph = json.loads((run_directory / "experiment-graph/graph.json").read_text())
+    assert [node["experiment_id"] for node in graph["nodes"]] == [
+        "baseline",
+        "exp_001",
+    ]
+    assert (
+        run_directory
+        / "experiment-graph/directions/feature-cross/experiments/exp_001.md"
+    ).is_file()
+    assert (run_directory / "reports/RESOURCES.md").is_file()
+    assert (run_directory / "artifacts/exp_001/attempt_001/patch.diff").is_file()
 
     assert (
         main(
@@ -39,35 +58,26 @@ def test_views_are_derived_and_cli_validates(harness, baseline_evaluation, capsy
     assert "valid:" in capsys.readouterr().out
 
 
-def test_run_command_executes_the_fake_vertical_slice(config, capsys):
-    config.adapter_mode = "fake"
-    config.baseline_metrics = {"gauc": 0.6, "ndcg@5": 0.6, "primary": 0.6}
-    config_path = config.repository_root / "run-config.json"
-    config_path.write_text(
-        json.dumps(config.model_dump(mode="json"), sort_keys=True), encoding="utf-8"
-    )
-    assert (
-        main(
+def test_run_command_requires_live_configuration():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["run", "--config", "run-config.json"])
+
+
+def test_fake_runtime_configuration_is_rejected(config):
+    payload = config.model_dump(mode="python")
+    payload["adapter_mode"] = "fake"
+    payload["research_provider"] = "fake"
+    with pytest.raises(ValidationError, match="adapter_mode|research_provider"):
+        RunConfig.model_validate(payload)
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
             [
                 "run",
                 "--config",
-                str(config_path),
+                "run-config.json",
+                "--live-config",
+                "live-adapters.json",
                 "--allow-test-adapters",
             ]
         )
-        == 0
-    )
-    output = json.loads(capsys.readouterr().out)
-    assert output["best_experiment_id"] == "exp_001"
-    assert (config.repository_root / "runs/run_test/STATUS.md").is_file()
-
-
-def test_run_command_never_uses_fake_adapters_implicitly(config, capsys):
-    config.adapter_mode = "fake"
-    config.baseline_metrics = {"gauc": 0.6, "ndcg@5": 0.6, "primary": 0.6}
-    config_path = config.repository_root / "fake-run-config.json"
-    config_path.write_text(
-        json.dumps(config.model_dump(mode="json"), sort_keys=True), encoding="utf-8"
-    )
-    assert main(["run", "--config", str(config_path)]) == 2
-    assert "--allow-test-adapters" in capsys.readouterr().err
