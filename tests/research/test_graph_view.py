@@ -79,3 +79,18 @@ def test_graph_view_accepts_memory_schema_node_names():
     assert projected.highest_completed_fidelity == "full"
     assert projected.primary_score == 0.62
     assert projected.is_parent_eligible
+
+
+def test_explicit_empty_frontier_is_authoritative():
+    root = make_summary("exp_0000")
+    context = SimpleNamespace(
+        baseline=root,
+        current_best=root,
+        eligible_frontier=[],
+        family_history=[root],
+    )
+
+    graph = GraphView.from_context(context)
+
+    assert graph.nodes() == ()
+    assert graph.eligible_parents() == ()

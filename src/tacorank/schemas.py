@@ -593,6 +593,67 @@ class ExperimentDecision(StrictModel):
         return self
 
 
+class PlannerContractSummary(StrictModel):
+    """Machine-readable subset of the frozen contract used by Person 1."""
+
+    resolved: bool = False
+    allowed_families: List[NonEmptyStr] = Field(default_factory=list)
+    protected_paths: List[str] = Field(default_factory=list)
+    editable_paths: List[str] = Field(default_factory=list)
+    epsilon: float = Field(default=0.0, ge=0.0)
+
+
+class PlannerBudgetSummary(StrictModel):
+    remaining_experiments: int = Field(default=0, ge=0)
+    remaining_public_queries: Optional[int] = Field(default=None, ge=0)
+    remaining_llm_tokens: Optional[int] = Field(default=None, ge=0)
+    remaining_wall_time_seconds: int = Field(default=0, ge=0)
+    remaining_gpu_seconds: Optional[int] = Field(default=None, ge=0)
+
+
+class PlannerConvergenceSummary(StrictModel):
+    patience: int = Field(gt=0)
+    consecutive_non_improving_full_evaluations: int = Field(default=0, ge=0)
+    full_evaluations_completed: int = Field(default=0, ge=0)
+
+
+class PlannerMethodCardSummary(StrictModel):
+    method_id: NonEmptyStr
+    family: NonEmptyStr
+    status: NonEmptyStr
+    cost_tier: CostTier
+
+
+class PlannerExperimentSummary(StrictModel):
+    """Verified experiment projection; code remains authoritative in Git."""
+
+    experiment_id: NonEmptyStr
+    parent_experiment_id: Optional[str] = None
+    commit_sha: NonEmptyStr
+    family: Optional[str] = None
+    hypothesis_summary: str = ""
+    trust_verdict: Optional[TrustVerdict] = None
+    stability: Optional[Stability] = None
+    integrity: Optional[Integrity] = None
+    decision: Optional[ExperimentDecisionKind] = None
+    highest_completed_fidelity: Optional[Fidelity] = None
+    primary_score: Optional[float] = None
+    metric_set: Optional[MetricSet] = None
+    metric_deltas: Dict[str, float] = Field(default_factory=dict)
+    baseline_delta: Optional[float] = None
+    parent_delta: Optional[float] = None
+    previous_best_delta: Optional[float] = None
+    prediction_change: Optional[float] = Field(default=None, ge=0.0)
+    child_count: int = Field(default=0, ge=0)
+    actual_cost: Optional[CostTier] = None
+    parent_eligible: bool = False
+    best_eligible: bool = False
+    status: NonEmptyStr
+    duplicate_key: str = ""
+    method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
+    supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+
+
 class ContextDocument(StrictModel):
     context_id: NonEmptyStr
     role: Literal["planner", "coder", "recovery"]
@@ -608,6 +669,18 @@ class ContextDocument(StrictModel):
 
 class PlannerContext(ContextDocument):
     role: Literal["planner"] = "planner"
+    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    contract_sha256: str
+    contract_summary: PlannerContractSummary
+    baseline: PlannerExperimentSummary
+    current_best: PlannerExperimentSummary
+    # This collection is authoritative. An empty list means there is no legal
+    # parent; consumers must not reconstruct eligibility from history.
+    eligible_frontier: List[PlannerExperimentSummary] = Field(default_factory=list)
+    family_history: List[PlannerExperimentSummary] = Field(default_factory=list)
+    method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
+    remaining_budget: PlannerBudgetSummary
+    convergence: PlannerConvergenceSummary
 
 
 class CoderContext(ContextDocument):
@@ -616,6 +689,12 @@ class CoderContext(ContextDocument):
 
 class RecoveryContext(ContextDocument):
     role: Literal["recovery"] = "recovery"
+
+
+ContextValue = Annotated[
+    Union[PlannerContext, CoderContext, RecoveryContext],
+    Field(discriminator="role"),
+]
 
 
 class RecoveryPolicyContext(StrictModel):
@@ -710,7 +789,7 @@ class BaselineVerifiedPayload(StrictModel):
 
 class ContextCreatedPayload(StrictModel):
     type: Literal["context.created"] = "context.created"
-    context: ContextDocument
+    context: ContextValue
 
 
 class PlannerRecommendedPayload(StrictModel):

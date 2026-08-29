@@ -12,9 +12,10 @@ from typing import Iterable
 HIGH_VALUE_FAMILIES: tuple[str, ...] = (
     "objective",
     "temporal_history",
-    "model",
     "multitask",
     "duration_bias",
+    "features",
+    "model",
 )
 
 ALL_FAMILIES: tuple[str, ...] = HIGH_VALUE_FAMILIES + (

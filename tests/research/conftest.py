@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +17,10 @@ def make_summary(
     parent_eligible: bool | None = None,
     child_count: int = 0,
     actual_cost: str = "low",
+    stability: str = "confirmed",
+    metric_deltas=None,
+    prediction_change: float | None = 1.0,
+    method_card_ids=None,
 ):
     return SimpleNamespace(
         experiment_id=experiment_id,
@@ -23,12 +29,16 @@ def make_summary(
         family=family,
         hypothesis_summary=f"Hypothesis for {experiment_id}",
         trust_verdict="accepted",
+        stability=stability,
         integrity="clean",
         decision=decision,
         highest_completed_fidelity=fidelity,
         primary_score=score,
         child_count=child_count,
         actual_cost=actual_cost,
+        metric_deltas=metric_deltas or {},
+        prediction_change=prediction_change,
+        method_card_ids=method_card_ids or [],
         parent_eligible=parent_eligible,
         status="accepted",
     )
@@ -39,7 +49,7 @@ def planner_context():
     root = make_summary("exp_0000", commit_sha="a" * 40, family=None, score=0.5946)
     return SimpleNamespace(
         schema_version="1.0",
-        context_id="ctx_planner_000001",
+        context_id="ctx_0123456789abcdef",
         run_id="run_20260829_a",
         contract_sha256="a" * 64,
         contract_summary=SimpleNamespace(

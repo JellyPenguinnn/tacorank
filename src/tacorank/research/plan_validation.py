@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
-from .graph_view import GraphView, as_list, get_value
+from .graph_view import GraphView, as_list, enum_value, get_value
 from .portfolio import ALL_FAMILIES
 
 
@@ -21,10 +21,8 @@ HIDDEN_PATTERNS = (
     "ground truth test",
 )
 
-RUN_ID_PATTERN = re.compile(r"run_\d{8}_[a-z0-9][a-z0-9_-]*$")
-EVENT_ID_PATTERN = re.compile(r"evt_\d{6}$")
-EXPERIMENT_ID_PATTERN = re.compile(r"exp_\d{4}$")
-CONTEXT_ID_PATTERN = re.compile(r"ctx_(planner|coder|recovery|evaluator)_\d{6}$")
+SHARED_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+EVENT_ID_PATTERN = re.compile(r"evt_\d{6,}$")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?$")
 
 
@@ -43,6 +41,10 @@ def _nonempty(value: Any) -> bool:
 
 def _valid_commit(value: Any) -> bool:
     return bool(value and COMMIT_PATTERN.fullmatch(str(value)))
+
+
+def _normalized_enum(value: Any) -> str:
+    return str(enum_value(value) or "").strip().lower()
 
 
 def _normalized_path(path: Any) -> str | None:
@@ -88,7 +90,7 @@ class PlanValidator:
         ):
             errors.append("CONTRACT_UNRESOLVED")
 
-        if str(get_value(context, "schema_version", "")) != "1.0":
+        if str(get_value(context, "schema_version", "1.0")) != "1.0":
             errors.append("CONTEXT_SCHEMA_VERSION_MISMATCH")
 
         for field in (
@@ -119,13 +121,13 @@ class PlanValidator:
         if run_id and get_value(spec, "run_id", None) != run_id:
             errors.append("RUN_ID_MISMATCH")
 
-        if run_id and not RUN_ID_PATTERN.fullmatch(str(run_id)):
+        if run_id and not SHARED_ID_PATTERN.fullmatch(str(run_id)):
             errors.append("INVALID_RUN_ID")
-        if not EXPERIMENT_ID_PATTERN.fullmatch(str(get_value(spec, "experiment_id", ""))):
+        if not SHARED_ID_PATTERN.fullmatch(str(get_value(spec, "experiment_id", ""))):
             errors.append("INVALID_EXPERIMENT_ID")
-        if not EXPERIMENT_ID_PATTERN.fullmatch(str(get_value(spec, "parent_experiment_id", ""))):
+        if not SHARED_ID_PATTERN.fullmatch(str(get_value(spec, "parent_experiment_id", ""))):
             errors.append("INVALID_PARENT_EXPERIMENT_ID")
-        if context_id and not CONTEXT_ID_PATTERN.fullmatch(str(context_id)):
+        if context_id and not SHARED_ID_PATTERN.fullmatch(str(context_id)):
             errors.append("INVALID_CONTEXT_ID")
         if not _valid_commit(get_value(spec, "parent_commit_sha", None)):
             errors.append("INVALID_PARENT_COMMIT_SHA")
@@ -166,27 +168,45 @@ class PlanValidator:
         if len(set(normalized_files)) != len(normalized_files):
             errors.append("DUPLICATE_TARGET_PATH")
 
-        protected = set(map(str, get_value(contract, "protected_paths", []) or []))
+        protected = {
+            str(item).rstrip("/")
+            for item in (get_value(contract, "protected_paths", []) or [])
+        }
         editable = get_value(contract, "editable_paths", None)
         for path in normalized_files:
             if path is None:
                 continue
-            if path in protected:
+            if any(path == item or path.startswith(f"{item}/") for item in protected):
                 errors.append("PROTECTED_TARGET_PATH")
             if editable and not any(path == item or path.startswith(f"{item.rstrip('/')}/") for item in editable):
                 errors.append("TARGET_OUTSIDE_EDITABLE_PATHS")
 
-        fidelity_plan = [str(item) for item in as_list(get_value(spec, "fidelity_plan", None))]
+        fidelity_plan = [
+            _normalized_enum(item)
+            for item in as_list(get_value(spec, "fidelity_plan", None))
+        ]
         allowed_fidelity = {"smoke", "proxy", "full"}
-        if not fidelity_plan or any(item not in allowed_fidelity for item in fidelity_plan):
+        fidelity_is_valid = bool(fidelity_plan) and all(
+            item in allowed_fidelity for item in fidelity_plan
+        )
+        if not fidelity_is_valid:
             errors.append("INVALID_FIDELITY_PLAN")
-        order = {"smoke": 0, "proxy": 1, "full": 2}
-        if any(order[fidelity_plan[index]] > order[fidelity_plan[index + 1]] for index in range(len(fidelity_plan) - 1)):
-            errors.append("NON_MONOTONIC_FIDELITY_PLAN")
+        else:
+            if len(fidelity_plan) != len(set(fidelity_plan)):
+                errors.append("DUPLICATE_FIDELITY")
+            order = {"smoke": 0, "proxy": 1, "full": 2}
+            if any(
+                order[fidelity_plan[index]] >= order[fidelity_plan[index + 1]]
+                for index in range(len(fidelity_plan) - 1)
+            ):
+                errors.append("NON_MONOTONIC_FIDELITY_PLAN")
         if "full" not in fidelity_plan and str(family) == "ensemble":
             warnings.append("ENSEMBLE_WITHOUT_FULL_FIDELITY")
 
         method_ids = set(map(str, as_list(get_value(spec, "method_card_ids", None))))
+        required_method_id = get_value(choice, "method_card_id", None)
+        if required_method_id and str(required_method_id) not in method_ids:
+            errors.append("METHOD_POLICY_MISMATCH")
         known_method_ids = {
             str(get_value(card, "method_id", ""))
             for card in as_list(get_value(context, "method_cards", None))
@@ -224,7 +244,7 @@ class PlanValidator:
             errors.append("DUPLICATE_EXPERIMENT")
 
         cost = get_value(spec, "estimated_cost", None)
-        cost_tier = str(get_value(cost, "cost_tier", "")).lower()
+        cost_tier = _normalized_enum(get_value(cost, "cost_tier", ""))
         if cost_tier not in {"low", "medium", "high"}:
             errors.append("INVALID_COST_TIER")
         budget = get_value(context, "remaining_budget", None) or get_value(

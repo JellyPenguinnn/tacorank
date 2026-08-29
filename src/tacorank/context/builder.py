@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Type, TypeVar
 
@@ -19,12 +20,20 @@ from ..schemas import (
     ArtifactKind,
     CoderContext,
     ContextDocument,
+    CostTier,
     Event,
     EventType,
+    ExperimentDecisionKind,
     ExperimentSpec,
+    PlannerBudgetSummary,
+    PlannerContractSummary,
     PlannerContext,
+    PlannerConvergenceSummary,
+    PlannerExperimentSummary,
+    PlannerMethodCardSummary,
     RecoveryContext,
 )
+from ..research.portfolio import ALL_FAMILIES, load_method_cards
 from .redaction import redact
 from .templates import compact_json, render_context
 from .token_estimator import estimate_tokens
@@ -148,6 +157,7 @@ class ContextBuilder:
         content: str,
         included: List[str],
         excluded: Dict[str, str],
+        context_fields: Optional[Dict[str, object]] = None,
     ) -> ContextT:
         relative_path = "runs/%s/contexts/%s.md" % (self.config.run_id, context_id)
         artifact = self.artifact_store.write(
@@ -172,7 +182,212 @@ class ContextBuilder:
             content=content,
             estimated_tokens=estimate_tokens(content),
             artifact=artifact,
+            **(context_fields or {}),
         )
+
+    def _protected_paths(self) -> List[str]:
+        """Return normalized path entries from the frozen Markdown manifest."""
+
+        values: List[str] = []
+        manifest = self.config.repository_root / self.config.protected_paths_path
+        for raw_line in manifest.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            line = line.lstrip("-* ").strip().strip("`").rstrip("/")
+            if line:
+                values.append(line)
+        return list(dict.fromkeys(values))
+
+    def _planner_experiments(
+        self, events: Sequence[Event]
+    ) -> Tuple[
+        PlannerExperimentSummary,
+        PlannerExperimentSummary,
+        List[PlannerExperimentSummary],
+        List[PlannerExperimentSummary],
+    ]:
+        """Build the authoritative typed projection consumed by Person 1."""
+
+        state = project(events)
+        baseline_event = next(
+            event for event in events if event.event_type == EventType.BASELINE_VERIFIED
+        )
+        baseline_payload = baseline_event.payload
+        baseline_evaluation = baseline_payload.evaluation
+        baseline = PlannerExperimentSummary(
+            experiment_id=baseline_payload.experiment_id,
+            parent_experiment_id=None,
+            commit_sha=baseline_payload.commit_sha,
+            family=None,
+            hypothesis_summary="Frozen verified baseline",
+            trust_verdict=baseline_evaluation.trust.verdict,
+            stability=baseline_evaluation.trust.stability,
+            integrity=baseline_evaluation.trust.integrity,
+            decision=ExperimentDecisionKind.ACCEPT,
+            highest_completed_fidelity=baseline_evaluation.fidelity,
+            primary_score=baseline_payload.metric_set.primary_score,
+            metric_set=baseline_payload.metric_set,
+            metric_deltas={name: 0.0 for name in baseline_payload.metric_set.metrics},
+            baseline_delta=0.0,
+            parent_delta=0.0,
+            previous_best_delta=0.0,
+            prediction_change=baseline_evaluation.prediction_change,
+            child_count=0,
+            actual_cost=CostTier.LOW,
+            parent_eligible=True,
+            best_eligible=state.best_experiment_id == baseline_payload.experiment_id,
+            status="accepted",
+            supporting_event_ids=[baseline_event.event_id],
+        )
+
+        spec_events = [
+            event for event in events if event.event_type == EventType.EXPERIMENT_PROPOSED
+        ]
+        evaluation_by_experiment = {}
+        decision_by_experiment = {}
+        for event in events:
+            if event.event_type == EventType.EVALUATION_COMPLETED:
+                evaluation_by_experiment[event.payload.result.experiment_id] = event
+            elif event.event_type == EventType.EXPERIMENT_DECIDED:
+                decision_by_experiment[event.payload.decision.experiment_id] = event
+
+        children = Counter(
+            event.payload.spec.parent_experiment_id
+            for event in spec_events
+            if event.payload.spec.parent_experiment_id is not None
+        )
+        baseline.child_count = children[baseline.experiment_id]
+        metrics_by_experiment = {baseline.experiment_id: baseline_payload.metric_set}
+        summaries: List[PlannerExperimentSummary] = []
+
+        for proposal_event in spec_events:
+            spec = proposal_event.payload.spec
+            node = state.experiments[spec.experiment_id]
+            evaluation_event = evaluation_by_experiment.get(spec.experiment_id)
+            decision_event = decision_by_experiment.get(spec.experiment_id)
+            evaluation = evaluation_event.payload.result if evaluation_event else None
+            decision = decision_event.payload.decision if decision_event else None
+            metric_set = evaluation.metric_set if evaluation else node.metric_set
+            if metric_set is not None:
+                metrics_by_experiment[spec.experiment_id] = metric_set
+            parent_metrics = metrics_by_experiment.get(spec.parent_experiment_id)
+            metric_deltas = {}
+            if metric_set is not None and parent_metrics is not None:
+                for name, value in metric_set.metrics.items():
+                    if name in parent_metrics.metrics:
+                        metric_deltas[name] = value - parent_metrics.metrics[name]
+
+            support = [proposal_event.event_id]
+            if evaluation_event is not None:
+                support.append(evaluation_event.event_id)
+            if decision_event is not None:
+                support.append(decision_event.event_id)
+            summaries.append(
+                PlannerExperimentSummary(
+                    experiment_id=spec.experiment_id,
+                    parent_experiment_id=spec.parent_experiment_id,
+                    commit_sha=node.latest_commit_sha or spec.parent_commit_sha,
+                    family=spec.family,
+                    hypothesis_summary=spec.hypothesis,
+                    trust_verdict=evaluation.trust.verdict if evaluation else None,
+                    stability=evaluation.trust.stability if evaluation else None,
+                    integrity=evaluation.trust.integrity if evaluation else None,
+                    decision=decision.decision if decision else None,
+                    highest_completed_fidelity=(
+                        evaluation.fidelity if evaluation else node.highest_fidelity
+                    ),
+                    primary_score=(metric_set.primary_score if metric_set else None),
+                    metric_set=metric_set,
+                    metric_deltas=metric_deltas,
+                    baseline_delta=evaluation.baseline_delta if evaluation else None,
+                    parent_delta=evaluation.parent_delta if evaluation else None,
+                    previous_best_delta=(
+                        evaluation.previous_best_delta if evaluation else None
+                    ),
+                    prediction_change=(evaluation.prediction_change if evaluation else None),
+                    child_count=children[spec.experiment_id],
+                    actual_cost=spec.estimated_cost.cost_tier,
+                    parent_eligible=bool(decision and decision.parent_eligible),
+                    best_eligible=bool(decision and decision.best_eligible),
+                    status=node.status.value,
+                    duplicate_key=spec.duplicate_key,
+                    method_card_ids=list(spec.method_card_ids),
+                    supporting_event_ids=support,
+                )
+            )
+
+        by_id = {baseline.experiment_id: baseline}
+        by_id.update({summary.experiment_id: summary for summary in summaries})
+        current_best = by_id.get(state.best_experiment_id, baseline)
+        eligible_frontier = [baseline] + [
+            summary for summary in summaries if summary.parent_eligible
+        ]
+        return baseline, current_best, eligible_frontier, summaries
+
+    def _planner_context_fields(self, events: Sequence[Event]) -> Dict[str, object]:
+        state = project(events)
+        baseline, current_best, eligible_frontier, family_history = (
+            self._planner_experiments(events)
+        )
+        card_directory = self.config.repository_root / "research/methods"
+        method_cards = [
+            PlannerMethodCardSummary(
+                method_id=card.method_id,
+                family=card.family,
+                status=card.status,
+                cost_tier=card.cost_tier,
+            )
+            for card in load_method_cards(card_directory).cards
+        ]
+        totals = state.resource_totals
+        remaining_tokens = (
+            None
+            if self.config.token_limit is None
+            else max(0, self.config.token_limit - totals.total_reported_tokens)
+        )
+        remaining_gpu = (
+            None
+            if self.config.gpu_seconds_limit is None
+            else max(
+                0,
+                self.config.gpu_seconds_limit
+                - int(totals.gpu_weighted_time_ms / 1000),
+            )
+        )
+        return {
+            "contract_sha256": self.verified_contract.contract_sha256,
+            "contract_summary": PlannerContractSummary(
+                resolved=True,
+                allowed_families=list(ALL_FAMILIES),
+                protected_paths=self._protected_paths(),
+                editable_paths=[],
+                epsilon=self.config.convergence_epsilon,
+            ),
+            "baseline": baseline,
+            "current_best": current_best,
+            "eligible_frontier": eligible_frontier,
+            "family_history": family_history,
+            "method_cards": method_cards,
+            "remaining_budget": PlannerBudgetSummary(
+                remaining_experiments=state.remaining_experiments,
+                remaining_public_queries=None,
+                remaining_llm_tokens=remaining_tokens,
+                remaining_wall_time_seconds=max(
+                    0,
+                    self.config.wall_time_limit_seconds
+                    - int(state.elapsed_wall_time_seconds),
+                ),
+                remaining_gpu_seconds=remaining_gpu,
+            ),
+            "convergence": PlannerConvergenceSummary(
+                patience=self.config.convergence_patience,
+                consecutive_non_improving_full_evaluations=(
+                    state.consecutive_non_improving_full_evaluations
+                ),
+                full_evaluations_completed=state.full_evaluations_completed,
+            ),
+        }
 
     def build_planner(
         self,
@@ -257,6 +472,7 @@ class ContextBuilder:
             content=content,
             included=included,
             excluded=excluded,
+            context_fields=self._planner_context_fields(visible),
         )
 
     def build_coder(

@@ -33,7 +33,7 @@ become positive research rewards or parent nodes.
 The core policy is deterministic two-phase AIDE-style beam search:
 
 - breadth first probes untried high-value families in this order: objective,
-  temporal history, model, multitask, and duration bias;
+  temporal history, multitask, duration bias, temporal features, and model;
 - depth then retains at most three trusted frontier nodes, preferring higher
   trusted primary score, fewer children, family diversity, and stable ID
   tie-breaking;

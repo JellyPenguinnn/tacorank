@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.research.plan_validation import PlanValidator
+from tacorank.schemas import CostTier, Fidelity
 
 
 def make_spec(planner_context, **overrides):
@@ -32,7 +33,8 @@ def make_spec(planner_context, **overrides):
     )
     values.update(overrides)
     spec = SimpleNamespace(**values)
-    spec.duplicate_key = compute_duplicate_key(spec)
+    if not hasattr(spec, "duplicate_key"):
+        spec.duplicate_key = compute_duplicate_key(spec)
     return spec
 
 
@@ -79,7 +81,7 @@ def test_validator_rejects_duplicate_experiment(planner_context):
 def test_validator_enforces_memory_schema_identifiers(planner_context):
     spec = make_spec(
         planner_context,
-        experiment_id="exp_bad",
+        experiment_id="bad/id",
         parent_commit_sha="not-a-commit",
     )
 
@@ -88,3 +90,41 @@ def test_validator_enforces_memory_schema_identifiers(planner_context):
     assert not result.accepted
     assert "INVALID_EXPERIMENT_ID" in result.errors
     assert "INVALID_PARENT_COMMIT_SHA" in result.errors
+
+
+def test_validator_normalizes_shared_schema_enums(planner_context):
+    spec = make_spec(
+        planner_context,
+        fidelity_plan=[Fidelity.SMOKE, Fidelity.PROXY, Fidelity.FULL],
+        estimated_cost=SimpleNamespace(
+            llm_tokens_upper_bound=1000,
+            wall_time_seconds_upper_bound=60,
+            gpu_seconds_upper_bound=60,
+            cost_tier=CostTier.MEDIUM,
+        ),
+    )
+
+    result = PlanValidator().validate(spec, planner_context)
+
+    assert result.accepted
+
+
+def test_validator_rejects_unknown_fidelity_without_crashing(planner_context):
+    result = PlanValidator().validate(
+        make_spec(planner_context, fidelity_plan=["smoke", "bogus"]),
+        planner_context,
+    )
+
+    assert not result.accepted
+    assert "INVALID_FIDELITY_PLAN" in result.errors
+
+
+def test_validator_rejects_duplicate_fidelity(planner_context):
+    result = PlanValidator().validate(
+        make_spec(planner_context, fidelity_plan=["smoke", "smoke", "full"]),
+        planner_context,
+    )
+
+    assert not result.accepted
+    assert "DUPLICATE_FIDELITY" in result.errors
+    assert "NON_MONOTONIC_FIDELITY_PLAN" in result.errors

@@ -16,7 +16,8 @@ def make_spec(**overrides):
     )
     values.update(overrides)
     spec = SimpleNamespace(**values)
-    spec.duplicate_key = compute_duplicate_key(spec)
+    if not hasattr(spec, "duplicate_key"):
+        spec.duplicate_key = compute_duplicate_key(spec)
     return spec
 
 
