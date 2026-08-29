@@ -30,6 +30,7 @@ from ..evaluation import (
     MetricSet as DomainMetricSet,
     OutputGateEvidence,
 )
+from ..evaluation.adapter import PopulationManifest, ordered_row_identity_sha256
 from ..evaluation.comparisons import compare_metric_sets
 from ..evaluation.types import (
     EvaluationResult as DomainEvaluationResult,
@@ -762,6 +763,7 @@ def build_live_adapters(
     populations = {
         key: _load_population(path) for key, path in live.population_csvs.items()
     }
+    population_manifests = _protected_population_manifests(populations)
     worktrees = WorktreeManager(
         root, live.worktree_root, required_submodules=live.required_submodules
     )
@@ -866,6 +868,7 @@ def build_live_adapters(
         expected_evaluator_sha256=config.evaluator_sha256,
         expected_contract_sha256=verified.contract_sha256,
         expected_data_manifest_sha256=config.data_manifest_sha256,
+        population_manifests=population_manifests,
     )
     evaluator = ProtectedEvaluationBridge(
         config=config,
@@ -920,6 +923,28 @@ def _load_population(path: Path) -> _PopulationData:
     if not rows:
         raise ContractError("population CSV must not be empty")
     return _PopulationData(tuple(rows), tuple(labels))
+
+
+def _protected_population_manifests(
+    populations: Mapping[str, _PopulationData],
+) -> Mapping[Population, PopulationManifest]:
+    """Bind evaluable populations to their protected row order and identity."""
+
+    manifests: Dict[Population, PopulationManifest] = {}
+    for population, key in (
+        (Population.INTERNAL_PROXY, "proxy"),
+        (Population.PUBLIC_VALIDATION, "full"),
+    ):
+        rows = populations[key].rows
+        manifests[population] = PopulationManifest(
+            rows=len(rows),
+            ordered_row_identity_sha256=ordered_row_identity_sha256(
+                tuple(row["row_id"] for row in rows),
+                tuple(row["user_id"] for row in rows),
+                tuple(row["video_id"] for row in rows),
+            ),
+        )
+    return manifests
 
 
 def _output_contract(rows: Sequence[Mapping[str, Any]]) -> OutputContract:

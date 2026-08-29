@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from tacorank.orchestrator.live import _trae_config_from_mapping
+from tacorank.evaluation.adapter import ordered_row_identity_sha256
+from tacorank.orchestrator.live import (
+    _PopulationData,
+    _protected_population_manifests,
+    _trae_config_from_mapping,
+)
+from tacorank.schemas import Population
 
 
 def test_trae_config_normalizes_json_path_and_tuple_values(tmp_path: Path) -> None:
@@ -50,4 +56,41 @@ def test_trae_config_normalizes_json_path_and_tuple_values(tmp_path: Path) -> No
     assert config.repair_allowed_command_ids == ("candidate_smoke",)
     assert config.credential_environment_aliases == (
         ("DEEPSEEK_API_KEY", "OPENAI_API_KEY"),
+    )
+
+
+def test_protected_population_manifests_bind_proxy_and_full_row_identity() -> None:
+    proxy = _PopulationData(
+        rows=(
+            {"row_id": 0, "user_id": "user-1", "video_id": "video-1"},
+            {"row_id": 1, "user_id": "user-2", "video_id": "video-2"},
+        ),
+        labels=(1, 0),
+    )
+    full = _PopulationData(
+        rows=(
+            {"row_id": 0, "user_id": "user-3", "video_id": "video-3"},
+        ),
+        labels=(1,),
+    )
+
+    manifests = _protected_population_manifests(
+        {"smoke": proxy, "proxy": proxy, "full": full}
+    )
+
+    assert set(manifests) == {
+        Population.INTERNAL_PROXY,
+        Population.PUBLIC_VALIDATION,
+    }
+    assert manifests[Population.INTERNAL_PROXY].rows == 2
+    assert manifests[
+        Population.INTERNAL_PROXY
+    ].ordered_row_identity_sha256 == ordered_row_identity_sha256(
+        (0, 1), ("user-1", "user-2"), ("video-1", "video-2")
+    )
+    assert manifests[Population.PUBLIC_VALIDATION].rows == 1
+    assert manifests[
+        Population.PUBLIC_VALIDATION
+    ].ordered_row_identity_sha256 == ordered_row_identity_sha256(
+        (0,), ("user-3",), ("video-3",)
     )
