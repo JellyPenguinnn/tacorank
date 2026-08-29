@@ -24,6 +24,7 @@ from tacorank.coding.trae_adapter import (
 )
 from tacorank.git.patches import capture_commit_patch
 from tacorank.git.worktrees import WorktreeManager
+from tacorank.run_layout import experiment_artifact_prefix
 
 
 _FAKE_TRAE = r'''from __future__ import annotations
@@ -587,10 +588,9 @@ def test_reported_failure_retains_only_redacted_bounded_diagnostic(
     assert parts.secret not in (failure.value.output_tail or "")
     assert "[REDACTED]" in (failure.value.output_tail or "")
     assert "diagnostic_artifact=" in (failure.value.output_tail or "")
-    failure_artifact = (
-        parts.repository
-        / "artifacts/run1/exp1/attempt_1/trae_failure_trajectory.json"
-    )
+    failure_artifact = parts.repository / experiment_artifact_prefix(
+        "run1", "exp1", attempt=1
+    ) / "trae_failure_trajectory.json"
     assert failure_artifact.is_file()
     assert parts.secret.encode("utf-8") not in failure_artifact.read_bytes()
 
