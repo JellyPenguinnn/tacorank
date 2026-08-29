@@ -14,8 +14,11 @@ from ..recovery.fingerprints import fingerprint_result
 from ..reporting import rebuild_views
 from ..run_layout import RunLayout
 from ..schemas import (
+    ArtifactKind,
     BaselineVerifiedPayload,
     BestUpdatedPayload,
+    CheckResult,
+    CheckStatus,
     ContextCreatedPayload,
     ContractVerifiedPayload,
     EvaluationCompletedPayload,
@@ -29,6 +32,8 @@ from ..schemas import (
     ExecutionFinishedPayload,
     ExecutionStartedPayload,
     Fidelity,
+    FinalSelectedPayload,
+    Integrity,
     LessonRecordedPayload,
     OutputCheckedPayload,
     PatchCheckedPayload,
@@ -44,13 +49,20 @@ from ..schemas import (
     RunRequest,
     RunStartedPayload,
     RunStoppedPayload,
+    SubmissionCheckedPayload,
     TrustVerdict,
 )
 from .convergence import StopDecision, runtime_budget_decision, stop_decision
+from .finalize import (
+    FinalizationError,
+    baseline_reproduction_event_id,
+    candidate_finalization_plan,
+)
 from .ports import (
     CodingWorker,
     Evaluator,
     ExecutionRunner,
+    FinalSubmissionProvider,
     HealthObserver,
     OutputGate,
     PatchGate,
@@ -79,6 +91,7 @@ class Harness:
         recovery_manager: RecoveryManager,
         output_gate: OutputGate,
         evaluator: Evaluator,
+        final_submission_provider: Optional[FinalSubmissionProvider] = None,
     ):
         self.config = config
         self.verified_contract = verified_contract
@@ -92,6 +105,7 @@ class Harness:
         self.recovery_manager = recovery_manager
         self.output_gate = output_gate
         self.evaluator = evaluator
+        self.final_submission_provider = final_submission_provider
 
     def _key(self, experiment_id: str, stage: str, attempt: int, value: object) -> str:
         return "%s:%s:%s:%d:%s" % (
@@ -156,6 +170,8 @@ class Harness:
                 max_repairs_per_experiment=self.config.max_repairs_per_experiment,
                 max_confirmation_attempts=self.config.max_confirmation_attempts,
                 seed_schedule=self.config.seed_schedule,
+                convergence_epsilon=self.config.convergence_epsilon,
+                convergence_patience=self.config.convergence_patience,
             ),
             stage="started",
         )
@@ -403,6 +419,8 @@ class Harness:
                 attempt=decision.repair_attempt,
                 causation_event_id=decision_event.event_id,
             )
+        if decision.reason_code == "INTEGRITY_VIOLATION":
+            self.stop(self.deterministic_stop(fatal_integrity=True))
         return decision.action, (decision, context, decision_event)
 
     async def _execute_code_repair(
@@ -465,6 +483,20 @@ class Harness:
                 causation_event_id=planner_context_event.event_id,
                 resource_delta=planner_output.resource_delta,
             )
+            if planner_output.action == PlannerAction.BLOCKED:
+                if planner_output.reason_code == "INVALID_PROVIDER_PLAN":
+                    raise OrchestrationError(
+                        "research provider failed bounded plan validation; "
+                        "resume from the persisted planner checkpoint"
+                    )
+                decision = self.deterministic_stop(no_legal_proposal=True)
+            else:
+                decision = self.deterministic_stop()
+                if not decision.stop:
+                    raise OrchestrationError(
+                        "planner stop recommendation is advisory and no frozen stop rule matched"
+                    )
+            self.stop(decision)
             return self.state()
 
         spec = planner_output.spec
@@ -503,6 +535,8 @@ class Harness:
             causation_event_id=coder_context_event.event_id,
             resource_delta=patch.resource_delta,
         )
+        if self._stop_if_runtime_budget_exhausted():
+            return self.state()
 
         patch_check = await self.patch_gate.check(patch)
         patch_check_event = self._append(
@@ -519,11 +553,11 @@ class Harness:
             )
             if action != RecoveryAction.TRAE_REPAIR:
                 return self.state()
-            patch, patch_check, patch_check_event = (
-                await self._execute_code_repair(
-                    recovery, proposal_event.event_id
-                )
+            patch, patch_check, patch_check_event = await self._execute_code_repair(
+                recovery, proposal_event.event_id
             )
+            if self._stop_if_runtime_budget_exhausted():
+                return self.state()
 
         stage_queue: Deque[Fidelity] = deque(spec.fidelity_plan)
         execution_attempt = 0
@@ -575,9 +609,7 @@ class Harness:
                 stage="execution_started_%s" % fidelity.value,
                 experiment_id=spec.experiment_id,
                 attempt=attempt,
-                causation_event_id=(
-                    next_execution_cause or patch_check_event.event_id
-                ),
+                causation_event_id=(next_execution_cause or patch_check_event.event_id),
             )
             next_execution_cause = None
             result = await self.runner.run(request, self.health_observer)
@@ -589,6 +621,8 @@ class Harness:
                 causation_event_id=started.event_id,
                 resource_delta=result.resource_delta,
             )
+            if self._stop_if_runtime_budget_exhausted():
+                return self.state()
             if result.outcome != RunOutcome.SUCCESS:
                 action, recovery = await self._recover(finished, result, spec.experiment_id)
                 decision, _, decision_event = recovery
@@ -619,6 +653,8 @@ class Harness:
                                 recovery, proposal_event.event_id
                             )
                         )
+                        if self._stop_if_runtime_budget_exhausted():
+                            return self.state()
                         if patch_check.accepted:
                             next_request_template = request
                             next_execution_cause = patch_check_event.event_id
@@ -653,6 +689,8 @@ class Harness:
                             recovery, proposal_event.event_id
                         )
                     )
+                    if self._stop_if_runtime_budget_exhausted():
+                        return self.state()
                     if patch_check.accepted:
                         repair_accepted = True
                         next_request_template = request
@@ -734,6 +772,8 @@ class Harness:
                 causation_event_id=output_event.event_id,
                 resource_delta=evaluation.resource_delta,
             )
+            if self._stop_if_runtime_budget_exhausted():
+                return self.state()
             if evaluation.trust.verdict == TrustVerdict.NO_OP:
                 action, recovery = await self._recover(
                     evaluation_event, evaluation, spec.experiment_id
@@ -745,6 +785,8 @@ class Harness:
                             recovery, proposal_event.event_id
                         )
                     )
+                    if self._stop_if_runtime_budget_exhausted():
+                        return self.state()
                     if patch_check.accepted:
                         repair_accepted = True
                         next_request_template = request
@@ -819,4 +861,271 @@ class Harness:
                     )
             return self.state()
 
+        return self.state()
+
+    async def run_until_stopped(self) -> object:
+        """Run sequential research iterations until a frozen stop rule matches.
+
+        Every iteration starts from a durable planning checkpoint and consumes
+        the ledger-derived context produced by the preceding iteration.  This
+        keeps the outer loop deterministic while the planner and coding worker
+        remain replaceable adapters.
+        """
+
+        if not self.events():
+            raise OrchestrationError("run must be bootstrapped before execution")
+        while True:
+            state = self.state()
+            if state.status.value in {"stopped", "finalizing", "finalized", "failed"}:
+                return state
+            if state.phase not in {"planning", "planner_context"}:
+                raise OrchestrationError(
+                    "run can resume only from a durable planning checkpoint; "
+                    "current phase is %s" % state.phase
+                )
+            previous_head = state.last_event_id
+            state = await self.run_one_experiment()
+            if state.status.value == "stopped":
+                return state
+            if state.last_event_id == previous_head:
+                raise OrchestrationError("outer loop made no durable ledger progress")
+
+    async def run_to_completion(self) -> object:
+        """Drive research to a deterministic stop and finalize its selected best."""
+
+        await self.run_until_stopped()
+        return await self.finalize()
+
+    async def _run_final_execution(
+        self,
+        *,
+        experiment_id: str,
+        commit_sha: str,
+        receipt_id: str,
+        seed: int,
+        attempt: int,
+        command_id: str,
+        causation_event_id: str,
+    ):
+        request = RunRequest(
+            run_id=self.config.run_id,
+            experiment_id=experiment_id,
+            attempt=attempt,
+            fidelity=Fidelity.FULL,
+            command_id=command_id,
+            patch_commit_sha=commit_sha,
+            patch_receipt_id=receipt_id,
+            seed=seed,
+            data_manifest_sha256=self.config.data_manifest_sha256,
+            timeout_seconds=self.config.timeout_profiles.get("standard", 600),
+            memory_limit_mb=4096,
+            gpu_memory_limit_mb=0,
+            network_enabled=False,
+        )
+        started = self._append(
+            ExecutionStartedPayload(request=request),
+            stage="final_%s_started" % command_id,
+            experiment_id=experiment_id,
+            attempt=attempt,
+            causation_event_id=causation_event_id,
+        )
+        result = await self.runner.run(request, self.health_observer)
+        finished = self._append(
+            ExecutionFinishedPayload(result=result),
+            stage="final_%s_finished" % command_id,
+            experiment_id=experiment_id,
+            attempt=attempt,
+            causation_event_id=started.event_id,
+            resource_delta=result.resource_delta,
+        )
+        if result.outcome != RunOutcome.SUCCESS:
+            raise FinalizationError(
+                "%s failed: %s"
+                % (
+                    command_id,
+                    result.error_summary or result.error_class or result.outcome.value,
+                )
+            )
+        return request, result, finished
+
+    async def _check_final_output(self, result, finished, command_id: str):
+        output = await self.output_gate.check(result)
+        checked = self._append(
+            OutputCheckedPayload(result=output),
+            stage="final_%s_output_checked" % command_id,
+            experiment_id=result.experiment_id,
+            attempt=result.attempt,
+            causation_event_id=finished.event_id,
+            resource_delta=output.resource_delta,
+        )
+        if not output.accepted:
+            raise FinalizationError("%s output failed Gate B" % command_id)
+        return output, checked
+
+    async def finalize(self) -> object:
+        """Reproduce and select the validation best, then check its submission."""
+
+        events = self.events()
+        state = project(events)
+        if state.status.value == "finalized":
+            return state
+        if state.status.value != "stopped":
+            raise FinalizationError("finalization requires a stopped run")
+
+        if state.best_experiment_id == "baseline":
+            if self.final_submission_provider is None:
+                raise FinalizationError(
+                    "selected baseline requires a protected final submission provider"
+                )
+            reproduction_event_id = baseline_reproduction_event_id(events, state)
+            submission = await self.final_submission_provider.prepare_baseline()
+            selected = self._append(
+                FinalSelectedPayload(
+                    experiment_id="baseline",
+                    commit_sha=state.best_commit_sha,
+                    reproduction_evaluation_event_id=reproduction_event_id,
+                ),
+                stage="final_selected",
+                experiment_id="baseline",
+                causation_event_id=reproduction_event_id,
+            )
+            self._append(
+                submission,
+                stage="submission_checked",
+                experiment_id="baseline",
+                causation_event_id=selected.event_id,
+            )
+            return self.state()
+
+        plan = candidate_finalization_plan(events, state)
+        stopped_event_id = events[-1].event_id
+        _, reproduction_run, reproduction_finished = await self._run_final_execution(
+            experiment_id=plan.experiment_id,
+            commit_sha=plan.commit_sha,
+            receipt_id=plan.patch_receipt_id,
+            seed=plan.seed,
+            attempt=plan.next_attempt,
+            command_id="clean_reproduce",
+            causation_event_id=stopped_event_id,
+        )
+        reproduction_output, reproduction_output_event = await self._check_final_output(
+            reproduction_run, reproduction_finished, "clean_reproduce"
+        )
+        baseline = self._baseline_metrics()
+        best = dict(baseline)
+        best_node = state.experiments[plan.experiment_id]
+        if best_node.metric_set is not None:
+            best = dict(best_node.metric_set.metrics)
+            best.setdefault(
+                best_node.metric_set.primary_metric_name,
+                best_node.metric_set.primary_score,
+            )
+        evaluation = await self.evaluator.evaluate(
+            EvaluationRequest(
+                run_id=self.config.run_id,
+                experiment_id=plan.experiment_id,
+                attempt=plan.next_attempt,
+                output_checked_event_id=reproduction_output_event.event_id,
+                prediction_artifact=reproduction_output.prediction_artifact,
+                population=Population.PUBLIC_VALIDATION,
+                fidelity=Fidelity.FULL,
+                seed=plan.seed,
+                contract_sha256=self.verified_contract.contract_sha256,
+                evaluator_sha256=self.config.evaluator_sha256,
+                baseline_summary=baseline,
+                parent_summary=best,
+                previous_best_summary=best,
+                public_query_index=self.state().public_validation_queries + 1,
+            )
+        )
+        self.config.validate_metric_set(evaluation.metric_set)
+        reproduction_event = self._append(
+            EvaluationCompletedPayload(result=evaluation),
+            stage="final_reproduction_evaluated",
+            experiment_id=plan.experiment_id,
+            attempt=plan.next_attempt,
+            causation_event_id=reproduction_output_event.event_id,
+            resource_delta=evaluation.resource_delta,
+        )
+        if not (
+            evaluation.trust.verdict == TrustVerdict.ACCEPTED
+            and evaluation.trust.integrity == Integrity.CLEAN
+            and evaluation.metric_set.primary_score == plan.best_primary_score
+        ):
+            raise FinalizationError(
+                "clean reproduction did not exactly reproduce the trusted best score"
+            )
+
+        final_attempt = plan.next_attempt + 1
+        _, final_run, final_finished = await self._run_final_execution(
+            experiment_id=plan.experiment_id,
+            commit_sha=plan.commit_sha,
+            receipt_id=plan.patch_receipt_id,
+            seed=plan.seed,
+            attempt=final_attempt,
+            command_id="candidate_final_infer",
+            causation_event_id=reproduction_event.event_id,
+        )
+        final_output, final_output_event = await self._check_final_output(
+            final_run, final_finished, "candidate_final_infer"
+        )
+
+        submission_attempt = final_attempt + 1
+        _, submission_run, submission_finished = await self._run_final_execution(
+            experiment_id=plan.experiment_id,
+            commit_sha=plan.commit_sha,
+            receipt_id=plan.patch_receipt_id,
+            seed=plan.seed,
+            attempt=submission_attempt,
+            command_id="submission_check",
+            causation_event_id=final_output_event.event_id,
+        )
+        if (
+            submission_run.prediction_artifact is None
+            or submission_run.prediction_artifact.sha256
+            != final_output.prediction_artifact.sha256
+        ):
+            raise FinalizationError(
+                "submission checker did not consume the accepted final prediction"
+            )
+        submission_artifact = final_output.prediction_artifact.model_copy(
+            update={
+                "artifact_id": "submission_%s" % plan.experiment_id,
+                "kind": ArtifactKind.SUBMISSION,
+            }
+        )
+        checks = [
+            CheckResult(
+                name="gate_b_%s" % name,
+                status=status,
+            )
+            for name, status in sorted(final_output.checks.items())
+        ]
+        checks.append(
+            CheckResult(
+                name="official_submission_check",
+                status=CheckStatus.PASS,
+            )
+        )
+        submission = SubmissionCheckedPayload(
+            accepted=True,
+            submission_artifact=submission_artifact,
+            checks=checks,
+        )
+        selected = self._append(
+            FinalSelectedPayload(
+                experiment_id=plan.experiment_id,
+                commit_sha=plan.commit_sha,
+                reproduction_evaluation_event_id=reproduction_event.event_id,
+            ),
+            stage="final_selected",
+            experiment_id=plan.experiment_id,
+            causation_event_id=submission_finished.event_id,
+        )
+        self._append(
+            submission,
+            stage="submission_checked",
+            experiment_id=plan.experiment_id,
+            causation_event_id=selected.event_id,
+        )
         return self.state()

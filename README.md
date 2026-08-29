@@ -4,7 +4,7 @@ TacoRank is a deterministic, evidence-tracked harness for autonomous recommender
 
 The repository is organized for five developers with one canonical schema and explicit typed handoffs. The controller owns orchestration; role components return values and never compete for control.
 
-> **Current main status:** The production CLI composes DeepSeek planning, the pinned Trae coding worker, Gate A, Docker execution, SRE/recovery, Gate B, and protected evaluation. `tacorank setup-live` derives and hash-binds the machine-specific runtime, legal data views, label-free submission contract, official baseline, and configuration; `tacorank preflight` verifies them before any ledger event is created. The Person 3 path has completed live CPU acceptance through full inference and submission checking; autonomous convergence and finalization remain separate controller-level work.
+> **Current branch status:** The production CLI drives the complete sequential loop: DeepSeek research planning, pinned Trae coding, Gate A, isolated CPU execution, SRE and bounded recovery, Gate B, protected evaluation, durable reflection/memory, deterministic convergence or budget stop, clean reproduction, label-free test inference, and submission checking. `tacorank setup-live` derives and hash-binds the runtime, legal data views, official baseline, test-row submission contract, and configuration; `tacorank preflight` verifies them before the ledger is created.
 
 ## System architecture
 
@@ -170,27 +170,37 @@ export DEEPSEEK_API_KEY='your-key'
   --live-config .tacorank/deployment/live-adapters.json
 ```
 
+`run` is the outer-loop command. It keeps one experiment active at a time, rebuilds the next planner context from the append-only ledger, and continues until a frozen stop rule matches. It then finalizes automatically. Confirmation seeds for one candidate remain part of that experiment and do not independently consume the three-iteration convergence patience.
+
 If Python 3.12 or Docker is not on `PATH`, pass canonical executables with `--python312` and `--docker`. If the data is already present, omit `--download-data` and use `--data-dir` when needed. Setup requires a clean tracked checkout because the generated Docker image, Git baseline, contract, and protected manifest must all describe the same commit.
 
 Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, pinned Trae install/config/runtime, credential presence and DeepSeek model access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
 
 ### Latest live CPU acceptance
 
-The 2026-08-30 acceptance run used `deepseek-v4-flash` with high reasoning and the pinned Trae worker. A real Trae patch passed Gate A, then isolated smoke and proxy executions passed every Gate B check. The official proxy score was below baseline, so the controller correctly pruned it instead of promoting it. To validate the otherwise-unreached execution path, the same sealed commit was then run twice at full fidelity with seed 33 through the canonical runner and Gate B without changing the prune decision. Both 124,909-row outputs were byte-identical, passed the protected submission checker, and were accepted by the official evaluator. Exact hashes, metrics, limits, and the boundary between ledger evidence and the separate full-fidelity diagnostic are recorded in [`docs/person3-handoff.md`](docs/person3-handoff.md).
+The bounded `person3_autonomous_cpu_001` acceptance run on 2026-08-30 used the production DeepSeek researcher and pinned Trae worker with high reasoning, official KuaiRand data, and the CPU Docker sandbox. DeepSeek proposed a within-user pairwise BPR experiment; Trae changed only `solution/candidate.py` in eight steps. The patch passed all 14 Gate A checks, and smoke plus proxy execution each passed all 11 Gate B checks. Protected proxy evaluation returned GAUC `0.62112551`, nDCG@5 `0.51277198`, and primary `0.56694875`, so the controller honestly pruned the candidate.
 
-This proves the Person 3 coding and CPU execution stage is runnable; it does not claim that the 50-experiment research search converged or that `finalize` is implemented.
+The one-experiment acceptance budget then stopped the search, selected the still-best official FM baseline, and finalized a manifest-attested 170,588-row test submission. Both the controller check and the official `submit.py --check --split test` passed. The 20-event hash chain replayed successfully; total provider tokens were `192,521`, GPU use and manual interventions were zero, and the recorded agent elapsed time was `183.997` seconds.
+
+This is a real integrated baseline acceptance, not a convergence claim: the bounded run intentionally could not demonstrate a live three-iteration convergence sequence, and the candidate-best clean-reproduction path was not entered because the candidate failed proxy. Deterministic integration tests cover those control paths. Earlier full-validation execution evidence and its corrected validation-vs-test boundary are recorded in [`docs/person3-handoff.md`](docs/person3-handoff.md).
 
 After a run starts, inspect or rebuild its state with:
 
 ```bash
-tacorank resume --run-id run_001 --repository-root .
+tacorank resume \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
 tacorank status --run-id run_001 --repository-root .
 tacorank validate-ledger --run-id run_001 --repository-root .
 tacorank rebuild-views --run-id run_001 --repository-root .
-tacorank finalize --run-id run_001 --repository-root .
+tacorank finalize \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
 ```
 
-The CLI has no fake execution mode: `tacorank run` requires the hash-bound live configuration and production provider. Deterministic test doubles are instantiated only by the automated test suite. `resume` currently validates/repairs the ledger tail and reports the recovery phase without restarting adapter execution. `finalize` still refuses to fabricate success because standalone clean reproduction/final selection is not implemented yet.
+The CLI has no fake execution mode: `run`, `resume`, and `finalize` rebuild the same hash-bound production adapters and require the frozen run and live configurations. Deterministic test doubles exist only in tests. `resume` repairs only an incomplete final JSONL fragment, verifies the frozen run identity, and continues from a durable `planning` or `planner_context` checkpoint. It fails closed at an ambiguous mid-adapter phase; it never fabricates the missing external result.
+
+Finalization selects only the ledger's validation best. A candidate must pass a fresh full-validation `clean_reproduce`, reproduce the exact trusted score, run label-free `candidate_final_infer` on official test rows, pass Gate B, and pass the protected submission checker. If no candidate beat the baseline, the controller validates and copies the manifest-attested official FM test submission. Test identities are not available to planning or validation evaluation.
 
 Each new run is organized as follows:
 
@@ -217,6 +227,8 @@ runs/<run_id>/
 - Gate B validates prediction structure and producer identity before Person 5 evaluation.
 - Expected failures return typed results with redacted, hash-addressed evidence.
 - Repair attempts and same-commit retries are bounded to prevent recovery loops.
+- Deliberate integrity violations are recorded as recovery evidence and terminate the run.
+- Convergence counts terminal trusted full-fidelity research iterations, not confirmation-seed executions.
 
 ## Collaboration rules
 
@@ -230,8 +242,8 @@ runs/<run_id>/
 ## Current limitations
 
 - Candidate execution is CPU-only; GPU commands fail closed until a hard per-container GPU-memory limit is available.
-- `resume` reports the verified restart phase but does not yet restart adapter execution.
-- `finalize` does not yet perform standalone clean reproduction and final selection.
+- Automatic resume is supported at durable planning checkpoints. A process crash in the middle of a provider, coding, execution, or protected-evaluation call requires operator review and retry from the last unambiguous boundary.
+- Live acceptance remains machine-, credential-, and data-dependent. Passing the deterministic integration suite does not by itself prove that an external provider or Docker daemon is currently available.
 
 ## Further documentation
 

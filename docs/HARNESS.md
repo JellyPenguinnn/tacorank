@@ -1,195 +1,151 @@
 # TacoRank deterministic harness
 
-This is the P0 integration backbone for the five-person TacoRank agent. It is a
-working vertical slice, not a replacement for the Planner, Trae worker, safety,
-recovery, or evaluator implementations owned by the other team members.
+TacoRank is the integration backbone for the five-person autonomous KuaiRand-Pure research agent. The controller is deterministic and event-sourced; researcher, coding, safety, execution, recovery, and evaluation components return typed values but cannot mutate shared state or choose their own authority.
 
-## What is implemented
-
-- One strict Pydantic v2 schema module and one enum set for all adapter boundaries.
-- Content-addressed artifact references with approved-root, symlink, size, and hash checks.
-- Compact canonical JSONL events with contiguous IDs, causal links, idempotency keys,
-  file locking, `flush`/`fsync`, and a SHA-256 hash chain.
-- Crash recovery that truncates only an incomplete final fragment. A malformed complete
-  line is corruption and is never silently repaired.
-- Pure replay projections for run state, experiment lineage, lessons, resource totals,
-  and generated Markdown views. There is no mutable state database.
-- A deterministic legal-transition validator. It prevents execution without Gate A,
-  evaluation without Gate B, untrusted/proxy best selection, hidden-final development
-  feedback, repair overflow, and unbounded full-fidelity confirmation.
-- A role-specific context compiler for Planner, Coder, and Recovery. It separates
-  instructions from untrusted evidence, redacts secrets, excludes hidden-final evidence,
-  applies stable ordering, enforces hard token budgets, and persists immutable context
-  artifacts with inclusion/exclusion manifests.
-- Deterministic convergence and resource stop checks.
-- Replaceable adapter protocols with deterministic test doubles exercised only by tests.
-- A DeepSeek research-provider adapter that receives the bounded planner context, uses
-  JSON output, preserves deterministic parent/family policy, and records provider token usage.
-- Operator commands for run, resume inspection, status, ledger validation, view rebuild,
-  and a fail-closed finalization boundary.
-
-## Authority and state flow
+## End-to-end control flow
 
 ```text
-Human contract (read only)       Git (code lineage)
-             \                    /
-              \                  /
-               EventStore.append
-                      |
-             runs/<id>/events.jsonl
-                      |
-              validate + replay
-          ____________|____________
-         |             |            |
-      RunState    ExperimentNode   Lessons
-         |             |            |
-         +------ ContextBuilder ----+
-                      |
-        Planner / Coder / Recovery adapters
+frozen contract + official baseline
+                |
+                v
+ledger-derived planner context -> DeepSeek researcher -> ExperimentSpec
+                |                                      |
+                |                                      v
+                |                              Trae edits worktree
+                |                                      |
+                |                                      v
+                |                             Gate A + receipt
+                |                                      |
+                |                                      v
+                |                       smoke -> proxy -> full CPU run
+                |                                      |
+                |                             telemetry / recovery
+                |                                      |
+                |                                      v
+                |                         Gate B -> protected evaluator
+                |                                      |
+                +------ lesson + result + decision <---+
+                |
+        next iteration or deterministic stop
+                |
+                v
+clean reproduce validation best -> test inference -> Gate B -> submission check
 ```
 
-Only the harness receives raw adapter values and appends events. `state.json`,
-`STATUS.md`, files under `lessons/` and `experiment-graph/`, and files under
-`reports/` are derived artifacts. Files under `contexts/` and `artifacts/` are
-immutable evidence referenced by ledger events.
+`Harness.run_until_stopped()` executes one experiment at a time. Each terminal decision and lesson is appended before the next planner context is built, so later proposals consume durable evidence rather than in-memory messages. `Harness.run_to_completion()` adds finalization after a frozen convergence, experiment, wall-time, token, GPU, integrity, or no-legal-proposal stop.
 
-## State transitions
+Confirmation seeds are additional executions of the same experiment and commit. They are fully recorded and charged to resource totals, but only the terminal full-fidelity experiment decision consumes one convergence-patience slot. The default frozen rule is no improvement greater than `0.002` for three consecutive terminal full iterations.
+
+## Authorities and durable state
+
+The only authorities are:
+
+- `contract/COMPETITION.md`, `PROTECTED_PATHS.md`, and the hash-bound run configuration for human-frozen policy;
+- Git commits and Gate A receipts for executable candidate lineage;
+- `runs/<run_id>/events.jsonl` for ordered dynamic evidence; and
+- the protected official evaluator for metric truth.
+
+The ledger uses contiguous event IDs, causal links, idempotency keys, file locking, `flush`/`fsync`, and a SHA-256 chain. Replay produces run state, experiment lineage, lessons, resource totals, and reports. `state.json`, `STATUS.md`, graph files, and reports are disposable derived views. Contexts and hash-addressed artifacts are immutable evidence.
+
+Only the controller appends events. It validates each transition, owns budgets and convergence, routes recovery, updates the best candidate, and selects the final artifact. No LLM can stop the run, promote itself, read labels, write the ledger, or bypass a gate.
+
+## Experiment lifecycle and gates
 
 ```text
-proposed -> patch_ready -> ready_to_run -> running
-    ^            |                            |
-    |            v                            v
-    +------ recovering <- failure ------ output_ready
-             |                              |
-             +-> invalid                    v
-                                      output_verified
-                                             |
-                                             v
-                                         evaluated
-                                             |
-                         +-------------------+-------------------+
-                         v                   v                   v
-                      accepted            rejected             pruned
+proposed -> patch_ready -> ready_to_run -> running -> output_ready
+                 |               ^                         |
+                 v               |                         v
+             recovering ---------+                  output_verified
+                 |                                         |
+                 v                                         v
+              invalid                                  evaluated
+                                                           |
+                                     accepted / rejected / pruned
 ```
 
-Smoke output can promote without a metric. Proxy and full stages require a typed
-evaluation. Only a trusted public-validation full result can become best eligible.
+- Gate A binds the exact patch commit and diff to the contract, data identity, allowed files/imports/dependencies, and verification receipt.
+- The runner resolves reviewed symbolic commands; it never executes an LLM-supplied shell string.
+- Docker execution is CPU-only, network-disabled, receipt-sealed, resource-bounded, and observed by Person 4.
+- Gate B verifies the prediction schema, ordered row identity, finite/diverse scores, producing commit, data manifest, command, and execution seal before evaluation.
+- Smoke can promote on structural success. Proxy and full require protected evaluation. Only a trusted public-validation full result can update the best.
 
-## Setup and verification
+Execution, Gate A, Gate B, and evaluation no-op failures enter the bounded recovery route. Recovery may retry the same commit once, apply an approved runtime adjustment, ask Trae for at most two repair patches, roll back, or abandon. Every replacement patch needs a new Gate A receipt. Repeated fingerprints stop repair cycling, and deliberate credential, hidden-label, target-label, or network boundary violations are recorded and terminate the run.
 
-```text
+## Finalization
+
+After `run.stopped`, development proposals are illegal. If a candidate is best, the controller:
+
+1. resolves its exact accepted Gate A receipt and trusted best-score event;
+2. runs `clean_reproduce` on full public validation with the selected commit and seed;
+3. requires Gate B, clean trust, and exact reproduction of the recorded best score;
+4. runs `candidate_final_infer` against the label-free official test view;
+5. applies the test-row Gate B contract;
+6. runs `submission_check` against that exact accepted artifact; and
+7. appends `final.selected` and `submission.checked`.
+
+If the official FM baseline remains best, a protected provider validates and copies the manifest-attested FM test submission. The candidate never receives test labels, and final test output never flows back into planning or convergence.
+
+## Setup and commands
+
+```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
-PYTHONPYCACHEPREFIX=/tmp/tacorank-pycache .venv/bin/python -m pytest
-.venv/bin/python -m pip install -e .
+.venv/bin/python -m pip install --no-deps -e .
+
+export DEEPSEEK_API_KEY='your-key'
+.venv/bin/tacorank setup-live --download-data
+.venv/bin/tacorank preflight \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
+.venv/bin/tacorank run \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
 ```
 
-The editable install exposes the `tacorank` command.
+`preflight` verifies the clean baseline, contract, protected paths, official submodule/evaluator/baseline, every manifest file, Trae runtime and model access, Docker image/environment, edit-tool isolation, and output quota without creating a ledger.
 
-## DeepSeek research planner
+Operational commands:
 
-The production `research_provider` is DeepSeek; the strict configuration rejects fake
-or unknown provider values:
-
-```json
-{
-  "research_provider": "deepseek",
-  "deepseek_model": "deepseek-v4-flash",
-  "deepseek_base_url": "https://api.deepseek.com",
-  "deepseek_api_key_env": "DEEPSEEK_API_KEY",
-  "deepseek_timeout_seconds": 120,
-  "deepseek_max_output_tokens": 8192,
-  "deepseek_thinking_enabled": true,
-  "deepseek_reasoning_effort": "high"
-}
+```bash
+tacorank resume --config RUN_CONFIG --live-config LIVE_CONFIG
+tacorank finalize --config RUN_CONFIG --live-config LIVE_CONFIG
+tacorank status --run-id RUN_ID --repository-root .
+tacorank validate-ledger --run-id RUN_ID --repository-root .
+tacorank rebuild-views --run-id RUN_ID --repository-root .
 ```
 
-Set the secret only in the environment; never put it in the run configuration or ledger:
+`resume` repairs only an incomplete final JSONL fragment, verifies that both configurations reproduce the frozen run identity, then continues from `planning` or `planner_context`. A malformed complete event is corruption. A crash during an external adapter call leaves an ambiguous intermediate phase and fails closed for operator review; TacoRank does not invent an adapter result. `finalize` is an explicit retry for an already stopped run and is idempotent after successful finalization.
 
-```text
-export DEEPSEEK_API_KEY="your-key"
-tacorank run --config run-config.json --live-config live-adapters.json
-```
+Production exposes no fake runtime flag. Test doubles are constructed directly by tests.
 
-`SearchPolicy` still chooses the authoritative parent, family, phase, and required method
-card. DeepSeek proposes one atomic implementation plan inside those constraints, after
-which `PlanValidator` either accepts it, requests one bounded repair, or blocks it.
+## DeepSeek and credential boundary
 
-The fixed `adapter_mode: live` production runtime composes the real Trae worker,
-per-worktree Gate A, receipt-sealed
-Docker execution, live SRE observer, deterministic recovery policy, execution-sealed
-Gate B, and protected KuaiRand evaluator. The operator-owned paths and runtime hashes
-are supplied separately with `--live-config`; see `live-adapters.example.json`. The
-exact file hash must be frozen as `live_adapter_config_sha256` in the run config, so
-adapter identities cannot change without changing the ledger-bound config hash.
+The researcher and pinned Trae worker use `deepseek-v4-flash` with high reasoning through separate bounded adapters. `SearchPolicy` still owns the parent, family, phase, and reviewed method card; DeepSeek supplies one atomic implementation plan inside those constraints. Invalid provider output is recorded at a durable planner checkpoint and raises a resumable error rather than becoming false convergence.
 
-The CLI exposes no fake runtime flag. Test doubles are injected directly by the test
-suite and cannot be selected from a run configuration.
-
-## Contract gate
-
-The checked-in `contract/COMPETITION.md` and `PROTECTED_PATHS.md` are intentionally
-empty scaffolds. The harness will not edit them and will refuse to start until humans:
-
-1. resolve the label and metric conflict;
-2. add exact comma-separated `Allowed command IDs:` and `Artifact roots:` lines;
-3. add the exact line `Contract status: FROZEN`;
-4. replace the two placeholder hashes in `config.example.json`; and
-5. copy the example to a run-specific configuration file.
-
-For example:
-
-```text
-Allowed command IDs: candidate_smoke, candidate_proxy, candidate_full
-Artifact roots: artifacts, runs
-Contract status: FROZEN
-```
-
-This is deliberate. A prompt or adapter cannot waive the contract gate.
-
-## Commands
-
-```text
-tacorank run --config run-config.json --live-config live-adapters.json
-tacorank resume --run-id run_001 --repository-root .
-tacorank status --run-id run_001 --repository-root .
-tacorank validate-ledger --run-id run_001 --repository-root .
-tacorank rebuild-views --run-id run_001 --repository-root .
-tacorank finalize --run-id run_001 --repository-root .
-```
-
-The live startup path validates all deployment files, hashes, official metrics,
-population rows, baseline predictions, symbolic commands, and adapter identities before
-writing `run.started`. `finalize` still fails closed until the clean-reproduction/final
-selection route is added; it never manufactures final evidence.
-
-## Schema-change procedure
-
-1. Change `src/tacorank/schemas.py`; do not create an adapter-local duplicate enum.
-2. Update every affected valid and invalid fixture.
-3. Update all affected component contract tests in the same change.
-4. Keep `schema_version` at `1.0` for backward-compatible additions only. Use a new
-   version and an explicit migration/replay decision for incompatible changes.
-5. Run the complete suite and validate a real copied ledger before merge.
+The API key is read only from the configured environment variable. It must never appear in configuration, prompts, Git, logs, trajectories, fixtures, or artifacts.
 
 ## Ownership matrix
 
-| Area | Harness owns | External adapter owns |
+| Area | Controller owns | Role component owns |
 | --- | --- | --- |
-| Research | Validation, append, routing, context | Hypothesis and parent quality |
-| Coding | Patch identity, receipt requirement, lineage | Trae prompt, worktree, patch bytes |
-| Execution | Legal request and event lifecycle | Sandbox, process, telemetry collection |
-| Recovery | Repair count and route | Failure classification and repair choice |
-| Evaluation | Legal handoff, trust gating, best route | Metrics, trust verdict, research reflection |
+| Research | Context, validation, routing, budgets | Hypothesis and bounded plan |
+| Coding | Proposal/commit identity and receipt requirement | Trae edit trajectory and patch bytes |
+| Execution | Legal request and event lifecycle | Isolation, process control, telemetry, artifacts |
+| Recovery | Retry/repair budgets and routing | Classification and typed recovery choice |
+| Evaluation | Legal handoff, best update, convergence | Metrics, trust, decision, reflection lesson |
+| Finalization | Selected commit and sealed command order | Protected metric/submission validation |
 
-## Intentionally deferred
+## Verification and evidence boundary
 
-- The one-shot hidden-final/clean-reproduction selection route.
-- Deployment-owned dataset files, provider credentials, pinned images, and hard-quota mounts.
-- Git ancestry/ref reconciliation and clean reproduction.
-- Final submission generation and hidden-final execution.
-- Provider-native token collection and real CPU/GPU telemetry.
-- Optional lexical/vector retrieval beyond deterministic typed retrieval.
+```bash
+python -m pytest -q
+```
 
-Those items need their owner implementations or real evidence. The P0 harness exposes
-the stable contracts they plug into without speculating about their internal behavior.
+The integration suite deterministically exercises multi-iteration memory feedback, convergence, planner blocking, fatal-integrity recovery, candidate and baseline finalization, replay, and illegal transitions. Live DeepSeek, Docker, official-data CPU execution, and elapsed multi-experiment convergence remain deployment checks; never infer their current availability from mocked tests or from an earlier acceptance receipt.
+
+## Schema changes
+
+1. Change `src/tacorank/schemas.py`; do not create adapter-local duplicate models or enums.
+2. Keep schema `1.0` only for backward-compatible additions with replay-safe defaults.
+3. Update every affected valid/invalid fixture and cross-component test.
+4. Run the full suite and replay a representative ledger before integration.

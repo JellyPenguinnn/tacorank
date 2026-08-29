@@ -155,7 +155,7 @@ def test_run_stopped_rejects_inflight_development_transitions(
     )
     harness.stop(StopDecision(True, "test_stop", "Stop for terminality test."))
 
-    with pytest.raises(TransitionError, match="only hidden-final|final selection"):
+    with pytest.raises(TransitionError, match="no execution is running"):
         validate_transition(list(harness.events()), execution_result)
 
 
@@ -192,14 +192,15 @@ def test_final_selection_requires_exact_commit_and_existing_trusted_evidence(
             ),
         )
 
-    validate_transition(
-        stopped,
-        FinalSelectedPayload(
-            experiment_id=state.best_experiment_id,
-            commit_sha=state.best_commit_sha,
-            reproduction_evaluation_event_id=full_evaluation.event_id,
-        ),
-    )
+    with pytest.raises(TransitionError, match="cleanly evaluate"):
+        validate_transition(
+            stopped,
+            FinalSelectedPayload(
+                experiment_id=state.best_experiment_id,
+                commit_sha=state.best_commit_sha,
+                reproduction_evaluation_event_id=full_evaluation.event_id,
+            ),
+        )
 
 
 def test_rejected_decision_cannot_be_best_eligible(harness, baseline_evaluation):

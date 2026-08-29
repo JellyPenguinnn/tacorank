@@ -34,8 +34,7 @@ def _node(state: RunState, experiment_id: str) -> ExperimentNode:
 def project(events: Iterable[Event]) -> RunState:
     state = RunState()
     materialized = list(events)
-    last_improving_full_index = -1
-    verified_full_count = 0
+    convergence_incumbent = None
 
     for event in materialized:
         payload = event.payload
@@ -55,12 +54,15 @@ def project(events: Iterable[Event]) -> RunState:
             state.max_repairs_per_experiment = payload.max_repairs_per_experiment
             state.max_confirmation_attempts = payload.max_confirmation_attempts
             state.seed_schedule = list(payload.seed_schedule)
+            state.convergence_epsilon = payload.convergence_epsilon
+            state.convergence_patience = payload.convergence_patience
         elif event.event_type == EventType.CONTRACT_VERIFIED:
             state.phase = "baseline"
         elif event.event_type == EventType.BASELINE_VERIFIED:
             state.status = RunStatus.READY
             state.phase = "planning"
             state.baseline_primary_score = payload.metric_set.primary_score
+            convergence_incumbent = payload.metric_set.primary_score
             if state.best_primary_score is None:
                 state.best_experiment_id = payload.experiment_id
                 state.best_commit_sha = payload.commit_sha
@@ -167,15 +169,6 @@ def project(events: Iterable[Event]) -> RunState:
                 state.public_validation_queries += 1
             if result.fidelity == Fidelity.FULL:
                 state.full_evaluations_completed += 1
-                if result.trust.verdict == TrustVerdict.ACCEPTED:
-                    verified_full_count += 1
-                    if state.best_primary_score is None or result.metric_set.primary_score > state.best_primary_score:
-                        last_improving_full_index = verified_full_count
-                    state.consecutive_non_improving_full_evaluations = (
-                        verified_full_count - last_improving_full_index
-                        if last_improving_full_index >= 0
-                        else verified_full_count
-                    )
         elif event.event_type == EventType.EXPERIMENT_DECIDED:
             decision = payload.decision
             node = _node(state, decision.experiment_id)
@@ -196,6 +189,21 @@ def project(events: Iterable[Event]) -> RunState:
             else:
                 node.terminal_event_id = event.event_id
                 state.phase = "planning"
+                if (
+                    decision.fidelity_completed == Fidelity.FULL
+                    and node.metric_set is not None
+                    and node.trust is not None
+                    and node.trust.verdict == TrustVerdict.ACCEPTED
+                ):
+                    score = node.metric_set.primary_score
+                    if (
+                        convergence_incumbent is None
+                        or score > convergence_incumbent + state.convergence_epsilon
+                    ):
+                        convergence_incumbent = score
+                        state.consecutive_non_improving_full_evaluations = 0
+                    else:
+                        state.consecutive_non_improving_full_evaluations += 1
         elif event.event_type == EventType.BEST_UPDATED:
             state.best_experiment_id = payload.experiment_id
             state.best_commit_sha = payload.commit_sha

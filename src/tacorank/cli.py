@@ -48,6 +48,10 @@ def _status_dict(state) -> dict:
         "best_primary_score": state.best_primary_score,
         "experiments_proposed": state.experiments_proposed,
         "remaining_experiments": state.remaining_experiments,
+        "full_evaluations_completed": state.full_evaluations_completed,
+        "convergence_pressure": state.consecutive_non_improving_full_evaluations,
+        "stop_reason_code": state.stop_reason_code,
+        "final_experiment_id": state.final_experiment_id,
     }
 
 
@@ -113,6 +117,7 @@ def _runtime(
         "recovery_manager": built.recovery_manager,
         "output_gate": built.output_gate,
         "evaluator": built.evaluator,
+        "final_submission_provider": built.final_submission_provider,
     }
     baseline = built.baseline
     planner = _planner_for(config)
@@ -185,7 +190,9 @@ def build_parser() -> argparse.ArgumentParser:
     trae_example.add_argument("--run-id", default="trae_trial_001")
     trae_example.add_argument("--experiment-id", default="exp_0001")
 
-    run = commands.add_parser("run", help="start a frozen run")
+    run = commands.add_parser(
+        "run", help="run the frozen autonomous loop through final submission checking"
+    )
     run.add_argument("--config", type=Path, required=True)
     run.add_argument(
         "--live-config",
@@ -200,7 +207,11 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--config", type=Path, required=True)
     preflight.add_argument("--live-config", type=Path, required=True)
 
-    for name in ("resume", "status", "validate-ledger", "rebuild-views", "finalize"):
+    for name in ("resume", "finalize"):
+        command = commands.add_parser(name)
+        command.add_argument("--config", type=Path, required=True)
+        command.add_argument("--live-config", type=Path, required=True)
+    for name in ("status", "validate-ledger", "rebuild-views"):
         command = commands.add_parser(name)
         command.add_argument("--run-id", required=True)
         command.add_argument("--repository-root", type=Path, default=Path.cwd())
@@ -274,7 +285,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(json.dumps(result, sort_keys=True))
             return 0
 
-        if args.command in {"run", "preflight"}:
+        if args.command in {"run", "preflight", "resume", "finalize"}:
             config = RunConfig.load(args.config)
             harness, baseline = _runtime(
                 config,
@@ -296,8 +307,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 del harness
                 return 0
-            harness.bootstrap(baseline)
-            asyncio.run(harness.run_one_experiment())
+            if args.command == "run":
+                harness.bootstrap(baseline)
+            else:
+                events = harness.events()
+                if not events:
+                    raise LedgerError("no ledger exists for run_id %s" % config.run_id)
+                started = events[0].payload
+                if (
+                    started.type != "run.started"
+                    or started.config_sha256 != harness.verified_contract.config_sha256
+                    or started.contract_sha256
+                    != harness.verified_contract.contract_sha256
+                ):
+                    raise ContractError(
+                        "resume configuration does not match the frozen run identity"
+                    )
+            if args.command == "finalize":
+                asyncio.run(harness.finalize())
+            else:
+                asyncio.run(harness.run_to_completion())
             events = harness.events()
             rebuild_views(
                 RunLayout(config.repository_root, config.run_id).run_directory,
@@ -320,15 +349,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "rebuild-views":
             rebuild_views(RunLayout(root, args.run_id).run_directory, events)
             print("rebuilt derived views for %s" % args.run_id)
-        elif args.command == "resume":
-            print(json.dumps({**_status_dict(state), "resume_from": state.phase}, sort_keys=True))
-        elif args.command == "finalize":
-            if state.status.value != "stopped":
-                raise LedgerError("finalize requires run.stopped and clean reproduction evidence")
-            raise LedgerError(
-                "final selection requires the real runner/evaluator reproduction adapter; "
-                "P0 intentionally refuses to fabricate it"
-            )
         return 0
     except (
         ContractError,

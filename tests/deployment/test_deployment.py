@@ -132,10 +132,12 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
         del cwd, label, capture_output
         assert args[1:3] == ("-B", "submit.py")
         baseline = Path(args[3])
+        split = args[args.index("--split") + 1]
+        source_rows = valid if split == "valid" else test
         with baseline.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(("row_id", "user_id", "video_id", "score"))
-            for row_id, row in enumerate(valid):
+            for row_id, row in enumerate(source_rows):
                 writer.writerow((row_id, row[1], row[2], row_id / 10))
         return subprocess.CompletedProcess(args, 0, "", "")
 
@@ -161,7 +163,7 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
     ) == "# Test contract\n"
     check_submission(
         SimpleNamespace(
-            prediction_path=result["baseline_prediction_csvs"]["full"],
+            prediction_path=result["baseline_final_prediction_csv"],
             contract_root=result["contract_root"],
         )
     )
@@ -184,6 +186,7 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
         input_roots=result["input_roots"],
         population_csvs=result["population_csvs"],
         baseline_prediction_csvs=result["baseline_prediction_csvs"],
+        baseline_final_prediction_csv=result["baseline_final_prediction_csv"],
     )
     _verify_data_manifest(config, live)
 

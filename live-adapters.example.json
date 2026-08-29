@@ -65,6 +65,7 @@
     "proxy": "/absolute/path/to/protected/baselines/proxy.csv",
     "full": "/absolute/path/to/protected/baselines/full.csv"
   },
+  "baseline_final_prediction_csv": "/absolute/path/to/protected/official-fm-test.csv",
   "candidate_allowed_columns": [
     "date",
     "user_id",

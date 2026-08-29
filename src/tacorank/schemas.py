@@ -1257,6 +1257,8 @@ class RunStartedPayload(StrictModel):
     max_repairs_per_experiment: int = Field(default=2, ge=0)
     max_confirmation_attempts: int = Field(default=2, ge=0)
     seed_schedule: List[int]
+    convergence_epsilon: float = Field(default=0.002, ge=0.0)
+    convergence_patience: int = Field(default=3, gt=0)
 
     @field_validator("config_sha256", "contract_sha256", "protected_paths_sha256")
     @classmethod

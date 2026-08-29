@@ -218,6 +218,9 @@ def setup_live_deployment(
             key: str(value)
             for key, value in generated_data["baseline_prediction_csvs"].items()
         },
+        "baseline_final_prediction_csv": str(
+            generated_data["baseline_final_prediction_csv"]
+        ),
         "candidate_allowed_columns": [
             "date",
             "user_id",
@@ -428,7 +431,7 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
         root / "contract" / "COMPETITION.md",
         contract_view / "COMPETITION.md",
     )
-    _write_submission_rows(contract_view / "submission_rows.csv", valid)
+    _write_submission_rows(contract_view / "submission_rows.csv", test)
     population_csvs = {
         "smoke": populations / "smoke.csv",
         "proxy": populations / "proxy.csv",
@@ -463,6 +466,22 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
         baseline_prediction_csvs["proxy"], baseline_rows, proxy_indices
     )
     _copy_exclusive(official_baseline, baseline_prediction_csvs["full"])
+    baseline_final_prediction_csv = protected / "official-fm-test.csv"
+    _run(
+        (
+            sys.executable,
+            "-B",
+            "submit.py",
+            str(baseline_final_prediction_csv),
+            "--data_dir",
+            str(data),
+            "--split",
+            "test",
+            "--make",
+        ),
+        cwd=root / "kuairand-starter-kit",
+        label="official FM final submission generation",
+    )
 
     common = views / "common"
     common.mkdir(mode=0o700)
@@ -532,6 +551,7 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
         "input_roots": input_roots,
         "population_csvs": population_csvs,
         "baseline_prediction_csvs": baseline_prediction_csvs,
+        "baseline_final_prediction_csv": baseline_final_prediction_csv,
     }
 
 

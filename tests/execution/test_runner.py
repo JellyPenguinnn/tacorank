@@ -281,6 +281,7 @@ def test_submission_check_requires_and_uses_verified_prior_prediction(
         ContinuingObserver(),
     )
     assert result.outcome == "success"
+    assert result.prediction_artifact == prior
 
 
 def test_runner_holds_execution_lease_across_launch_and_both_seal_checks(

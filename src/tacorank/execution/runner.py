@@ -227,8 +227,11 @@ class ExecutionRunner:
         exit_code: Optional[int]
         try:
             initial_seal = self.seal_verifier.verify(request, workspace)
-            submission_prediction = self._submission_prediction(
+            submission_artifact = self._submission_artifact(
                 request, identity.command_id
+            )
+            submission_prediction = (
+                submission_artifact[0] if submission_artifact is not None else None
             )
             context = CommandContext(
                 repository_root=self.repository_root,
@@ -499,6 +502,10 @@ class ExecutionRunner:
                     "expected artifact capture failed",
                 )
 
+        result_prediction_artifact = outputs.prediction_artifact
+        if submission_artifact is not None:
+            result_prediction_artifact = submission_artifact[1]
+
         if (
             post_seal_verified
             and termination is None
@@ -570,7 +577,7 @@ class ExecutionRunner:
             log_artifact=log_artifact,
             telemetry_artifact=telemetry_artifact,
             checkpoint_artifact=outputs.checkpoint_artifact,
-            prediction_artifact=outputs.prediction_artifact,
+            prediction_artifact=result_prediction_artifact,
             resource_delta=resource_delta,
         )
 
@@ -610,9 +617,9 @@ class ExecutionRunner:
             resource_delta=tracker.finish(),
         )
 
-    def _submission_prediction(
+    def _submission_artifact(
         self, request: Any, command_id: str
-    ) -> Optional[Path]:
+    ) -> Optional[Tuple[Path, Any]]:
         if command_id != "submission_check":
             return None
         resolver = self.submission_artifact_resolver
@@ -631,7 +638,7 @@ class ExecutionRunner:
             raise ExecutionAuthorizationError(
                 "submission_check prior prediction is not a regular artifact"
             )
-        return resolved
+        return resolved, artifact_ref
 
 
 class FakeExecutionRunner:
