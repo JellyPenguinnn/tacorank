@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from solution.candidate import run as run_candidate
+from benchmarks.kuairand_pure.pipeline import check_submission
 from tacorank import deployment as deployment_module
 from tacorank.config import ContractError
 from tacorank.orchestrator.live import _verify_data_manifest
@@ -105,6 +106,10 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
     deployment = root / ".tacorank" / "deployment"
     data = root / "KuaiRand-Pure" / "data"
     (root / "kuairand-starter-kit").mkdir(parents=True)
+    (root / "contract").mkdir(parents=True)
+    (root / "contract" / "COMPETITION.md").write_text(
+        "# Test contract\n", encoding="utf-8"
+    )
     deployment.mkdir(parents=True)
     data.mkdir(parents=True)
     for name in deployment_module.RAW_REQUIRED:
@@ -147,12 +152,26 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
         encoding="utf-8"
     ).splitlines()[0]
     assert population_header == "row_id,user_id,video_id,label"
+    submission_rows = result["contract_root"] / "submission_rows.csv"
+    submission_header = submission_rows.read_text(encoding="utf-8").splitlines()[0]
+    assert submission_header == "row_id,user_id,video_id"
+    assert "label" not in submission_header
+    assert (result["contract_root"] / "COMPETITION.md").read_text(
+        encoding="utf-8"
+    ) == "# Test contract\n"
+    check_submission(
+        SimpleNamespace(
+            prediction_path=result["baseline_prediction_csvs"]["full"],
+            contract_root=result["contract_root"],
+        )
+    )
     manifest = json.loads(result["manifest_path"].read_text(encoding="utf-8"))
     attested = {record["path"] for record in manifest["files"]}
     assert (
         result["input_roots"]["candidate_full"] / "score.csv"
     ).relative_to(root).as_posix() in attested
     assert result["population_csvs"]["full"].relative_to(root).as_posix() in attested
+    assert submission_rows.relative_to(root).as_posix() in attested
 
     config = SimpleNamespace(
         repository_root=root,

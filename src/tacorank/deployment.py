@@ -191,7 +191,7 @@ def setup_live_deployment(
             docker_host=docker_host,
             image=image,
         ),
-        "contract_root": str((root / "contract").resolve(strict=True)),
+        "contract_root": str(generated_data["contract_root"]),
         "input_roots": {
             key: str(value) for key, value in generated_data["input_roots"].items()
         },
@@ -422,6 +422,13 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     baselines = protected / "baselines"
     populations.mkdir(mode=0o700)
     baselines.mkdir(mode=0o700)
+    contract_view = deployment / "contract"
+    contract_view.mkdir(mode=0o700)
+    _copy_exclusive(
+        root / "contract" / "COMPETITION.md",
+        contract_view / "COMPETITION.md",
+    )
+    _write_submission_rows(contract_view / "submission_rows.csv", valid)
     population_csvs = {
         "smoke": populations / "smoke.csv",
         "proxy": populations / "proxy.csv",
@@ -521,6 +528,7 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     )
     return {
         "manifest_path": manifest_path,
+        "contract_root": contract_view,
         "input_roots": input_roots,
         "population_csvs": population_csvs,
         "baseline_prediction_csvs": baseline_prediction_csvs,
@@ -570,6 +578,14 @@ def _write_population(path: Path, rows: Iterable[Sequence[Any]]) -> None:
         writer.writerow(("row_id", "user_id", "video_id", "label"))
         for row_id, row in enumerate(rows):
             writer.writerow((row_id, row[1], row[2], row[6]))
+
+
+def _write_submission_rows(path: Path, rows: Iterable[Sequence[Any]]) -> None:
+    with _exclusive_csv(path) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("row_id", "user_id", "video_id"))
+        for row_id, row in enumerate(rows):
+            writer.writerow((row_id, row[1], row[2]))
 
 
 def _read_prediction_rows(path: Path, expected_count: int) -> Sequence[Tuple[str, str, str]]:
