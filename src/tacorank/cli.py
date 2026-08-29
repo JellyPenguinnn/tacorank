@@ -1,0 +1,180 @@
+"""Command-line interface for ledger validation, replay, and fake integration runs."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import sys
+from pathlib import Path
+from typing import Optional, Sequence
+
+from .artifacts import ArtifactStore
+from .config import ContractError, RunConfig, verify_contract
+from .context.builder import ContextBuilder
+from .memory.event_store import EventStore, LedgerError
+from .memory.projections import project
+from .memory.replay import replay
+from .orchestrator.fakes import (
+    FakeCodingWorker,
+    FakeEvaluator,
+    FakeExecutionRunner,
+    FakeHealthObserver,
+    FakeOutputGate,
+    FakePatchGate,
+    FakeRecoveryManager,
+    FakeResearchPlanner,
+)
+from .orchestrator.router import Harness
+from .orchestrator.state_machine import validator
+from .reporting import rebuild_views
+from .schemas import (
+    EvaluationResult,
+    Fidelity,
+    Integrity,
+    MetricSet,
+    Population,
+    Stability,
+    TrustAssessment,
+    TrustVerdict,
+)
+
+
+def _ledger(root: Path, run_id: str) -> Path:
+    return root / "runs" / run_id / "events.jsonl"
+
+
+def _store(root: Path, run_id: str) -> EventStore:
+    artifacts = ArtifactStore(root)
+    return EventStore(
+        _ledger(root, run_id), artifact_store=artifacts, transition_validator=validator
+    )
+
+
+def _status_dict(state) -> dict:
+    return {
+        "run_id": state.run_id,
+        "status": state.status.value,
+        "phase": state.phase,
+        "last_event_id": state.last_event_id,
+        "best_experiment_id": state.best_experiment_id,
+        "best_primary_score": state.best_primary_score,
+        "experiments_proposed": state.experiments_proposed,
+        "remaining_experiments": state.remaining_experiments,
+    }
+
+
+def _fake_harness(config: RunConfig) -> Harness:
+    verified = verify_contract(config)
+    artifacts = ArtifactStore(config.repository_root, config.artifact_roots)
+    store = EventStore(
+        _ledger(config.repository_root, config.run_id),
+        artifact_store=artifacts,
+        transition_validator=validator,
+    )
+    return Harness(
+        config=config,
+        verified_contract=verified,
+        event_store=store,
+        context_builder=ContextBuilder(config, verified, artifacts),
+        planner=FakeResearchPlanner(config.baseline_commit_sha),
+        coding_worker=FakeCodingWorker(artifacts),
+        patch_gate=FakePatchGate(artifacts),
+        runner=FakeExecutionRunner(artifacts),
+        health_observer=FakeHealthObserver(),
+        recovery_manager=FakeRecoveryManager(),
+        output_gate=FakeOutputGate(),
+        evaluator=FakeEvaluator(config.metric_names, config.primary_metric_name),
+    )
+
+
+def _baseline(config: RunConfig, contract_sha256: str) -> EvaluationResult:
+    if config.baseline_metrics is None:
+        raise ContractError("fake adapter mode requires frozen baseline_metrics in config")
+    metric_set = MetricSet(
+        metrics=config.baseline_metrics,
+        primary_metric_name=config.primary_metric_name,
+        primary_score=config.baseline_metrics[config.primary_metric_name],
+    )
+    return EvaluationResult(
+        run_id=config.run_id,
+        experiment_id="baseline",
+        attempt=1,
+        population=Population.PUBLIC_VALIDATION,
+        fidelity=Fidelity.FULL,
+        seed=config.seed_schedule[0],
+        public_query_index=1,
+        evaluator_sha256=config.evaluator_sha256,
+        contract_sha256=contract_sha256,
+        metric_set=metric_set,
+        baseline_delta=0,
+        parent_delta=0,
+        previous_best_delta=0,
+        prediction_change=1,
+        trust=TrustAssessment(
+            verdict=TrustVerdict.ACCEPTED,
+            stability=Stability.CONFIRMED,
+            integrity=Integrity.CLEAN,
+        ),
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="tacorank")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    run = commands.add_parser("run", help="start a frozen run")
+    run.add_argument("--config", type=Path, required=True)
+
+    for name in ("resume", "status", "validate-ledger", "rebuild-views", "finalize"):
+        command = commands.add_parser(name)
+        command.add_argument("--run-id", required=True)
+        command.add_argument("--repository-root", type=Path, default=Path.cwd())
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        if args.command == "run":
+            config = RunConfig.load(args.config)
+            harness = _fake_harness(config)
+            baseline = _baseline(config, harness.verified_contract.contract_sha256)
+            harness.bootstrap(baseline)
+            asyncio.run(harness.run_one_experiment())
+            events = harness.events()
+            rebuild_views(config.repository_root / "runs" / config.run_id, events)
+            print(json.dumps(_status_dict(project(events)), sort_keys=True))
+            return 0
+
+        root = args.repository_root.resolve()
+        store = _store(root, args.run_id)
+        events = store.read_events(repair_tail=args.command == "resume")
+        if not events and args.command != "status":
+            raise LedgerError("no ledger exists for run_id %s" % args.run_id)
+        state = project(events)
+        if args.command == "validate-ledger":
+            replay(events, artifact_store=store.artifact_store)
+            print("valid: %d events, head=%s" % (len(events), state.last_event_hash))
+        elif args.command == "status":
+            print(json.dumps(_status_dict(state), sort_keys=True))
+        elif args.command == "rebuild-views":
+            rebuild_views(root / "runs" / args.run_id, events)
+            print("rebuilt derived views for %s" % args.run_id)
+        elif args.command == "resume":
+            print(json.dumps({**_status_dict(state), "resume_from": state.phase}, sort_keys=True))
+        elif args.command == "finalize":
+            if state.status.value != "stopped":
+                raise LedgerError("finalize requires run.stopped and clean reproduction evidence")
+            raise LedgerError(
+                "final selection requires the real runner/evaluator reproduction adapter; "
+                "P0 intentionally refuses to fabricate it"
+            )
+        return 0
+    except (ContractError, LedgerError, ValueError) as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
