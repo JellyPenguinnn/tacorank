@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, Callable, Mapping
 
 from tacorank.providers.research_provider import ProviderRequest, ResearchProvider
 from tacorank.research.convergence_advisor import ConvergenceAdvisor
 from tacorank.research.plan_validation import PlanValidator, ValidationResult
 from tacorank.research.search_policy import PolicyChoice, SearchPolicy
+
+
+logger = logging.getLogger(__name__)
 
 
 class PlannerSchemaUnavailable(RuntimeError):
@@ -70,7 +74,22 @@ class ResearchPlanner:
         self.input_token_limit = input_token_limit
         self.output_token_limit = output_token_limit
 
+    def _attach_provider_usage(self, output: Any) -> Any:
+        resource_delta = getattr(self.provider, "resource_delta", None)
+        if resource_delta is None:
+            return output
+        if hasattr(output, "model_copy"):
+            return output.model_copy(update={"resource_delta": resource_delta})
+        if isinstance(output, Mapping):
+            return {**output, "resource_delta": resource_delta}
+        return output
+
     async def propose(self, context: Any) -> Any:
+        logger.info(
+            "research_planner_started context_id=%s run_id=%s",
+            _get(context, "context_id", None),
+            _get(context, "run_id", None),
+        )
         advice = self.convergence_advisor.advise(context)
         supporting = [str(item) for item in _get(context, "source_event_ids", []) or []]
         if advice.action == "recommend_stop":
@@ -84,6 +103,11 @@ class ResearchPlanner:
 
         choice = self.policy.choose(context)
         if choice.action != "propose":
+            logger.info(
+                "research_planner_blocked context_id=%s reason_code=%s",
+                _get(context, "context_id", None),
+                choice.reason_code,
+            )
             return self.output_factory(
                 "blocked",
                 None,
@@ -98,26 +122,49 @@ class ResearchPlanner:
             input_token_limit=self.input_token_limit,
             output_token_limit=self.output_token_limit,
         )
+        logger.info(
+            "research_provider_selected context_id=%s parent_id=%s family=%s phase=%s",
+            _get(context, "context_id", None),
+            _get(choice.parent, "experiment_id", None),
+            choice.family,
+            choice.phase,
+        )
         raw_spec = await self.provider.generate(request)
         result = self.validator.validate(raw_spec, context, choice=choice)
         if not result.accepted:
+            logger.warning(
+                "research_plan_validation_failed context_id=%s errors=%s",
+                _get(context, "context_id", None),
+                ",".join(result.errors),
+            )
             repair = getattr(self.provider, "repair", None)
             if repair is not None:
                 raw_spec = await repair(request, result.errors)
                 result = self.validator.validate(raw_spec, context, choice=choice)
         if not result.accepted:
-            return self.output_factory(
-                "blocked",
-                None,
-                "INVALID_PROVIDER_PLAN",
-                "Provider proposal failed Person 1 plan validation: " + ", ".join(result.errors),
-                supporting,
+            return self._attach_provider_usage(
+                self.output_factory(
+                    "blocked",
+                    None,
+                    "INVALID_PROVIDER_PLAN",
+                    "Provider proposal failed Person 1 plan validation: "
+                    + ", ".join(result.errors),
+                    supporting,
+                )
             )
 
-        return self.output_factory(
-            "propose",
-            raw_spec,
-            choice.reason_code,
-            choice.reason,
-            supporting,
+        logger.info(
+            "research_plan_accepted context_id=%s experiment_id=%s family=%s",
+            _get(context, "context_id", None),
+            _get(raw_spec, "experiment_id", None),
+            choice.family,
+        )
+        return self._attach_provider_usage(
+            self.output_factory(
+                "propose",
+                raw_spec,
+                choice.reason_code,
+                choice.reason,
+                supporting,
+            )
         )

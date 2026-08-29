@@ -69,6 +69,7 @@ def config(repository: Path) -> RunConfig:
         data_manifest_sha256=sha(b"data"),
         evaluator_sha256=sha(b"evaluator"),
         baseline_commit_sha="b" * 40,
+        research_provider="fake",
         max_experiments=3,
         seed_schedule=[11, 22, 33, 44],
         context_token_limit=2000,
