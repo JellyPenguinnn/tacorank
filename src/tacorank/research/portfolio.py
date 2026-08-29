@@ -20,7 +20,6 @@ HIGH_VALUE_FAMILIES: tuple[str, ...] = (
 
 ALL_FAMILIES: tuple[str, ...] = HIGH_VALUE_FAMILIES + (
     "sampling",
-    "features",
     "ensemble",
     "evaluation",
     "other",
@@ -80,9 +79,11 @@ def default_portfolio() -> ExperimentPortfolio:
                 tags=("ranking", "bpr", "loss"),
                 cost_tier="medium",
                 mechanism="Optimize relative positive-versus-negative ordering within users.",
-                prerequisites=("within_user_positive_negative_pairs",),
+                prerequisites=("baseline_parity", "within_user_positive_negative_pairs"),
+                allowed_data=("train_interactions", "user_id", "long_view"),
                 expected_effect="Improve GAUC and nDCG-aligned ordering.",
                 falsifier="No stable primary-score improvement over the pointwise parent.",
+                prohibition_conditions=("evaluator_or_split_change_required",),
             ),
             MethodCard(
                 method_id="temporal_history_compact",
@@ -92,6 +93,13 @@ def default_portfolio() -> ExperimentPortfolio:
                 cost_tier="medium",
                 mechanism="Represent recent user interest without using future interactions.",
                 prerequisites=("strict_temporal_cutoff",),
+                allowed_data=(
+                    "train_interactions",
+                    "date",
+                    "user_id",
+                    "video_id",
+                    "author_id",
+                ),
                 expected_effect="Improve preference modeling for users with useful history.",
                 falsifier="No gain over a no-history control or evidence of temporal leakage.",
             ),
@@ -102,7 +110,17 @@ def default_portfolio() -> ExperimentPortfolio:
                 tags=("deepfm", "dcn", "model"),
                 cost_tier="high",
                 mechanism="Capture interactions not represented by the baseline FM.",
-                prerequisites=("baseline_parity",),
+                prerequisites=("baseline_parity", "objective_data_frame_verified"),
+                allowed_data=(
+                    "train_interactions",
+                    "user_id",
+                    "video_id",
+                    "author_id",
+                    "tab",
+                    "date",
+                    "duration_ms",
+                    "long_view",
+                ),
                 expected_effect="Improve ranking through additional interactions.",
                 falsifier="No improvement after a bounded, mechanism-driven trial.",
             ),
@@ -114,6 +132,11 @@ def default_portfolio() -> ExperimentPortfolio:
                 cost_tier="medium",
                 mechanism="Use related engagement supervision to regularize long-view prediction.",
                 prerequisites=("legal_auxiliary_label",),
+                allowed_data=(
+                    "train_interactions",
+                    "long_view",
+                    "auxiliary_engagement_labels",
+                ),
                 expected_effect="Improve generalization of the primary ranking head.",
                 falsifier="Auxiliary task degrades primary validation or violates the contract.",
             ),
@@ -124,7 +147,8 @@ def default_portfolio() -> ExperimentPortfolio:
                 tags=("cwm", "duration", "censoring"),
                 cost_tier="high",
                 mechanism="Use one-sided duration supervision to address watch-time censoring.",
-                prerequisites=("legal_duration_features",),
+                prerequisites=("duration_features_legal",),
+                allowed_data=("train_interactions", "duration_ms", "long_view"),
                 expected_effect="Improve long-view ranking through duration bias correction.",
                 falsifier="No primary improvement or mismatch with the competition definition.",
             ),
@@ -136,6 +160,7 @@ def default_portfolio() -> ExperimentPortfolio:
                 cost_tier="low",
                 mechanism="Reduce variance by combining complementary trusted rankers.",
                 prerequisites=("two_confirmed_clean_members",),
+                allowed_data=("verified_predictions",),
                 expected_effect="Improve stability or small residual headroom.",
                 falsifier="No gain over the best member or incompatible score behavior.",
             ),
@@ -228,7 +253,7 @@ def load_method_cards(directory: str | Path) -> ExperimentPortfolio:
 
         method_id = text_value("method_id", path.stem)
         family = text_value("family", "other")
-        summary = text_value("summary", " ".join(line.strip() for line in body_text.splitlines() if line.strip()))
+        summary = text_value("summary") or mechanism
         schema_version = text_value("schema_version", "1.0")
         status = text_value("status", "candidate")
         cost_tier = text_value("cost_tier", "medium")
@@ -238,6 +263,10 @@ def load_method_cards(directory: str | Path) -> ExperimentPortfolio:
             or family not in set(ALL_FAMILIES)
             or status not in METHOD_STATUSES
             or cost_tier not in METHOD_COST_TIERS
+            or not mechanism
+            or not allowed_data
+            or not expected_effect
+            or not falsifier
         ):
             continue
         cards.append(

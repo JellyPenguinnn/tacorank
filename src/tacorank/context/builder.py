@@ -32,9 +32,11 @@ from ..schemas import (
     PlannerConvergenceSummary,
     PlannerExperimentSummary,
     PlannerMethodCardSummary,
+    PlannerPlaybookSummary,
     RecoveryContext,
 )
-from ..research.portfolio import ALL_FAMILIES, load_method_cards
+from ..research.playbook import load_improvement_playbook
+from ..research.portfolio import load_method_cards
 from .redaction import redact
 from .templates import compact_json, render_context
 from .token_estimator import estimate_tokens
@@ -43,6 +45,11 @@ from .token_estimator import estimate_tokens
 def _prediction_change_fraction(value: object) -> float:
     changed_fraction = getattr(value, "changed_row_fraction", value)
     return float(changed_fraction)
+
+
+def _prediction_change_spearman(value: object) -> Optional[float]:
+    spearman = getattr(value, "spearman_vs_parent", None)
+    return None if spearman is None else float(spearman)
 
 
 class ContextBuildError(RuntimeError):
@@ -199,15 +206,32 @@ class ContextBuilder:
     def _protected_paths(self) -> List[str]:
         """Return normalized path entries from the frozen Markdown manifest."""
 
-        values: List[str] = []
         manifest = self.config.repository_root / self.config.protected_paths_path
-        for raw_line in manifest.read_text(encoding="utf-8").splitlines():
+        lines = manifest.read_text(encoding="utf-8").splitlines()
+        values: List[str] = []
+        in_machine_manifest = False
+        for raw_line in lines:
             line = raw_line.strip()
-            if not line or line.startswith("#"):
+            if line.lower() == "## machine-readable protected roots":
+                in_machine_manifest = True
                 continue
-            line = line.lstrip("-* ").strip().strip("`").rstrip("/")
-            if line:
-                values.append(line)
+            if in_machine_manifest and line.startswith("## "):
+                break
+            if not in_machine_manifest or not line.startswith("-"):
+                continue
+            candidate = line.lstrip("- ").strip().strip("`").rstrip("/")
+            if candidate:
+                values.append(candidate)
+        if not values:
+            # Compatibility for the original path-only fixture/manifest format.
+            for raw_line in lines:
+                candidate = raw_line.strip().strip("`").rstrip("/")
+                if (
+                    candidate
+                    and not candidate.startswith(("#", "|", ">"))
+                    and " " not in candidate
+                ):
+                    values.append(candidate)
         return list(dict.fromkeys(values))
 
     def _trace_tail(self, failed_value: object, fallback: str) -> str:
@@ -251,8 +275,10 @@ class ContextBuilder:
             trust_verdict=baseline_evaluation.trust.verdict,
             stability=baseline_evaluation.trust.stability,
             integrity=baseline_evaluation.trust.integrity,
+            trust_flags=list(baseline_evaluation.trust.flags),
             decision=ExperimentDecisionKind.ACCEPT,
             highest_completed_fidelity=baseline_evaluation.fidelity,
+            population=baseline_evaluation.population,
             primary_score=baseline_payload.metric_set.primary_score,
             metric_set=baseline_payload.metric_set,
             metric_deltas={name: 0.0 for name in baseline_payload.metric_set.metrics},
@@ -260,6 +286,9 @@ class ContextBuilder:
             parent_delta=0.0,
             previous_best_delta=0.0,
             prediction_change=_prediction_change_fraction(
+                baseline_evaluation.prediction_change
+            ),
+            prediction_spearman_vs_parent=_prediction_change_spearman(
                 baseline_evaluation.prediction_change
             ),
             child_count=0,
@@ -275,8 +304,11 @@ class ContextBuilder:
         ]
         evaluation_by_experiment = {}
         decision_by_experiment = {}
+        output_by_experiment = {}
         for event in events:
-            if event.event_type == EventType.EVALUATION_COMPLETED:
+            if event.event_type == EventType.OUTPUT_CHECKED:
+                output_by_experiment[event.payload.result.experiment_id] = event
+            elif event.event_type == EventType.EVALUATION_COMPLETED:
                 evaluation_by_experiment[event.payload.result.experiment_id] = event
             elif event.event_type == EventType.EXPERIMENT_DECIDED:
                 decision_by_experiment[event.payload.decision.experiment_id] = event
@@ -295,8 +327,10 @@ class ContextBuilder:
             node = state.experiments[spec.experiment_id]
             evaluation_event = evaluation_by_experiment.get(spec.experiment_id)
             decision_event = decision_by_experiment.get(spec.experiment_id)
+            output_event = output_by_experiment.get(spec.experiment_id)
             evaluation = evaluation_event.payload.result if evaluation_event else None
             decision = decision_event.payload.decision if decision_event else None
+            output = output_event.payload.result if output_event else None
             metric_set = evaluation.metric_set if evaluation else node.metric_set
             if metric_set is not None:
                 metrics_by_experiment[spec.experiment_id] = metric_set
@@ -312,6 +346,8 @@ class ContextBuilder:
                 support.append(evaluation_event.event_id)
             if decision_event is not None:
                 support.append(decision_event.event_id)
+            if output_event is not None:
+                support.append(output_event.event_id)
             summaries.append(
                 PlannerExperimentSummary(
                     experiment_id=spec.experiment_id,
@@ -322,10 +358,15 @@ class ContextBuilder:
                     trust_verdict=evaluation.trust.verdict if evaluation else None,
                     stability=evaluation.trust.stability if evaluation else None,
                     integrity=evaluation.trust.integrity if evaluation else None,
+                    trust_flags=(list(evaluation.trust.flags) if evaluation else []),
                     decision=decision.decision if decision else None,
                     highest_completed_fidelity=(
                         evaluation.fidelity if evaluation else node.highest_fidelity
                     ),
+                    population=(evaluation.population if evaluation else None),
+                    output_accepted=(output.accepted if output else None),
+                    output_checks=(dict(output.checks) if output else {}),
+                    output_violations=(list(output.violations) if output else []),
                     primary_score=(metric_set.primary_score if metric_set else None),
                     metric_set=metric_set,
                     metric_deltas=metric_deltas,
@@ -336,6 +377,11 @@ class ContextBuilder:
                     ),
                     prediction_change=(
                         _prediction_change_fraction(evaluation.prediction_change)
+                        if evaluation
+                        else None
+                    ),
+                    prediction_spearman_vs_parent=(
+                        _prediction_change_spearman(evaluation.prediction_change)
                         if evaluation
                         else None
                     ),
@@ -364,15 +410,36 @@ class ContextBuilder:
             self._planner_experiments(events)
         )
         card_directory = self.config.repository_root / "research/methods"
-        method_cards = [
-            PlannerMethodCardSummary(
-                method_id=card.method_id,
-                family=card.family,
-                status=card.status,
-                cost_tier=card.cost_tier,
+        method_cards = []
+        for card in load_method_cards(card_directory).cards:
+            source = self.config.repository_root / (card.source_path or "")
+            try:
+                source_path = source.resolve().relative_to(
+                    self.config.repository_root.resolve()
+                ).as_posix()
+            except (OSError, ValueError):
+                source_path = "research/methods/%s.md" % card.method_id
+            method_cards.append(
+                PlannerMethodCardSummary(
+                    method_id=card.method_id,
+                    family=card.family,
+                    status=card.status,
+                    cost_tier=card.cost_tier,
+                    summary=card.summary,
+                    tags=list(card.tags),
+                    mechanism=card.mechanism,
+                    prerequisites=list(card.prerequisites),
+                    allowed_data=list(card.allowed_data),
+                    expected_effect=card.expected_effect,
+                    falsifier=card.falsifier,
+                    prohibition_conditions=list(card.prohibition_conditions),
+                    source_path=source_path,
+                )
             )
-            for card in load_method_cards(card_directory).cards
-        ]
+        playbook = load_improvement_playbook(
+            self.config.repository_root / "research/CURRENT_RUN_IMPROVEMENT_PLAN.md",
+            source_path="research/CURRENT_RUN_IMPROVEMENT_PLAN.md",
+        )
         totals = state.resource_totals
         remaining_tokens = (
             None
@@ -392,16 +459,35 @@ class ContextBuilder:
             "contract_sha256": self.verified_contract.contract_sha256,
             "contract_summary": PlannerContractSummary(
                 resolved=True,
-                allowed_families=list(ALL_FAMILIES),
+                allowed_families=list(self.config.allowed_research_families),
+                allowed_data=list(self.config.allowed_research_data),
+                research_capabilities=list(self.config.research_capabilities),
+                active_prohibitions=list(self.config.active_research_prohibitions),
                 protected_paths=self._protected_paths(),
                 editable_paths=list(self.config.editable_roots),
+                data_manifest_sha256=self.config.data_manifest_sha256,
+                evaluator_sha256=self.config.evaluator_sha256,
                 epsilon=self.config.convergence_epsilon,
+                prediction_change_no_op_threshold=(
+                    self.config.prediction_change_no_op_threshold
+                ),
             ),
             "baseline": baseline,
             "current_best": current_best,
             "eligible_frontier": eligible_frontier,
             "family_history": family_history,
             "method_cards": method_cards,
+            "playbook": PlannerPlaybookSummary(
+                schema_version=playbook.schema_version,
+                source_path=playbook.source_path,
+                source_sha256=playbook.source_sha256,
+                rule_order=list(playbook.rule_order),
+                family_order=list(playbook.family_order),
+                method_order={
+                    family: list(methods)
+                    for family, methods in playbook.method_order.items()
+                },
+            ),
             "remaining_budget": PlannerBudgetSummary(
                 remaining_experiments=state.remaining_experiments,
                 remaining_public_queries=None,
@@ -436,8 +522,25 @@ class ContextBuilder:
         effective_max_tokens = (
             max_tokens if max_tokens is not None else self.config.context_token_limit
         )
+        playbook = load_improvement_playbook(
+            self.config.repository_root / "research/CURRENT_RUN_IMPROVEMENT_PLAN.md",
+            source_path="research/CURRENT_RUN_IMPROVEMENT_PLAN.md",
+        )
         mandatory = [
             ("Frozen contract", self._contract_digest()),
+            (
+                "Executable improvement playbook",
+                compact_json(
+                    {
+                        "schema_version": playbook.schema_version,
+                        "source_path": playbook.source_path,
+                        "source_sha256": playbook.source_sha256,
+                        "rule_order": playbook.rule_order,
+                        "family_order": playbook.family_order,
+                        "method_order": playbook.method_order,
+                    }
+                ),
+            ),
             (
                 "Current objective and budget",
                 compact_json(

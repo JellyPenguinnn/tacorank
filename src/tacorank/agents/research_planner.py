@@ -93,6 +93,11 @@ class ResearchPlanner:
         advice = self.convergence_advisor.advise(context)
         supporting = [str(item) for item in _get(context, "source_event_ids", []) or []]
         if advice.action == "recommend_stop":
+            logger.info(
+                "research_planner_stop_recommended context_id=%s reason_code=%s",
+                _get(context, "context_id", None),
+                advice.reason_code,
+            )
             return self.output_factory(
                 "recommend_stop",
                 None,
@@ -123,11 +128,14 @@ class ResearchPlanner:
             output_token_limit=self.output_token_limit,
         )
         logger.info(
-            "research_provider_selected context_id=%s parent_id=%s family=%s phase=%s",
+            "research_provider_selected context_id=%s parent_id=%s family=%s "
+            "method_card_id=%s phase=%s reason_code=%s",
             _get(context, "context_id", None),
             _get(choice.parent, "experiment_id", None),
             choice.family,
+            choice.method_card_id,
             choice.phase,
+            choice.reason_code,
         )
         raw_spec = await self.provider.generate(request)
         result = self.validator.validate(raw_spec, context, choice=choice)
@@ -139,9 +147,19 @@ class ResearchPlanner:
             )
             repair = getattr(self.provider, "repair", None)
             if repair is not None:
+                logger.info(
+                    "research_plan_repair_started context_id=%s errors=%s",
+                    _get(context, "context_id", None),
+                    ",".join(result.errors),
+                )
                 raw_spec = await repair(request, result.errors)
                 result = self.validator.validate(raw_spec, context, choice=choice)
         if not result.accepted:
+            logger.warning(
+                "research_plan_blocked_after_repair context_id=%s errors=%s",
+                _get(context, "context_id", None),
+                ",".join(result.errors),
+            )
             return self._attach_provider_usage(
                 self.output_factory(
                     "blocked",

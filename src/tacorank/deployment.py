@@ -203,6 +203,33 @@ def setup_live_deployment(
         "adapter_mode": "live",
         "live_adapter_config_sha256": _sha256_file(live_path),
         "editable_roots": ["solution"],
+        "allowed_research_families": [
+            "objective",
+            "temporal_history",
+            "multitask",
+            "duration_bias",
+            "features",
+            "model",
+            "sampling",
+            "ensemble",
+            "evaluation",
+            "other",
+        ],
+        "allowed_research_data": [
+            "train_interactions",
+            "public_validation",
+            "user_id",
+            "video_id",
+            "author_id",
+            "tab",
+            "date",
+            "duration_ms",
+            "long_view",
+            "verified_predictions",
+        ],
+        "research_capabilities": [],
+        "active_research_prohibitions": [],
+        "prediction_change_no_op_threshold": 0.001,
         "target_interface_excerpts": {
             "candidate": (
                 "def run(invocation: PipelineInvocation) -> None; read only "

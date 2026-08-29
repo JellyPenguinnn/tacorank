@@ -55,6 +55,37 @@ class RunConfig(StrictModel):
     adapter_mode: Literal["live", "fake"] = "live"
     live_adapter_config_sha256: Optional[str] = None
     editable_roots: List[str] = Field(default_factory=lambda: ["solution"])
+    allowed_research_families: List[NonEmptyStr] = Field(
+        default_factory=lambda: [
+            "objective",
+            "temporal_history",
+            "multitask",
+            "duration_bias",
+            "features",
+            "model",
+            "sampling",
+            "ensemble",
+            "evaluation",
+            "other",
+        ]
+    )
+    allowed_research_data: List[NonEmptyStr] = Field(
+        default_factory=lambda: [
+            "train_interactions",
+            "public_validation",
+            "user_id",
+            "video_id",
+            "author_id",
+            "tab",
+            "date",
+            "duration_ms",
+            "long_view",
+            "verified_predictions",
+        ]
+    )
+    research_capabilities: List[NonEmptyStr] = Field(default_factory=list)
+    active_research_prohibitions: List[NonEmptyStr] = Field(default_factory=list)
+    prediction_change_no_op_threshold: float = Field(default=0.001, ge=0.0, le=1.0)
     target_interface_excerpts: Dict[str, str] = Field(default_factory=dict)
     coding_step_limit: int = Field(default=20, gt=0)
     # ``None`` explicitly disables TacoRank's cumulative coding-trajectory
@@ -102,6 +133,29 @@ class RunConfig(StrictModel):
         if len(roots) != len(set(roots)):
             raise ValueError("editable_roots must be unique")
         return roots
+
+    @field_validator(
+        "allowed_research_families",
+        "allowed_research_data",
+        "research_capabilities",
+        "active_research_prohibitions",
+    )
+    @classmethod
+    def validate_unique_research_values(cls, values: List[str]) -> List[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("research contract values must not be blank")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("research contract values must be unique")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_research_contract(self) -> "RunConfig":
+        if not self.allowed_research_families:
+            raise ValueError("allowed_research_families must not be empty")
+        if not self.allowed_research_data:
+            raise ValueError("allowed_research_data must not be empty")
+        return self
 
     @field_validator("data_manifest_sha256", "evaluator_sha256")
     @classmethod

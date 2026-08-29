@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 from tacorank.research.duplicate_detection import compute_duplicate_key
@@ -147,3 +148,121 @@ def test_validator_rejects_duplicate_fidelity(planner_context):
     assert not result.accepted
     assert "DUPLICATE_FIDELITY" in result.errors
     assert "NON_MONOTONIC_FIDELITY_PLAN" in result.errors
+
+
+def test_validator_requires_one_policy_selected_method_card(planner_context):
+    result = PlanValidator().validate(
+        make_spec(planner_context, method_card_ids=[]),
+        planner_context,
+        choice=SimpleNamespace(
+            parent=SimpleNamespace(experiment_id="exp_0000"),
+            family="objective",
+            method_card_id="objective_pairwise_bpr",
+        ),
+    )
+
+    assert not result.accepted
+    assert "METHOD_CARD_REQUIRED" in result.errors
+    assert "METHOD_POLICY_MISMATCH" in result.errors
+
+
+def test_validator_enforces_method_status(planner_context):
+    card = next(
+        card
+        for card in planner_context.method_cards
+        if card.method_id == "objective_pairwise_bpr"
+    )
+    planner_context.method_cards = [replace(card, status="blocked")]
+
+    result = PlanValidator().validate(make_spec(planner_context), planner_context)
+
+    assert not result.accepted
+    assert "METHOD_STATUS_NOT_CANDIDATE" in result.errors
+
+
+def test_validator_enforces_method_prerequisites(planner_context):
+    card = next(
+        card
+        for card in planner_context.method_cards
+        if card.method_id == "objective_pairwise_bpr"
+    )
+    planner_context.method_cards = [
+        replace(card, prerequisites=("human_approval_not_recorded",))
+    ]
+
+    result = PlanValidator().validate(make_spec(planner_context), planner_context)
+
+    assert not result.accepted
+    assert "METHOD_PREREQUISITES_UNSATISFIED" in result.errors
+
+
+def test_validator_enforces_method_allowed_data(planner_context):
+    card = next(
+        card
+        for card in planner_context.method_cards
+        if card.method_id == "objective_pairwise_bpr"
+    )
+    planner_context.method_cards = [replace(card, allowed_data=("hidden_labels",))]
+
+    result = PlanValidator().validate(make_spec(planner_context), planner_context)
+
+    assert not result.accepted
+    assert "METHOD_DATA_NOT_ALLOWED" in result.errors
+
+
+def test_validator_enforces_method_prohibitions(planner_context):
+    card = next(
+        card
+        for card in planner_context.method_cards
+        if card.method_id == "objective_pairwise_bpr"
+    )
+    planner_context.method_cards = [
+        replace(card, prohibition_conditions=("leakage_detected",))
+    ]
+    planner_context.contract_summary.active_prohibitions = ["leakage_detected"]
+
+    result = PlanValidator().validate(make_spec(planner_context), planner_context)
+
+    assert not result.accepted
+    assert "METHOD_PROHIBITED" in result.errors
+
+
+def test_validator_rejects_method_family_mismatch(planner_context):
+    card = next(
+        card
+        for card in planner_context.method_cards
+        if card.method_id == "objective_pairwise_bpr"
+    )
+    planner_context.method_cards = [replace(card, family="model")]
+
+    result = PlanValidator().validate(make_spec(planner_context), planner_context)
+
+    assert not result.accepted
+    assert "METHOD_FAMILY_MISMATCH" in result.errors
+
+
+def test_validator_rejects_underestimated_method_cost(planner_context):
+    result = PlanValidator().validate(
+        make_spec(
+            planner_context,
+            estimated_cost=SimpleNamespace(
+                llm_tokens_upper_bound=1000,
+                wall_time_seconds_upper_bound=60,
+                gpu_seconds_upper_bound=60,
+                cost_tier="low",
+            ),
+        ),
+        planner_context,
+    )
+
+    assert not result.accepted
+    assert "METHOD_COST_UNDERESTIMATED" in result.errors
+
+
+def test_validator_fails_closed_without_allowed_data(planner_context):
+    planner_context.contract_summary.allowed_data = []
+
+    result = PlanValidator().validate(make_spec(planner_context), planner_context)
+
+    assert not result.accepted
+    assert "CONTRACT_ALLOWED_DATA_MISSING" in result.errors

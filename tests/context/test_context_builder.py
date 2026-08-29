@@ -17,6 +17,41 @@ def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_e
     assert first.artifact.sha256 == second.artifact.sha256
     assert first.estimated_tokens <= harness.config.context_token_limit
     assert first.contract_summary.editable_paths == harness.config.editable_roots
+    assert (
+        first.contract_summary.allowed_families
+        == harness.config.allowed_research_families
+    )
+    assert first.contract_summary.allowed_data == harness.config.allowed_research_data
+    assert first.contract_summary.data_manifest_sha256 == harness.config.data_manifest_sha256
+    assert first.contract_summary.evaluator_sha256 == harness.config.evaluator_sha256
+    assert first.playbook.rule_order[0] == "output_rejected"
+    assert first.playbook.method_order["objective"][0] == "objective_pairwise_bpr"
+    pairwise = next(
+        card for card in first.method_cards if card.method_id == "objective_pairwise_bpr"
+    )
+    assert "within_user_positive_negative_pairs" in pairwise.prerequisites
+    assert "train_interactions" in pairwise.allowed_data
+
+
+def test_planner_history_preserves_complete_evaluation_evidence(
+    harness, baseline_evaluation
+):
+    harness.bootstrap(baseline_evaluation)
+    asyncio.run(harness.run_one_experiment())
+
+    context = harness.context_builder.build_planner(harness.events())
+    latest = context.family_history[-1]
+
+    assert latest.output_accepted is True
+    assert latest.output_checks["schema"].value == "pass"
+    assert latest.output_violations == []
+    assert latest.population.value == "public_validation"
+    assert latest.highest_completed_fidelity.value == "full"
+    assert latest.prediction_change == 0.1
+    assert latest.prediction_spearman_vs_parent == 0.9
+    assert latest.trust_flags == []
+    assert latest.parent_eligible is True
+    assert latest.best_eligible is True
 
 
 def test_mandatory_context_cannot_be_silently_truncated(harness, baseline_evaluation):
