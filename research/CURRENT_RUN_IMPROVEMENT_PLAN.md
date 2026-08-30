@@ -101,7 +101,7 @@ Apply these rules from top to bottom. The first matching rule wins.
 | 3 | Stability is `unstable` | Confirm seeds or simplify/regularize the same mechanism. | No new family |
 | 4 | Fidelity is `smoke` or `proxy` | Promote a clear proxy improvement, or one clean result within the symmetric proxy noise band, to one bounded full-fidelity check. Prune only a regression beyond that band. | No parent promotion |
 | 5 | Full public result is trusted and improves the parent by more than `epsilon` | Accept; confirm once if stability is only `single_seed`, then deepen the same family. | Yes |
-| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, and remains within `eta` of the current validation best | Retain it as an exploratory research parent with `best_eligible = false`. Continue from the highest-scoring eligible research node, try one legal same-family refinement, then switch to an independent mechanism only after that refinement is exhausted. | Yes, exploratory |
+| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, and remains within `eta` of the current validation best | Retain it as an exploratory research parent with `best_eligible = false`. From the highest-scoring eligible research node, let the legal-choice ranker compare one bounded same-family refinement with every eligible independent mechanism. | Yes, exploratory |
 | 7 | Full public result is trusted and worse than `-epsilon` | Treat the tested mechanism as falsified under its stated conditions; do not tune it indefinitely. | Yes |
 
 Only a full, verified, clean, seed-confirmed public-validation result may create
@@ -154,7 +154,7 @@ the parent, using the contract's seed/noise tolerance.
 | positive | positive | Broad pair ordering and top-5 placement both improved. | Confirm, then refine the same family before switching. |
 | positive | negative | Broad within-user separation improved but top ranks worsened. | Try top-weighted/listwise or hybrid ranking loss; inspect top-5 errors. |
 | negative | positive | Top-5 placement improved while general positive-negative ordering degraded. | Blend listwise/top-k emphasis with pairwise loss; avoid a pure top-k overfit. |
-| near zero | near zero, predictions changed | Mechanism has little signal at current fidelity. | Return to the highest-scoring eligible research path and try one same-family refinement before moving to an independent family. |
+| near zero | near zero, predictions changed | Mechanism has little signal at current fidelity. | Return to the highest-scoring eligible research path and rank one same-family refinement together with eligible independent families; do not force the refinement to run first. |
 | any | any, predictions barely changed | Terminal null result; it does not establish that the implementation is broken. | Let the tree planner rank one bounded same-mechanism reimplementation against independent mechanisms. |
 | inconsistent across seeds | inconsistent across seeds | Variance dominates estimated gain. | Confirm or simplify; do not promote. |
 
@@ -177,11 +177,16 @@ Recommended cohorts:
 
 The default order follows the evidence-backed priority in
 `docs/KUAIRAND_STARTER_KIT.md`: objective, user history, multi-task, duration,
-model, temporal drift, then robustness evaluation. Within the active direction,
-try distinct eligible methods first and then bounded implementation variants.
-Continue from its best trusted branch; after a failure, retry from the strongest
-legal trusted parent. Move to the next direction only when the active direction
-is exhausted or its method card explicitly retires it. Skip unmet prerequisites.
+model, temporal drift, then robustness evaluation. This order is a cold-start
+prior and deterministic tie-break, not a mandatory family sweep. With no
+verified research evidence, start with pairwise objective alignment. After a
+terminal result, construct all legal choices from the strongest trusted branch
+and rank them using verified reward, uncertainty, parent score, and cost. A
+trusted improvement still justifies depth-first continuation, and an explicit
+component-metric trade-off may authorize its documented refinement. A no-gain,
+rejected, or regressed direction must compete with independent mechanisms and
+must not remain active merely because it appears earlier in `family_order`.
+Skip unmet prerequisites and keep global method trial caps binding.
 
 Convergence patience may stop the run only after every currently eligible
 starter-kit priority direction has received at least one terminal experiment.

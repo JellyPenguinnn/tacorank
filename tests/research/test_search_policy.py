@@ -7,12 +7,12 @@ from tacorank.research.search_policy import PolicyChoice, SearchPolicy
 from .conftest import make_summary
 
 
-def test_policy_starts_priority_direction_depth_first_from_baseline(planner_context):
+def test_policy_uses_priority_as_cold_start_tiebreak(planner_context):
     choice = SearchPolicy().choose(planner_context)
 
     assert choice.action == "propose"
     assert choice.phase == "playbook"
-    assert choice.reason_code == "PRIORITY_DIRECTION_DEPTH_FIRST"
+    assert choice.reason_code == "ADAPTIVE_SCORE_GUIDED_DEPTH_FIRST"
     assert choice.family == "objective"
     assert choice.parent.experiment_id == "exp_0000"
     assert choice.method_card_id == "objective_pairwise_bpr"
@@ -48,7 +48,7 @@ def context_with_latest(planner_context, latest, *, allowed_families=None):
     )
 
 
-def test_policy_uses_priority_direction_on_strongest_frontier(planner_context):
+def test_policy_ranker_can_override_priority_on_strongest_frontier(planner_context):
     root = make_summary("exp_0000", score=0.5946)
     best = make_summary(
         "exp_0001",
@@ -92,11 +92,22 @@ def test_policy_uses_priority_direction_on_strongest_frontier(planner_context):
         playbook=planner_context.playbook,
     )
 
-    choice = SearchPolicy().choose(context)
+    seen = []
+
+    def choose_model(choices, context):
+        seen.extend(choices)
+        return next(choice for choice in choices if choice.family == "model")
+
+    choice = SearchPolicy(legal_choice_ranker=choose_model).choose(context)
 
     assert choice.phase == "playbook"
     assert choice.parent.experiment_id == "exp_0001"
-    assert choice.family == "objective"
+    assert choice.family == "model"
+    assert {candidate.family for candidate in seen} >= {
+        "objective",
+        "model",
+        "ensemble",
+    }
 
 
 def test_policy_deepens_best_branch_before_untried_baseline_family(planner_context):
@@ -124,7 +135,7 @@ def test_policy_deepens_best_branch_before_untried_baseline_family(planner_conte
 
     choice = SearchPolicy().choose(context)
 
-    assert choice.reason_code == "PRIORITY_DIRECTION_DEPTH_FIRST"
+    assert choice.reason_code == "ADAPTIVE_SCORE_GUIDED_DEPTH_FIRST"
     assert choice.parent.experiment_id == "exp_0001"
     assert choice.family == "model"
 
@@ -206,7 +217,7 @@ def test_policy_retries_bounded_variants_before_backtracking(planner_context):
 
     choice = SearchPolicy().choose(context)
 
-    assert choice.reason_code == "PRIORITY_DIRECTION_DEPTH_FIRST"
+    assert choice.reason_code == "ADAPTIVE_SCORE_GUIDED_DEPTH_FIRST"
     assert choice.parent.experiment_id == "exp_0001"
     assert choice.method_card_id == "objective_pairwise_bpr"
 
@@ -424,8 +435,8 @@ def test_playbook_branches_after_terminal_proxy_prune(planner_context):
     assert choice.action == "propose"
     assert choice.reason_code == "EARLY_FIDELITY_REJECTED"
     assert choice.parent.experiment_id == "exp_0000"
-    assert choice.family == "objective"
-    assert choice.method_card_id == "objective_listwise_user_softmax"
+    assert choice.family == "temporal_history"
+    assert choice.method_card_id == "temporal_history_compact"
 
 
 def test_soft_pairwise_tradeoff_gets_one_bounded_listwise_child(planner_context):
@@ -563,8 +574,8 @@ def test_severe_proxy_regression_is_not_refined_or_ensembled(planner_context):
 
     assert choice.phase == "playbook"
     assert choice.reason_code == "EARLY_FIDELITY_REJECTED"
-    assert choice.family == "objective"
-    assert choice.method_card_id == "objective_listwise_user_softmax"
+    assert choice.family == "temporal_history"
+    assert choice.method_card_id == "temporal_history_compact"
     assert choice.component_experiment_ids == ()
 
 
@@ -702,11 +713,27 @@ def test_playbook_refines_meaningful_pairwise_no_gain_in_family(planner_context)
         method_card_ids=["objective_pairwise_bpr"],
     )
 
-    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+    seen = []
+
+    def choose_refinement(choices, context):
+        seen.extend(choices)
+        return next(
+            choice
+            for choice in choices
+            if choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
+        )
+
+    choice = SearchPolicy(legal_choice_ranker=choose_refinement).choose(
+        context_with_latest(planner_context, latest)
+    )
 
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.family == "objective"
     assert choice.method_card_id == "objective_listwise_user_softmax"
+    assert {candidate.family for candidate in seen} >= {
+        "objective",
+        "temporal_history",
+    }
 
 
 def test_directionally_positive_parent_prevents_premature_search_stop(
@@ -726,13 +753,13 @@ def test_directionally_positive_parent_prevents_premature_search_stop(
     choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
 
     assert choice.action == "propose"
-    assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
+    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
     assert choice.parent.experiment_id == "exp_0006"
-    assert choice.family == "objective"
-    assert choice.method_card_id == "objective_pairwise_bpr"
+    assert choice.family == "temporal_history"
+    assert choice.method_card_id == "temporal_history_compact"
 
 
-def test_near_best_exploratory_parent_continues_depth_first(planner_context):
+def test_near_best_exploratory_parent_can_switch_direction(planner_context):
     root = make_summary("exp_0000", score=0.601468756352959)
     exploratory = make_summary(
         "exp_0003",
@@ -760,10 +787,10 @@ def test_near_best_exploratory_parent_continues_depth_first(planner_context):
     choice = SearchPolicy().choose(context)
 
     assert choice.action == "propose"
-    assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
+    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
     assert choice.parent.experiment_id == "exp_0003"
-    assert choice.family == "duration_bias"
-    assert choice.method_card_id == "duration_bias_censored_watch_time"
+    assert choice.family == "objective"
+    assert choice.method_card_id == "objective_pairwise_bpr"
 
 
 def test_meaningful_no_gain_backtracks_to_highest_scoring_experimental_path(
@@ -810,10 +837,10 @@ def test_meaningful_no_gain_backtracks_to_highest_scoring_experimental_path(
     choice = SearchPolicy().choose(context)
 
     assert choice.action == "propose"
-    assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
+    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
     assert choice.parent.experiment_id == "exp_002"
-    assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    assert choice.family == "objective"
+    assert choice.method_card_id == "objective_pairwise_bpr"
 
 
 def test_meaningful_no_gain_switches_family_after_best_path_refinement(
@@ -869,9 +896,10 @@ def test_meaningful_no_gain_switches_family_after_best_path_refinement(
     choice = SearchPolicy().choose(context)
 
     assert choice.action == "propose"
-    assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
+    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
     assert choice.parent.experiment_id == "exp_002"
-    assert choice.family == "temporal_history"
+    assert choice.family == "objective"
+    assert choice.method_card_id == "objective_pairwise_bpr"
 
 
 def test_playbook_deepens_trusted_improvement(planner_context):
@@ -904,8 +932,8 @@ def test_playbook_abandons_trusted_regression(planner_context):
     choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
 
     assert choice.reason_code == "TRUSTED_FULL_REGRESSION"
-    assert choice.family == "objective"
-    assert choice.method_card_id == "objective_listwise_user_softmax"
+    assert choice.family == "temporal_history"
+    assert choice.method_card_id == "temporal_history_compact"
 
 
 def test_optional_ranker_cannot_inject_an_illegal_choice(planner_context):

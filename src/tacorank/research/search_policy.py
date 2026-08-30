@@ -393,6 +393,19 @@ def _latest_parent(
     )
 
 
+def _rank_legal_choices(
+    choices: Sequence[PolicyChoice],
+    context: Any,
+    rank_choices: LegalChoiceRanker | None,
+) -> PolicyChoice | None:
+    if not choices:
+        return None
+    if rank_choices is None:
+        return choices[0]
+    ranked = rank_choices(tuple(choices), context)
+    return ranked if ranked in choices else choices[0]
+
+
 def _next_independent_choice(
     context: Any,
     eligible: Sequence[ExperimentNodeView],
@@ -402,6 +415,7 @@ def _next_independent_choice(
     reason_code: str,
     reason: str,
     preferred_parent: ExperimentNodeView | None = None,
+    rank_choices: LegalChoiceRanker | None = None,
 ) -> PolicyChoice | None:
     choices = _independent_choices(
         context,
@@ -412,7 +426,7 @@ def _next_independent_choice(
         reason=reason,
         preferred_parent=preferred_parent,
     )
-    return choices[0] if choices else None
+    return _rank_legal_choices(choices, context, rank_choices)
 
 
 def _independent_choices(
@@ -433,6 +447,15 @@ def _independent_choices(
         for family in _family_order(context)
         if family in allowed
     ]
+    # ``family_order`` is a cold-start prior, not a mandatory sweep.  For a
+    # route that explicitly asks for an independent mechanism, move the most
+    # recently tested family to the end of the deterministic tie-break order.
+    # The legal-choice ranker can still select it when verified evidence says
+    # it is the strongest available action.
+    if latest_family in ordered:
+        ordered = [family for family in ordered if family != latest_family] + [
+            latest_family
+        ]
     choices = []
     for family in ordered:
         card = _method_for_family(
@@ -682,6 +705,7 @@ def _playbook_choice(
     context: Any,
     eligible: list[ExperimentNodeView],
     allowed: tuple[str, ...],
+    rank_choices: LegalChoiceRanker | None = None,
 ) -> PolicyChoice | None:
     history = as_list(get_value(context, "family_history", None))
     if not history:
@@ -745,6 +769,7 @@ def _playbook_choice(
                 "interpret it as research evidence and continue with an independent "
                 "eligible mechanism."
             ),
+            rank_choices=rank_choices,
         ) or _portfolio_blocked(
             context,
             allowed,
@@ -804,6 +829,7 @@ def _playbook_choice(
                         "The clean full result was rejected as a checkpoint and has "
                         "no authorized portfolio action; move to an independent method."
                     ),
+                    rank_choices=rank_choices,
                 )
                 if next_choice is not None:
                     return next_choice
@@ -838,6 +864,7 @@ def _playbook_choice(
                         "evaluation; move to the next independent method."
                         + _diagnostic_suffix(latest)
                     ),
+                    rank_choices=rank_choices,
                 )
                 if next_choice is not None:
                     return next_choice
@@ -913,24 +940,35 @@ def _playbook_choice(
                 exploration_parent,
                 allowed,
             )
-            if refinement is not None:
-                return refinement
             exploration_family = str(exploration_parent.family or family)
-            return _next_independent_choice(
+            alternatives = [
+                choice
+                for choice in _independent_choices(
+                    context,
+                    eligible,
+                    allowed,
+                    exploration_family,
+                    reason_code="MEANINGFUL_CHANGE_NO_GAIN",
+                    reason=(
+                        "The strongest eligible path changed predictions without a "
+                        "trusted gain; compare its bounded refinement with legal "
+                        "independent mechanisms using verified search evidence."
+                    ),
+                    preferred_parent=exploration_parent,
+                )
+                if choice.family != exploration_family
+            ]
+            candidates = (
+                [refinement] if refinement is not None else []
+            ) + alternatives
+            return _rank_legal_choices(
+                candidates,
                 context,
-                eligible,
-                allowed,
-                exploration_family,
-                reason_code="MEANINGFUL_CHANGE_NO_GAIN",
-                reason=(
-                    "The strongest eligible experimental path has no remaining "
-                    "same-family refinement; move to the next independent mechanism."
-                ),
-                preferred_parent=exploration_parent,
+                rank_choices,
             ) or _portfolio_blocked(
                 context,
                 allowed,
-                "No independent eligible method remains.",
+                "No same-family refinement or independent eligible method remains.",
             )
         if (
             rule == "trusted_improvement"
@@ -966,6 +1004,7 @@ def _playbook_choice(
                         "The successful direction reached its bounded method cap; "
                         "continue with the next starter-kit priority direction."
                     ),
+                    rank_choices=rank_choices,
                 ) or _portfolio_blocked(
                     context,
                     allowed,
@@ -994,6 +1033,7 @@ def _playbook_choice(
                     "The tested mechanism regressed beyond tolerance; move to an "
                     "independent method." + _diagnostic_suffix(latest)
                 ),
+                rank_choices=rank_choices,
             ) or _portfolio_blocked(
                 context, allowed, "No independent eligible method remains."
             )
@@ -1067,7 +1107,12 @@ class SearchPolicy:
                 "or independent method remains.",
             )
 
-        routed = _playbook_choice(context, eligible, allowed)
+        routed = _playbook_choice(
+            context,
+            eligible,
+            allowed,
+            rank_choices=self._rank,
+        )
         if routed is not None:
             return routed
 
@@ -1078,20 +1123,16 @@ class SearchPolicy:
             eligible,
             allowed,
             "",
-            reason_code="PRIORITY_DIRECTION_DEPTH_FIRST",
+            reason_code="ADAPTIVE_SCORE_GUIDED_DEPTH_FIRST",
             reason=(
-                "Continue the earliest non-exhausted starter-kit direction from "
-                "the strongest trusted branch; try distinct methods before bounded "
-                "variants, then advance in priority order."
+                "Rank every legal direction from the strongest trusted branch using "
+                "verified rewards, uncertainty, parent score, and cost. Treat the "
+                "starter-kit order only as a cold-start tie-break."
             ),
             preferred_parent=parent,
         )
         if choices:
-            active_family = choices[0].family
-            same_direction = [
-                choice for choice in choices if choice.family == active_family
-            ]
-            return self._rank(same_direction, context)
+            return self._rank(choices, context)
         return _portfolio_blocked(
             context,
             allowed,
