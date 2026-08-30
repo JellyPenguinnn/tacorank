@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 import certifi
 from pydantic import BaseModel
 
+from ..research.code_references import redact_code_references
 from ..research.duplicate_detection import compute_duplicate_key
 from ..research.graph_view import as_list, get_value
 from ..schemas import ResourceDelta, TokenMeasurement
@@ -142,19 +143,9 @@ def _variant_parameters(value: Any) -> Dict[str, Any]:
     return result
 
 
-_IMPLEMENTATION_REFERENCE_RE = re.compile(
-    r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|"
-    r"\b[A-Za-z0-9_.-]+\.(?:py|pyi|js|ts|tsx|java|go|rs|cpp|cc|c|h)\b|"
-    r"\b(?:entrypoint|function name|class name|source file)\b",
-    flags=re.IGNORECASE,
-)
-
-
 def _code_blind(value: Any) -> Any:
     if isinstance(value, str):
-        return _IMPLEMENTATION_REFERENCE_RE.sub(
-            "[implementation detail withheld]", value
-        )
+        return redact_code_references(value)
     if isinstance(value, Mapping):
         return {str(key): _code_blind(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
 from typing import Any
 
+from .code_references import find_code_reference
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
 from .graph_view import (
     ExperimentNodeView,
@@ -31,19 +33,12 @@ HIDDEN_PATTERNS = (
 SHARED_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 EVENT_ID_PATTERN = re.compile(r"evt_\d{6,}$")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?$")
-CODE_DETAIL_PATTERN = re.compile(
-    r"(?:^|\s)(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|"
-    r"\.(?:py|pyi|js|ts|tsx|java|go|rs|cpp|cc|c|h)\b|"
-    r"\b(?:entrypoint|function name|class name|line number|source file)\b",
-    flags=re.IGNORECASE,
-)
-
-
 @dataclass(frozen=True)
 class ValidationResult:
     accepted: bool
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    diagnostics: tuple[str, ...] = ()
 
 
 def _nonempty(value: Any) -> bool:
@@ -83,6 +78,7 @@ class PlanValidator:
     ) -> ValidationResult:
         errors: list[str] = []
         warnings: list[str] = []
+        diagnostics: list[str] = []
         context_id = get_value(context, "context_id", None)
         contract_hash = get_value(context, "contract_sha256", None)
         contract = get_value(context, "contract_summary", None)
@@ -363,20 +359,35 @@ class PlanValidator:
         if not evidence_events.issubset(source_events):
             errors.append("EVIDENCE_OUTSIDE_CONTEXT")
 
-        text = " ".join(
-            str(get_value(spec, field, ""))
-            for field in (
-                "hypothesis",
-                "change_summary",
-                "expected_mechanism",
-                "falsification_condition",
-                "variant_instruction",
-            )
-        ).lower() + " " + str(get_value(spec, "variant_parameters", "")).lower()
+        narrative_fields = (
+            "hypothesis",
+            "change_summary",
+            "expected_mechanism",
+            "falsification_condition",
+            "variant_instruction",
+        )
+        narrative = {
+            field: str(get_value(spec, field, "")) for field in narrative_fields
+        }
+        parameters = get_value(spec, "variant_parameters", "")
+        narrative["variant_parameters"] = (
+            json.dumps(parameters, ensure_ascii=True, sort_keys=True)
+            if isinstance(parameters, dict)
+            else str(parameters)
+        )
+        text = " ".join(narrative.values()).lower()
         if any(pattern in text for pattern in HIDDEN_PATTERNS):
             errors.append("HIDDEN_TEST_REFERENCE")
-        if CODE_DETAIL_PATTERN.search(text):
+        for field, value in narrative.items():
+            reference = find_code_reference(value)
+            if reference is None:
+                continue
             errors.append("CODE_SPECIFIC_PLAN_FORBIDDEN")
+            diagnostics.append(
+                "code_reference field=%s category=%s token=%s"
+                % (field, reference.category, json.dumps(reference.text))
+            )
+            break
         if any(component_id.lower() not in text for component_id in component_ids):
             errors.append("ENSEMBLE_COMPONENT_NOT_DESCRIBED")
 
@@ -421,4 +432,9 @@ class PlanValidator:
             if estimate is not None and remaining is not None and estimate > remaining:
                 errors.append(code)
 
-        return ValidationResult(accepted=not errors, errors=tuple(dict.fromkeys(errors)), warnings=tuple(dict.fromkeys(warnings)))
+        return ValidationResult(
+            accepted=not errors,
+            errors=tuple(dict.fromkeys(errors)),
+            warnings=tuple(dict.fromkeys(warnings)),
+            diagnostics=tuple(dict.fromkeys(diagnostics)),
+        )

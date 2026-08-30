@@ -355,7 +355,13 @@ def test_deepseek_provider_discards_unsolicited_implementation_details(
 
 def test_research_planner_repairs_code_specific_narrative(planner_context):
     responses = [
-        response(candidate(change_summary="Edit solution/candidate.py.")),
+        response(
+            candidate(
+                change_summary=(
+                    "Compare pairwise/listwise objectives in solution/candidate.py."
+                )
+            )
+        ),
         response(candidate()),
     ]
     requests = []
@@ -380,6 +386,35 @@ def test_research_planner_repairs_code_specific_narrative(planner_context):
         "validation_errors"
     ]
     assert "solution/candidate.py" not in json.dumps(repair_prompt)
+    assert "pairwise/listwise" in json.dumps(repair_prompt)
+
+
+def test_research_planner_persists_code_reference_diagnostic(planner_context):
+    responses = [
+        response(candidate(change_summary="Edit solution/candidate.py.")),
+        response(candidate(change_summary="Edit src/tacorank/training.")),
+    ]
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, payload, timeout
+        return responses.pop(0)
+
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    planner = ResearchPlanner(
+        provider,
+        output_factory=output_factory,
+        input_token_limit=2_000,
+        output_token_limit=1_000,
+    )
+
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result["action"] == "blocked"
+    assert result["reason_code"] == "INVALID_PROVIDER_PLAN"
+    assert "CODE_SPECIFIC_PLAN_FORBIDDEN" in result["reason"]
+    assert "field=change_summary" in result["reason"]
+    assert "category=source_path" in result["reason"]
+    assert 'token="src/tacorank/training"' in result["reason"]
 
 
 def test_deepseek_provider_rejects_truncated_completion(planner_context):

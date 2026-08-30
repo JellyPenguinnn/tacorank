@@ -66,13 +66,14 @@ def test_validator_accepts_distinct_agent_chosen_campaign_variant(planner_contex
         campaign_id=choice.campaign_id,
         variant_id=choice.variant_id,
         variant_instruction=(
-            "Use BPR with four deterministic negatives per positive and "
-            "learning rate 0.02."
+            "Use a pairwise/listwise hybrid with four deterministic "
+            "positive/negative comparisons and learning rate 0.02."
         ),
         variant_parameters={
             "formulation": "bpr",
             "negative_count": 4,
             "learning_rate": 0.02,
+            "metric_tradeoff": "GAUC/nDCG",
         },
     )
 
@@ -306,6 +307,26 @@ def test_validator_rejects_code_specific_narrative(
 
     assert not result.accepted
     assert "CODE_SPECIFIC_PLAN_FORBIDDEN" in result.errors
+    assert result.diagnostics == (
+        'code_reference field=change_summary category=source_path '
+        'token="solution/candidate.py"',
+    )
+
+
+def test_validator_rejects_explicit_extensionless_source_path(planner_context):
+    spec = make_spec(
+        planner_context,
+        change_summary="Change the objective in src/tacorank/training.",
+    )
+
+    result = PlanValidator().validate(spec, planner_context)
+
+    assert not result.accepted
+    assert "CODE_SPECIFIC_PLAN_FORBIDDEN" in result.errors
+    assert result.diagnostics == (
+        'code_reference field=change_summary category=source_path '
+        'token="src/tacorank/training"',
+    )
 
 
 def test_validator_rejects_unresolved_contract(planner_context):
