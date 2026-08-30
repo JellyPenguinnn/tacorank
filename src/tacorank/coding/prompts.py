@@ -38,6 +38,11 @@ _GATE_A_CHECK_NAMES = frozenset(
 )
 
 
+# The bounded code-recovery actions that share the repair prompt contract.
+# Kept in sync with the orchestrator's _CODE_RECOVERY_ACTIONS.
+_REPAIR_PROMPT_ACTIONS = frozenset({"trae_repair", "restart_from_trusted_parent"})
+
+
 class PromptContractError(ValueError):
     """Raised before invocation when a coding context violates its contract."""
 
@@ -274,8 +279,14 @@ def build_repair_prompt(
     )
     target_files = _validated_paths(spec_document.get("target_files"), "target_files")
     decision_document = _json_document(decision, "recovery_decision")
-    if decision_document.get("action") != "trae_repair":
-        raise PromptContractError("recovery decision is not a trae_repair action")
+    # Both bounded code-recovery actions build their prompt here:
+    # restart_from_trusted_parent recodes from the parent commit rather than
+    # editing the rejected candidate, but it is the same bounded repair task
+    # under the same hypothesis. Accepting only trae_repair made every
+    # restart raise PromptContractError, which surfaced as
+    # CODING_WORKER_FAILURE and abandoned the experiment.
+    if decision_document.get("action") not in _REPAIR_PROMPT_ACTIONS:
+        raise PromptContractError("recovery decision is not a code repair action")
     if decision_document.get("run_id", run_id) != run_id or decision_document.get(
         "experiment_id", experiment_id
     ) != experiment_id:

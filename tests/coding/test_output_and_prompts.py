@@ -250,7 +250,7 @@ def test_repair_prompt_preserves_original_hypothesis_and_exact_failure() -> None
     assert "confirm that the proposed fix explains the supplied evidence" in prompt
     assert '"max_provider_tokens": 40' in prompt
 
-    with pytest.raises(PromptContractError, match="not a trae_repair"):
+    with pytest.raises(PromptContractError, match="not a code repair action"):
         build_repair_prompt(
             context,
             {"action": "retry_same_commit"},
@@ -259,6 +259,21 @@ def test_repair_prompt_preserves_original_hypothesis_and_exact_failure() -> None
             wall_time_limit_seconds=8,
             allowed_command_ids=("candidate_smoke",),
         )
+
+    # restart_from_trusted_parent recodes from the parent commit instead of
+    # editing the rejected candidate, but it is the same bounded repair task
+    # and builds its prompt here. Rejecting it turned every clean restart into
+    # CODING_WORKER_FAILURE and abandoned the experiment.
+    restart_prompt = build_repair_prompt(
+        context,
+        {"action": "restart_from_trusted_parent"},
+        step_limit=3,
+        token_limit=40,
+        wall_time_limit_seconds=8,
+        allowed_command_ids=("candidate_smoke",),
+    )
+    assert "Preserve the original hypothesis" in restart_prompt
+    assert "NameError in candidate" in restart_prompt
 
 
 def test_repair_prompt_records_an_unbounded_cumulative_token_limit() -> None:
