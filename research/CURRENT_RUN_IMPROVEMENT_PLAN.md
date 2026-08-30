@@ -93,14 +93,18 @@ Apply these rules from top to bottom. The first matching rule wins.
 | 1 | Trust integrity is `compromised`, or verdict is `suspicious` | Quarantine the result; investigate data, evaluator, or leakage. | No |
 | 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Verify that the patch affected logits, gradients, and intended rows. | No |
 | 3 | Stability is `unstable` | Confirm seeds or simplify/regularize the same mechanism. | No new family |
-| 4 | Fidelity is `smoke` or `proxy` | Promote only if deterministic promotion rules pass. | No parent promotion |
+| 4 | Fidelity is `smoke` or `proxy` | Promote a clear proxy improvement, or one clean result within the symmetric proxy noise band, to one bounded full-fidelity check. Prune only a regression beyond that band. | No parent promotion |
 | 5 | Full public result is trusted and improves the parent by more than `epsilon` | Accept; confirm once if stability is only `single_seed`, then deepen the same family. | Yes |
-| 6 | Full public result changes predictions meaningfully but gain is within `[-epsilon, +epsilon]` | Treat as inconclusive/noise; record the result and move to the next independent mechanism. | Yes |
+| 6 | Full public result changes predictions meaningfully but gain is within `[-epsilon, +epsilon]` | If the confirmed seed mean is directionally positive by more than two standard errors, retain it as a research parent but not validation best; otherwise treat it as inconclusive/noise. Move to the next independent mechanism from the best eligible parent. | Yes |
 | 7 | Full public result is trusted and worse than `-epsilon` | Treat the tested mechanism as falsified under its stated conditions; do not tune it indefinitely. | Yes |
 
 Only a full, verified, public-validation result with `trust.verdict = accepted`
-and `trust.integrity = clean` may create a future parent. A positive proxy score
-can justify more evaluation, but never a new trusted branch.
+and `trust.integrity = clean` may create a future parent. A clean proxy score
+that improves clearly or remains within the symmetric noise band can justify
+one full-fidelity evaluation, but never a new trusted branch by itself.
+Confirmed positive direction below the Ladder threshold may guide DFS as a
+parent, but `best_eligible` remains false until the candidate clears the full
+`eta` threshold against the current validation best.
 
 ### Hard prune, soft prune, and portfolio retention
 

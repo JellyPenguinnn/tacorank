@@ -30,6 +30,17 @@ Evaluation-driven family selection must apply the mandatory decision order in
 policy. Invalid, suspicious, no-op, unstable, and proxy-only results never
 become positive research rewards or parent nodes.
 
+The proxy gate uses a symmetric `0.0016` primary-score noise band. Clean proxy
+results inside the band receive one full-fidelity evaluation instead of being
+pruned on the sign of a tiny delta. Results below `-0.0016` remain hard proxy
+regressions; proxy results never become parents or best checkpoints directly.
+
+Full-fidelity branching and validation-best selection use separate gates. A
+clean three-seed mean that is positive by more than two standard errors may be
+an accepted DFS parent even when its gain is below the `0.0016` Ladder floor.
+It remains ineligible for validation-best selection until it clears the full
+Ladder threshold against the current best.
+
 ## Search policy
 
 The core policy is deterministic, score-guided AIDE-style depth-first search:

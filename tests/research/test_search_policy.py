@@ -561,6 +561,28 @@ def test_playbook_moves_meaningful_pairwise_no_gain_to_history(planner_context):
     assert choice.method_card_id == "temporal_history_compact"
 
 
+def test_directionally_positive_parent_prevents_premature_search_stop(
+    planner_context,
+):
+    latest = make_summary(
+        "exp_0006",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        score=0.6022787269104787,
+        parent_eligible=True,
+        parent_delta=0.0008099705575197,
+        prediction_change=0.95,
+        method_card_ids=["objective_listwise_user_softmax"],
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
+    assert choice.parent.experiment_id == "exp_0006"
+    assert choice.family != "objective"
+
+
 def test_playbook_deepens_trusted_improvement(planner_context):
     latest = make_summary(
         "exp_0001",
