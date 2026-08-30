@@ -30,7 +30,7 @@ def make_spec(context, choice):
         "context_id": context.context_id,
         "hypothesis": "Pairwise loss aligns training with ranking metrics.",
         "family": choice.family,
-        "change_summary": "Replace pointwise loss with pairwise BPR.",
+        "change_summary": "Add the policy-selected bounded mechanism.",
         "expected_mechanism": "Improve within-user ordering.",
         "success_criteria": type("Criteria", (), {"full_parent_delta_min": 0.002})(),
         "falsification_condition": "No stable improvement.",
@@ -44,7 +44,7 @@ def make_spec(context, choice):
                 "cost_tier": "medium",
             },
         )(),
-        "method_card_ids": ["objective_pairwise_bpr"],
+        "method_card_ids": [choice.method_card_id],
         "evidence_event_ids": ["evt_000001"],
     }.items():
         setattr(spec, name, value)
@@ -66,6 +66,44 @@ def test_planner_returns_one_valid_proposal(planner_context):
     assert result["action"] == "propose"
     assert result["spec"].experiment_id == "exp_0001"
     assert len(provider.requests) == 1
+
+
+def test_parallel_workers_receive_distinct_method_cards(planner_context):
+    contract = type("Contract", (), vars(planner_context.contract_summary))()
+    contract.allowed_families = [
+        *contract.allowed_families,
+        "features",
+        "sampling",
+    ]
+    context_values = vars(planner_context).copy()
+    context_values["contract_summary"] = contract
+    context = type("Context", (), context_values)()
+    provider = MockResearchProvider(lambda request: make_spec(context, request.policy_choice))
+    planner = ResearchPlanner(
+        provider,
+        output_factory=output_factory,
+        input_token_limit=2000,
+        output_token_limit=1000,
+    )
+
+    async def propose_all():
+        capacity = planner.parallel_direction_capacity(context)
+        outputs = await asyncio.gather(
+            *(
+                planner.propose_parallel_direction(context, index, capacity)
+                for index in range(capacity)
+            )
+        )
+        return capacity, outputs
+
+    capacity, outputs = asyncio.run(propose_all())
+    method_ids = [
+        request.policy_choice.method_card_id for request in provider.requests
+    ]
+
+    assert capacity >= 7
+    assert len(outputs) == capacity
+    assert len(method_ids) == len(set(method_ids))
 
 
 def test_planner_returns_blocked_when_no_parent(planner_context):
@@ -119,3 +157,31 @@ def test_guardrail_blocks_never_call_provider(
     assert result["action"] == "blocked"
     assert result["reason_code"] == reason_code
     assert provider.requests == []
+
+
+def test_suspicious_result_is_quarantined_without_stopping_planner(
+    planner_context,
+):
+    planner_context.family_history = [
+        make_summary(
+            "exp_0001",
+            parent_experiment_id="exp_0000",
+            family="objective",
+            parent_eligible=False,
+            trust_verdict="suspicious",
+            integrity="inconclusive",
+            method_card_ids=["objective_pairwise_bpr"],
+        )
+    ]
+    provider = MockResearchProvider(
+        lambda request: make_spec(planner_context, request.policy_choice)
+    )
+    planner = ResearchPlanner(provider, output_factory=output_factory)
+
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result["action"] == "propose"
+    assert result["reason_code"] == "SUSPICIOUS_RESULT_QUARANTINED"
+    assert result["spec"].family == "temporal_history"
+    assert result["spec"].parent_experiment_id == "exp_0000"
+    assert len(provider.requests) == 1

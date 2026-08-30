@@ -782,6 +782,31 @@ class AdapterFailureResult(StrictModel):
         return self
 
 
+class PlanningFailureResult(StrictModel):
+    """A run-level failure raised before a new experiment exists.
+
+    Planning failures must not be attributed to the previously completed
+    experiment.  The planner context is the durable identity for this adapter
+    boundary.
+    """
+
+    run_id: NonEmptyStr
+    context_id: NonEmptyStr
+    failure_stage: Literal["planner"] = "planner"
+    error_class: NonEmptyStr
+    error_fingerprint: str
+    error_summary: NonEmptyStr
+    diagnostic_artifacts: List[ArtifactRef] = Field(default_factory=list)
+    resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
+
+    @field_validator("error_fingerprint")
+    @classmethod
+    def validate_error_fingerprint(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("error_fingerprint must be lowercase sha256")
+        return value
+
+
 class OutputCheckResult(StrictModel):
     run_id: NonEmptyStr
     experiment_id: NonEmptyStr
@@ -1517,6 +1542,7 @@ class CoderContext(ContextDocument):
     active_lessons: List[Dict[str, Any]] = Field(default_factory=list)
     coding_invariants: List[NonEmptyStr] = Field(default_factory=list)
     prior_result_summaries: List[CoderPriorResultSummary] = Field(default_factory=list)
+    component_patches: List[Dict[str, Any]] = Field(default_factory=list)
     owner_retry_error_summary: Optional[NonEmptyStr] = None
     owner_retry_instructions: Optional[NonEmptyStr] = None
     step_limit: int = Field(gt=0)
@@ -1593,6 +1619,7 @@ class EventType(str, Enum):
     BASELINE_VERIFIED = "baseline.verified"
     CONTEXT_CREATED = "context.created"
     PLANNER_RECOMMENDED = "planner.recommended"
+    PLANNING_FAILED = "planning.failed"
     EXPERIMENT_PROPOSED = "experiment.proposed"
     PATCH_CREATED = "patch.created"
     PATCH_CHECKED = "patch.checked"
@@ -1618,6 +1645,13 @@ class RunStartedPayload(StrictModel):
     contract_sha256: str
     protected_paths_sha256: str
     max_experiments: int = Field(gt=0)
+    parallel_directions: int = Field(default=1, gt=0, le=7)
+    synthesize_parallel_improvements: bool = True
+    deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
+    research_planning_max_attempts: int = Field(default=1, gt=0, le=3)
+    research_planning_retry_backoff_seconds: float = Field(
+        default=0.0, ge=0.0, le=30.0
+    )
     wall_time_limit_seconds: int = Field(gt=0)
     token_limit: Optional[int] = Field(default=None, gt=0)
     gpu_seconds_limit: Optional[int] = Field(default=None, gt=0)
@@ -1680,6 +1714,11 @@ class PlannerRecommendedPayload(StrictModel):
         if self.output.action == PlannerAction.PROPOSE:
             raise ValueError("planner.recommended cannot contain a proposal")
         return self
+
+
+class PlanningFailedPayload(StrictModel):
+    type: Literal["planning.failed"] = "planning.failed"
+    result: PlanningFailureResult
 
 
 class ExperimentProposedPayload(StrictModel):
@@ -1793,6 +1832,7 @@ EventPayload = Annotated[
         BaselineVerifiedPayload,
         ContextCreatedPayload,
         PlannerRecommendedPayload,
+        PlanningFailedPayload,
         ExperimentProposedPayload,
         PatchCreatedPayload,
         PatchCheckedPayload,
@@ -1820,6 +1860,7 @@ EVENT_PAYLOAD_MODELS: Mapping[EventType, Type[StrictModel]] = {
     EventType.BASELINE_VERIFIED: BaselineVerifiedPayload,
     EventType.CONTEXT_CREATED: ContextCreatedPayload,
     EventType.PLANNER_RECOMMENDED: PlannerRecommendedPayload,
+    EventType.PLANNING_FAILED: PlanningFailedPayload,
     EventType.EXPERIMENT_PROPOSED: ExperimentProposedPayload,
     EventType.PATCH_CREATED: PatchCreatedPayload,
     EventType.PATCH_CHECKED: PatchCheckedPayload,

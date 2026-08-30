@@ -82,6 +82,7 @@ DISK_QUOTA_ERROR_CODES = frozenset(
         "ENOSPC",
     }
 )
+EVIDENCE_LIMIT = 800
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,18 @@ def _violation_codes(result: Any) -> set[str]:
         for violation in (getattr(result, "violations", ()) or ())
         if getattr(violation, "code", None)
     }
+
+
+def _bounded_evidence(value: Any) -> str:
+    """Retain both classification context and the terminal exception detail."""
+
+    normalized = normalize_text(str(value))
+    if len(normalized) <= EVIDENCE_LIMIT:
+        return normalized
+    separator = " ... "
+    head = 300
+    tail = EVIDENCE_LIMIT - head - len(separator)
+    return normalized[:head] + separator + normalized[-tail:]
 
 
 def classify_failure(result: Any) -> FailureClassification:
@@ -314,7 +327,7 @@ def classify_failure(result: Any) -> FailureClassification:
         failure_class=failure_class,
         reason_code=reason,
         fingerprint=fingerprint_result(result),
-        evidence=normalize_text(str(evidence))[:800],
+        evidence=_bounded_evidence(evidence),
         deliberate_integrity_violation=deliberate,
         made_progress=made_progress,
         transient_coding_failure=transient_coding,

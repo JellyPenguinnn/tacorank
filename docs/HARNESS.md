@@ -35,7 +35,7 @@ ledger-derived research feedback -> DeepSeek researcher -> ResearchProposal
 clean reproduce validation best -> test inference -> Gate B -> submission check
 ```
 
-`Harness.run_until_stopped()` executes one experiment at a time. Each terminal decision and lesson is appended before the next planner context is built, so later proposals consume durable evidence rather than in-memory messages. `Harness.run_to_completion()` adds finalization after a frozen convergence, experiment, wall-time, token, GPU, integrity, or no-legal-proposal stop.
+`Harness.run_until_stopped()` uses the configured round width. Production requests seven directions concurrently from one planner snapshot and retries typed transient provider failures once under the frozen planning timeout. The controller atomically seals the complete distinct batch before fan-out; each direction then gets its own Trae worktree, Gate A receipt, execution seal, Gate B result, protected evaluation, and terminal decision. Protected public-query indices are serialized at the evaluator boundary even though coding and execution are concurrent. When two or more round members independently improve the incumbent, a synthesis-capable research and coding pass receives their verified component patches, creates a fresh candidate from the strongest member, and traverses the same gates and evaluation ladder. Only then does the next planner snapshot begin. `Harness.run_to_completion()` adds finalization after a frozen convergence, experiment, wall-time, token, GPU, integrity, or no-legal-proposal stop.
 
 Confirmation seeds are additional executions of the same experiment and commit. They are fully recorded and charged to resource totals, but only the terminal full-fidelity experiment decision consumes one convergence-patience slot. The default frozen rule is no improvement greater than `0.002` for three consecutive terminal full iterations.
 
@@ -61,6 +61,11 @@ durable fact. `PlannerContext.active_lessons` contains only active `lesson.recor
 events selected by the deterministic retrieval policy. Hidden-final evaluations enter
 neither layer, and `lessons/*.md` remains a generated human-readable projection rather
 than a planner input or source of truth.
+
+Suspicious non-compromised experiments are quarantined as non-reward evidence
+and cannot become parents, refinements, or ensemble members. The search policy
+continues from a verified eligible frontier parent when an independent legal
+method remains. Compromised integrity still fails closed.
 
 ## Experiment lifecycle and gates
 

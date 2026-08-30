@@ -62,6 +62,16 @@ def response(value, *, finish_reason="stop", prompt_tokens=101, completion_token
     }
 
 
+def empty_response(*, prompt_tokens=101, completion_tokens=0):
+    value = response(
+        {},
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+    value["choices"][0]["message"]["content"] = ""
+    return value
+
+
 def output_factory(action, spec, reason_code, reason, supporting_event_ids):
     return {
         "action": action,
@@ -82,6 +92,27 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     planner_context.baseline.diagnostic_metrics = {
         "user_rankable_fraction": 1.0,
     }
+    prior = make_summary(
+        experiment_id="exp_0001",
+        family="temporal_history",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        trust_verdict="negative",
+        parent_delta=-0.00007,
+        prediction_change=0.0126,
+    )
+    prior.failure_hypotheses = [
+        "Concentrated movement: a small user cohort carries most score movement."
+    ]
+    prior.diagnostic_best_slice = "popularity_rank.cold"
+    prior.diagnostic_worst_slice = "popularity_rank.hot"
+    prior.diagnostic_metrics = {
+        "gain_concentration_top10pct": 1.0,
+        "best_slice_delta": 0.00025,
+        "worst_slice_delta": -0.00021,
+    }
+    planner_context.family_history = [prior]
     planner_context.active_lessons = [
         {
             "lesson_id": "lesson_001",
@@ -116,7 +147,7 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
 
     assert result["run_id"] == planner_context.run_id
     assert result["context_id"] == planner_context.context_id
-    assert result["experiment_id"] == "exp_0001"
+    assert result["experiment_id"] == "exp_0002"
     assert result["parent_experiment_id"] == choice.parent.experiment_id
     assert result["parent_commit_sha"] == choice.parent.parent_commit_sha
     assert result["family"] == choice.family
@@ -145,6 +176,11 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
         "train_rows": 4,
         "score_rows": 2,
     }
+    prior_prompt = prompt_document["context"]["family_history"][0]
+    assert prior_prompt["failure_hypotheses"] == prior.failure_hypotheses
+    assert prior_prompt["diagnostic_best_slice"] == "popularity_rank.cold"
+    assert prior_prompt["diagnostic_worst_slice"] == "popularity_rank.hot"
+    assert prior_prompt["diagnostic_metrics"]["gain_concentration_top10pct"] == 1.0
     assert prompt_document["context"]["active_lessons"] == [
         {
             "lesson_id": "lesson_001",
@@ -160,6 +196,7 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     ]
     assert "source_commit_shas" not in serialized_prompt
     assert "read-only aggregate" in payload["messages"][0]["content"]
+    assert "do not merely increase residual magnitude" in payload["messages"][0]["content"]
     assert all(
         "implementation_targets" not in card
         for card in prompt_document["context"]["method_cards"]
@@ -316,6 +353,42 @@ def test_research_planner_repairs_code_specific_narrative(planner_context):
     ]
     assert "solution/candidate.py" not in json.dumps(repair_prompt)
     assert "Remove repository paths" in repair_prompt["repair"]["instruction"]
+
+
+def test_research_planner_retries_empty_repair_completion(planner_context):
+    responses = [
+        response(candidate(change_summary="Edit solution/candidate.py.")),
+        empty_response(prompt_tokens=90),
+        response(
+            candidate(
+                change_summary=(
+                    "Compare positive/negative preference ordering for user/item "
+                    "ranking."
+                )
+            )
+        ),
+    ]
+    requests = []
+
+    def transport(url, headers, payload, timeout):
+        requests.append(payload)
+        return responses.pop(0)
+
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    planner = ResearchPlanner(
+        provider,
+        output_factory=output_factory,
+        input_token_limit=2_000,
+        output_token_limit=1_000,
+    )
+
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result["action"] == "propose"
+    assert len(requests) == 3
+    assert requests[1]["thinking"] == {"type": "enabled"}
+    assert requests[2]["thinking"] == {"type": "disabled"}
+    assert "unusable" in requests[2]["messages"][0]["content"]
 
 
 def test_deepseek_provider_rejects_truncated_completion(planner_context):

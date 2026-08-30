@@ -18,6 +18,7 @@ from tacorank.evaluation.types import EvaluationResult
 from ..memory.projections import project
 from ..memory.retrieval import experiment_events
 from ..orchestrator.state import ExperimentStatus
+from ..orchestrator.convergence import is_finalizable_stop_reason
 from ..run_layout import RunLayout
 from ..schemas import (
     Event,
@@ -158,6 +159,8 @@ def _phase_after_event(
         )
     if event_type == "adapter.failed":
         return "recovery"
+    if event_type == "planning.failed":
+        return "planning_failure"
     if event_type == "recovery.decided":
         if payload.decision.action in (
             RecoveryAction.ABANDON,
@@ -204,12 +207,27 @@ def _phase_after_event(
             else "planning"
         )
     if event_type == "run.stopped":
-        return "stopped"
+        return (
+            "stopped"
+            if is_finalizable_stop_reason(payload.reason_code)
+            else "failed"
+        )
     if event_type == "final.selected":
         return "submission"
     if event_type == "submission.checked":
         return "finalized" if payload.accepted else "failed"
     return previous
+
+
+def _event_experiment_id(event: Event) -> Optional[str]:
+    payload = event.payload
+    for name in ("spec", "candidate", "result", "request", "decision"):
+        value = getattr(payload, name, None)
+        experiment_id = getattr(value, "experiment_id", None)
+        if experiment_id is not None:
+            return experiment_id
+    context = getattr(payload, "context", None)
+    return getattr(context, "experiment_id", None)
 
 
 def _configured_stage_timeout(
@@ -259,8 +277,18 @@ def runtime_status(events: Sequence[Event]) -> dict:
         if last_event is not None and stage_started_at is not None
         else 0.0
     )
+    current_experiment_id = state.active_experiment_id
+    if current_experiment_id is None:
+        current_experiment_id = next(
+            (
+                experiment_id
+                for event in reversed(events)
+                if (experiment_id := _event_experiment_id(event)) is not None
+            ),
+            None,
+        )
     return {
-        "experiment_id": state.active_experiment_id,
+        "experiment_id": current_experiment_id,
         "phase": state.phase,
         "attempt": state.active_attempt,
         "fidelity": (
@@ -367,7 +395,6 @@ def _state_payload(events: Sequence[Event]) -> dict:
     state = project(events)
     runtime = runtime_status(events)
     active_jobs = []
-    node = state.current_experiment
     terminal = {
         ExperimentStatus.ACCEPTED,
         ExperimentStatus.REJECTED,
@@ -375,38 +402,59 @@ def _state_payload(events: Sequence[Event]) -> dict:
         ExperimentStatus.INVALID,
         ExperimentStatus.NO_OP,
     }
-    if (
-        node is not None
-        and node.status not in terminal
-        and state.active_attempt is not None
-        and state.status.value == "running"
-    ):
-        active_jobs.append(
-            {
-                # Phase A remains sequential.  This deterministic projection is
-                # replaced by ledger-owned job IDs when parallel scheduling lands.
-                "job_id": "job_%s_attempt_%03d"
-                % (node.experiment_id, state.active_attempt),
-                "experiment_id": node.experiment_id,
-                "attempt": state.active_attempt,
-                "phase": state.phase,
-                "fidelity": (
-                    state.active_fidelity.value if state.active_fidelity else None
+    if state.status.value == "running":
+        stage_by_status = {
+            ExperimentStatus.PROPOSED: "coding",
+            ExperimentStatus.PATCH_READY: "patch_gate",
+            ExperimentStatus.READY_TO_RUN: "execution",
+            ExperimentStatus.RUNNING: "running",
+            ExperimentStatus.OUTPUT_READY: "output_gate",
+            ExperimentStatus.OUTPUT_VERIFIED: "evaluation",
+            ExperimentStatus.EVALUATED: "decision",
+            ExperimentStatus.RECOVERING: "recovery",
+        }
+        for node in state.experiments.values():
+            if node.status in terminal:
+                continue
+            latest = next(
+                (
+                    event
+                    for event in reversed(events)
+                    if _event_experiment_id(event) == node.experiment_id
                 ),
-                "worker": None,
-                "identity_source": "derived_sequential",
-                "stage_started_at": runtime["stage_started_at"],
-                "configured_timeout_seconds": runtime[
-                    "configured_timeout_seconds"
-                ],
-                "estimated_deadline": runtime["estimated_deadline"],
-            }
-        )
+                None,
+            )
+            attempt = max(1, node.attempt_count)
+            phase = stage_by_status.get(node.status, "planning")
+            started_at = latest.timestamp if latest is not None else None
+            active_jobs.append(
+                {
+                    "job_id": "job_%s_attempt_%03d"
+                    % (node.experiment_id, attempt),
+                    "experiment_id": node.experiment_id,
+                    "attempt": attempt,
+                    "phase": phase,
+                    "fidelity": (
+                        node.highest_fidelity.value
+                        if node.highest_fidelity
+                        else None
+                    ),
+                    "worker": "independent_lane",
+                    "identity_source": "ledger_experiment",
+                    "stage_started_at": (
+                        _timestamp(started_at) if started_at else None
+                    ),
+                    "configured_timeout_seconds": None,
+                    "estimated_deadline": None,
+                }
+            )
     totals = state.resource_totals
     return {
         "schema_version": "1.0",
         "run_id": state.run_id,
-        "execution_mode": "sequential",
+        "execution_mode": (
+            "parallel_rounds" if state.parallel_directions > 1 else "sequential"
+        ),
         "derived_from": {
             "event_id": state.last_event_id,
             "event_hash": state.last_event_hash,
@@ -561,6 +609,11 @@ def _render_lesson(lesson_id: str, record: dict) -> str:
 
 def render_summary(events: Sequence[Event]) -> str:
     state = project(events)
+    planning_failures = [
+        event.payload.result
+        for event in events
+        if event.payload.type == "planning.failed"
+    ]
     adapter_failures = [
         event.payload.result
         for event in events
@@ -631,6 +684,7 @@ def render_summary(events: Sequence[Event]) -> str:
             "- GPU-hours: %.6f" % totals.gpu_hours,
             "- Manual interventions: %d" % state.manual_intervention_count,
             "- Adapter failures: %d (%s)" % (len(adapter_failures), failure_text),
+            "- Planning failures: %d" % len(planning_failures),
             "",
             "Ledger head: `%s` / `%s`" % (state.last_event_id, state.last_event_hash),
         )

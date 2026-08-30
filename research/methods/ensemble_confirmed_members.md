@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"ensemble_confirmed_members","family":"ensemble","status":"candidate","tags":["ensemble","rank_average"],"cost_tier":"low","prerequisites":["two_confirmed_clean_members"],"allowed_data":["verified_predictions"],"prohibition_conditions":["provisional_or_unreproducible_member"],"sources":[]}
+{"schema_version":"1.0","method_id":"ensemble_confirmed_members","family":"ensemble","status":"candidate","tags":["ensemble","rank_average"],"cost_tier":"low","prerequisites":["two_confirmed_clean_members"],"allowed_data":["verified_predictions"],"prohibition_conditions":["provisional_or_unreproducible_member"],"implementation_targets":["solution/candidate.py","solution/inference.py"],"sources":[]}
 ```
 
 ## Mechanism

@@ -27,6 +27,7 @@ from .coding import (
     TRAE_STATELESS_DOCKER_MARKER,
     hash_trae_runtime_package,
 )
+from .config import PRODUCTION_TARGET_INTERFACE_EXCERPTS
 from .docker_host import normalize_local_docker_host
 from .evaluation.proxy import split_validation_indices
 
@@ -45,6 +46,16 @@ RAW_REQUIRED = (
 TRAE_ONLY_DATA_BOUNDARY_SHA256 = hashlib.sha256(
     b"tacorank-trae-only-no-dataset-v1"
 ).hexdigest()
+RUNTIME_REQUIRED_IMPORTS = (
+    "benchmarks.kuairand_pure.pipeline",
+    "certifi",
+    "numpy",
+    "pandas",
+    "pydantic",
+    "tacorank",
+    "yaml",
+)
+RUNTIME_SOURCE_IMPORT_ROOTS = ("solution",)
 
 
 class DeploymentError(RuntimeError):
@@ -95,34 +106,13 @@ def setup_trae_deployment(
             "candidate_proxy",
             "candidate_full",
         ],
-        "target_interface_excerpts": {
-            "candidate": (
-                "def run(invocation: PipelineInvocation) -> None; read only "
-                "invocation.input_root and write exactly invocation.output_path as "
-                "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
-                "invocation.seed; return None. train.csv has the exact columns "
-                "date,user_id,video_id,author_id,tab,duration_ms,long_view, where "
-                "date is an integer YYYYMMDD value; "
-                "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
-                "and never exposes long_view. fm_baseline_predictions.csv is the "
-                "setup-verified official FM score for every score.csv row. These are "
-                "unconstrained real-valued ranking scores, not probabilities. Never "
-                "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
-                "parent-plus-residual result. Preserve it as the strong parent and "
-                "add only a bounded train-only residual on the original score scale "
-                "unless the approved hypothesis explicitly replaces the parent. "
-                "Training dates strictly precede score dates. Preserve contiguous "
-                "score row_id order, duplicate rows, finite deterministic scores, "
-                "and exclusive output creation. The production loader imports "
-                "solution.candidate:run. Keep the implementation in candidate.py "
-                "unless every helper path and its import pattern are explicitly "
-                "authorized by the ExperimentSpec target_files."
-            )
-        },
+
+        "target_interface_excerpts": dict(PRODUCTION_TARGET_INTERFACE_EXCERPTS),
         "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
         "data_boundary_sha256": TRAE_ONLY_DATA_BOUNDARY_SHA256,
+        "allowed_import_roots": list(assets["allowed_import_roots"]),
         "trae": _trae_payload(
             runtime=runtime,
             runtime_identity=assets["runtime_identity"],
@@ -182,6 +172,7 @@ def setup_live_deployment(
     assets = _prepare_trae_runtime(root, runtime, python, docker)
     image = str(assets["image"])
     image_environment_sha256 = str(assets["image_environment_sha256"])
+    allowed_import_roots = list(assets["allowed_import_roots"])
     runtime_identity = assets["runtime_identity"]
     generated_data = _prepare_data(root, deployment, data)
 
@@ -251,7 +242,7 @@ def setup_live_deployment(
         "protected_columns": ["label"],
         "hidden_path_tokens": ["hidden_labels", "final_labels", "test_labels"],
         "future_column_patterns": ["(?:^|_)future(?:_|$)"],
-        "allowed_import_roots": None,
+        "allowed_import_roots": allowed_import_roots,
         "allowed_capability_imports": [],
         "allowed_dependency_changes": [],
     }
@@ -270,6 +261,8 @@ def setup_live_deployment(
         "evaluator_sha256": evaluator_hash,
         "baseline_commit_sha": baseline_commit,
         "max_experiments": 50,
+        "parallel_directions": 7,
+        "synthesize_parallel_improvements": True,
         "wall_time_limit_seconds": 21600,
         "convergence_epsilon": 0.002,
         "convergence_patience": 3,
@@ -279,6 +272,7 @@ def setup_live_deployment(
         "max_confirmation_attempts": 2,
         "seed_schedule": [11, 22, 33, 44, 55],
         "context_token_limit": 6000,
+        "synthesis_context_token_limit": 16000,
         "adapter_mode": "live",
         "live_adapter_config_sha256": _sha256_file(live_path),
         "editable_roots": ["solution"],
@@ -314,35 +308,7 @@ def setup_live_deployment(
         "active_research_prohibitions": [],
         "prediction_change_no_op_threshold": 0.001,
         "max_single_score_fraction": 0.5,
-        "target_interface_excerpts": {
-            "solution/candidate.py": (
-                "Required candidate entrypoint: def run(invocation: "
-                "PipelineInvocation) -> None; include this file in target_files; read only "
-                "invocation.input_root and write exactly invocation.output_path as "
-                "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
-                "invocation.seed; return None. train.csv has the exact columns "
-                "date,user_id,video_id,author_id,tab,duration_ms,long_view, where "
-                "date is an integer YYYYMMDD value; "
-                "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
-                "and never exposes long_view. fm_baseline_predictions.csv contains "
-                "the setup-verified official FM score aligned one-to-one with "
-                "score.csv; fm_baseline_predictions.sha256 authenticates it. The "
-                "baseline candidate reproduces these bytes exactly. FM scores are "
-                "unconstrained real-valued ranking scores, not probabilities. Never "
-                "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
-                "parent-plus-residual result. Keep this FM score as the strong parent "
-                "and learn one bounded train-only residual on the original score scale "
-                "unless the approved ExperimentSpec explicitly tests replacement. "
-                "Do not reinterpret duration_ms as watch time: it is video duration. "
-                "Training dates strictly precede score dates. Preserve contiguous "
-                "score row_id order, duplicate rows, finite deterministic scores, "
-                "and exclusive output creation. Use all training rows or report a "
-                "deterministic representative sampling fraction in the code. The "
-                "production loader imports solution.candidate:run; keep the "
-                "implementation in candidate.py unless every helper path and import "
-                "pattern are explicitly authorized by target_files."
-            )
-        },
+        "target_interface_excerpts": dict(PRODUCTION_TARGET_INTERFACE_EXCERPTS),
         "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
@@ -350,7 +316,9 @@ def setup_live_deployment(
         "deepseek_model": DEEPSEEK_MODEL,
         "deepseek_base_url": DEEPSEEK_BASE_URL,
         "deepseek_api_key_env": "DEEPSEEK_API_KEY",
-        "deepseek_timeout_seconds": 120,
+        "deepseek_timeout_seconds": 300,
+        "research_planning_max_attempts": 2,
+        "research_planning_retry_backoff_seconds": 1.0,
         "deepseek_max_output_tokens": 8192,
         "deepseek_thinking_enabled": True,
         "deepseek_reasoning_effort": "high",
@@ -378,7 +346,9 @@ def _prepare_trae_runtime(
     _patch_trae_cross_platform_docker_exec(runtime)
     _patch_trae_deepseek_reasoning(runtime)
     _patch_trae_docker_edit_tool(runtime)
-    image, image_environment_sha256 = _build_runtime_image(root, docker)
+    image, image_environment_sha256, allowed_import_roots = _build_runtime_image(
+        root, docker
+    )
     _install_trae_tools(runtime, docker, image, root)
     runtime_identity = _trae_identity(runtime)
     trae_yaml = runtime / "trae-agent.yaml"
@@ -387,6 +357,7 @@ def _prepare_trae_runtime(
     return {
         "image": image,
         "image_environment_sha256": image_environment_sha256,
+        "allowed_import_roots": allowed_import_roots,
         "runtime_identity": runtime_identity,
         "trae_yaml": trae_yaml,
     }
@@ -1313,7 +1284,9 @@ def _trae_identity(runtime: Path) -> Mapping[str, Path]:
     }
 
 
-def _build_runtime_image(root: Path, docker: Path) -> Tuple[str, str]:
+def _build_runtime_image(
+    root: Path, docker: Path
+) -> Tuple[str, str, Tuple[str, ...]]:
     commit = _git_text(root, ("rev-parse", "--short=12", "HEAD"))
     tag = "tacorank-runtime:" + commit
     platform = _run_output(
@@ -1368,7 +1341,76 @@ def _build_runtime_image(root: Path, docker: Path) -> Tuple[str, str]:
     payload = json.dumps(environment, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
-    return image_id, hashlib.sha256(payload).hexdigest()
+    allowed_import_roots = _runtime_image_import_roots(root, docker, image_id)
+    return image_id, hashlib.sha256(payload).hexdigest(), allowed_import_roots
+
+
+def _runtime_image_import_roots(
+    root: Path, docker: Path, image: str
+) -> Tuple[str, ...]:
+    """Verify core runtime imports and inventory exact top-level image modules."""
+
+    required = json.dumps(RUNTIME_REQUIRED_IMPORTS, separators=(",", ":"))
+    script = (
+        "import importlib,json,pkgutil,sys;"
+        "required=" + required + ";"
+        "[importlib.import_module(name) for name in required];"
+        "roots=set(sys.builtin_module_names);"
+        "roots.update(getattr(sys,'stdlib_module_names',()));"
+        "roots.update(item.name for item in pkgutil.iter_modules());"
+        "print(json.dumps(sorted(roots),separators=(',',':')))"
+    )
+    output = _run_output(
+        (
+            str(docker),
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--entrypoint",
+            "/usr/local/bin/python3",
+            image,
+            "-I",
+            "-c",
+            script,
+        ),
+        cwd=root,
+        label="Docker runtime import verification",
+    )
+    try:
+        discovered = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise DeploymentError("Docker runtime import inventory is malformed") from error
+    if (
+        not isinstance(discovered, list)
+        or not discovered
+        or len(discovered) > 10_000
+        or not all(
+            isinstance(value, str)
+            and len(value) <= 200
+            and "\x00" not in value
+            for value in discovered
+        )
+        or len(discovered) != len(set(discovered))
+    ):
+        raise DeploymentError("Docker runtime import inventory is malformed")
+    # ``pkgutil`` may report interpreter-internal filenames such as
+    # ``_sysconfigdata__linux_aarch64-linux-gnu``. They are loadable through
+    # importlib but cannot appear as an AST import root, so omit them from the
+    # Gate A allowlist instead of rejecting an otherwise valid runtime image.
+    roots = {value for value in discovered if value.isidentifier()}
+    roots.update(RUNTIME_SOURCE_IMPORT_ROOTS)
+    required_roots = {name.split(".", 1)[0] for name in RUNTIME_REQUIRED_IMPORTS}
+    if not required_roots.issubset(roots):
+        raise DeploymentError("Docker runtime import inventory is incomplete")
+    return tuple(sorted(roots))
 
 
 def _discover_docker_host(docker: Path, root: Path) -> str:

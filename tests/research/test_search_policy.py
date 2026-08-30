@@ -18,6 +18,81 @@ def test_policy_starts_score_guided_depth_first_from_baseline(planner_context):
     assert choice.method_card_id == "objective_pairwise_bpr"
 
 
+def test_parallel_direction_is_indexed_and_legal(planner_context):
+    choice = SearchPolicy().choose_parallel_direction(planner_context, 0, 7)
+
+    assert choice.action == "propose"
+    assert choice.phase == "parallel_round"
+    assert choice.reason_code == "PARALLEL_DIRECTION_1_OF_7"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.method_card_id == "objective_pairwise_bpr"
+
+
+def test_parallel_directions_use_distinct_eligible_method_cards(planner_context):
+    policy = SearchPolicy()
+    contract = SimpleNamespace(**vars(planner_context.contract_summary))
+    contract.allowed_families = [
+        *contract.allowed_families,
+        "features",
+        "sampling",
+    ]
+    context_values = vars(planner_context).copy()
+    context_values["contract_summary"] = contract
+    context = SimpleNamespace(**context_values)
+    capacity = policy.parallel_direction_capacity(context)
+    choices = [
+        policy.choose_parallel_direction(context, index, capacity)
+        for index in range(capacity)
+    ]
+    identities = {
+        (choice.parent.experiment_id, choice.family, choice.method_card_id)
+        for choice in choices
+    }
+
+    assert capacity >= 7
+    assert len(identities) == capacity
+
+
+def test_synthesis_uses_strongest_confirmed_member_and_all_others(
+    planner_context,
+):
+    first = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="objective",
+        score=0.61,
+        parent_eligible=True,
+    )
+    second = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0000",
+        commit_sha="c" * 40,
+        family="model",
+        score=0.60,
+        parent_eligible=True,
+    )
+    context = SimpleNamespace(
+        contract_summary=planner_context.contract_summary,
+        baseline=planner_context.baseline,
+        current_best=first,
+        eligible_frontier=[planner_context.baseline, first, second],
+        family_history=[first, second],
+        method_cards=planner_context.method_cards,
+        playbook=planner_context.playbook,
+    )
+
+    choice = SearchPolicy().choose_synthesis(
+        context, ["exp_0001", "exp_0002"]
+    )
+
+    assert choice.action == "propose"
+    assert choice.phase == "synthesis"
+    assert choice.parent.experiment_id == "exp_0001"
+    assert choice.method_card_id == "ensemble_parallel_round_synthesis"
+    assert choice.component_experiment_ids == ("exp_0002",)
+
+
 def test_clean_evaluator_baseline_does_not_imply_executable_parent_parity(
     planner_context,
 ):
@@ -302,6 +377,28 @@ def test_playbook_blocks_unbranchable_results(
     assert choice.reason_code == reason_code
 
 
+def test_playbook_quarantines_suspicious_result_and_continues_independently(
+    planner_context,
+):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="suspicious",
+        integrity="inconclusive",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "SUSPICIOUS_RESULT_QUARANTINED"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.family == "temporal_history"
+    assert choice.method_card_id == "temporal_history_compact"
+
+
 def test_playbook_continues_after_no_op_with_independent_choice(planner_context):
     latest = make_summary(
         "exp_0001",
@@ -321,6 +418,30 @@ def test_playbook_continues_after_no_op_with_independent_choice(planner_context)
     assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
     assert choice.family == "temporal_history"
     assert choice.method_card_id == "temporal_history_compact"
+
+
+def test_playbook_stops_after_quarantine_only_when_no_independent_method_remains(
+    planner_context,
+):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="suspicious",
+        integrity="inconclusive",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    context = context_with_latest(
+        planner_context,
+        latest,
+        allowed_families=["objective"],
+    )
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.action == "blocked"
+    assert choice.reason_code == "NO_ELIGIBLE_METHOD"
 
 
 def test_no_op_tree_ranker_can_choose_one_same_mechanism_reimplementation(
@@ -402,7 +523,6 @@ def test_second_same_mechanism_no_op_retires_reimplementation(planner_context):
         candidate.reason_code == "NO_OP_REIMPLEMENT_MECHANISM"
         for candidate in seen
     )
-
 
 def test_playbook_branches_after_terminal_proxy_prune(planner_context):
     latest = make_summary(

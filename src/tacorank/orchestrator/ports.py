@@ -31,6 +31,19 @@ class ResearchPlanner(Protocol):
     async def propose(self, context: PlannerContext) -> PlannerOutput:
         ...
 
+    def parallel_direction_capacity(self, context: PlannerContext) -> int:
+        ...
+
+    async def propose_parallel_direction(
+        self, context: PlannerContext, direction_index: int, direction_count: int
+    ) -> PlannerOutput:
+        ...
+
+    async def propose_synthesis(
+        self, context: PlannerContext, component_experiment_ids: list[str]
+    ) -> PlannerOutput:
+        ...
+
 
 class CodingWorker(Protocol):
     async def create_patch(

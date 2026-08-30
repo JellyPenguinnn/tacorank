@@ -140,7 +140,7 @@ class LiveAdapterConfig(StrictModel):
     future_column_patterns: List[str] = Field(
         default_factory=lambda: [r"(?:^|_)future(?:_|$)"]
     )
-    allowed_import_roots: Optional[List[str]] = None
+    allowed_import_roots: List[str]
     allowed_capability_imports: List[str] = Field(default_factory=list)
     allowed_dependency_changes: List[str] = Field(default_factory=list)
 
@@ -151,6 +151,15 @@ class LiveAdapterConfig(StrictModel):
         if len(normalized) != len(set(normalized)):
             raise ValueError("required_submodules must be unique")
         return normalized
+
+    @field_validator("allowed_import_roots")
+    @classmethod
+    def validate_import_roots(cls, values: List[str]) -> List[str]:
+        if not values or any(not value.isidentifier() for value in values):
+            raise ValueError("allowed_import_roots must contain import identifiers")
+        if values != sorted(set(values)):
+            raise ValueError("allowed_import_roots must be sorted and unique")
+        return values
 
     @model_validator(mode="after")
     def validate_mappings(self) -> "LiveAdapterConfig":

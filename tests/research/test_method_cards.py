@@ -6,7 +6,7 @@ from tacorank.research.portfolio import load_method_cards
 def test_schema_v1_method_cards_load_with_markdown_sections():
     portfolio = load_method_cards(Path(__file__).parents[2] / "research" / "methods")
 
-    assert len(portfolio.cards) == 10
+    assert len(portfolio.cards) == 14
     card = next(card for card in portfolio.cards if card.method_id == "objective_pairwise_bpr")
     assert card.schema_version == "1.0"
     assert card.family == "objective"
@@ -23,7 +23,13 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
         "verified_predictions",
     }
     assert card.prohibition_conditions == ("evaluator_or_split_change_required",)
-    assert card.implementation_targets == ("solution/candidate.py",)
+    assert card.implementation_targets == (
+        "solution/candidate.py",
+        "solution/features.py",
+        "solution/model.py",
+        "solution/train.py",
+        "solution/inference.py",
+    )
 
     residual = next(
         card
@@ -36,4 +42,27 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
         "verified_best_prediction",
         "diverse_clean_proxy_member",
     )
-    assert residual.implementation_targets == ("solution/candidate.py",)
+    assert residual.implementation_targets == (
+        "solution/candidate.py",
+        "solution/features.py",
+        "solution/inference.py",
+    )
+
+    synthesis = next(
+        card
+        for card in portfolio.cards
+        if card.method_id == "ensemble_parallel_round_synthesis"
+    )
+    assert synthesis.prerequisites == ("two_confirmed_clean_members",)
+    assert "solution/candidate.py" in synthesis.implementation_targets
+
+    history = next(
+        card
+        for card in portfolio.cards
+        if card.method_id == "temporal_history_compact"
+    )
+    assert history.implementation_targets == (
+        "solution/candidate.py",
+        "solution/features.py",
+        "solution/inference.py",
+    )

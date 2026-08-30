@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"objective_pairwise_bpr","family":"objective","status":"candidate","tags":["pairwise","within_user","ranking"],"cost_tier":"medium","prerequisites":["baseline_parity","within_user_positive_negative_pairs"],"allowed_data":["train_interactions","user_id","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"implementation_targets":["solution/candidate.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"objective_pairwise_bpr","family":"objective","status":"candidate","tags":["pairwise","within_user","ranking"],"cost_tier":"medium","prerequisites":["baseline_parity","within_user_positive_negative_pairs"],"allowed_data":["train_interactions","user_id","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":[]}
 ```
 
 ## Mechanism
@@ -35,9 +35,9 @@ Use deterministic small non-zero factor initialization (zero-initializing both
 factor sides produces zero latent gradients), multiple representative passes,
 and capped per-user pairs. Verify that the residual has non-zero variance and
 that repeated items can receive different user-conditioned scores. Implement
-and wire the mechanism through `solution/candidate.py`; helper modules may be
-added only when that entrypoint imports and uses them. Do not invent
-`solution/train.py` as a replacement entrypoint.
+and wire the mechanism through the approved candidate scaffold. Keep
+`solution/candidate.py` as the stable entrypoint that imports and uses the
+changed helpers; `solution/train.py` is never an alternate entrypoint.
 
 ## Sources
 

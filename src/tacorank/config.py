@@ -28,7 +28,8 @@ class ContractError(RuntimeError):
 DEFAULT_TARGET_INTERFACE_EXCERPTS = {
     "solution/candidate.py": (
         "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
-        "-> None; include this file in target_files; read only "
+        "-> None; this is the stable production entrypoint and must remain wired "
+        "to every approved helper edited by the experiment. Read only "
         "invocation.input_root and write exactly invocation.output_path as "
         "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
         "invocation.seed; return None. fm_baseline_predictions.csv contains "
@@ -37,7 +38,56 @@ DEFAULT_TARGET_INTERFACE_EXCERPTS = {
         "parent-plus-residual result. Bound only the residual on the parent's "
         "original score scale and preserve the exact parent score when no "
         "supported residual is available."
-    )
+    ),
+    "solution/features.py": (
+        "Candidate-owned feature boundary. Preserve the strict train.csv and "
+        "score.csv schemas and the fitted-on-training-only FeatureEncoder API. "
+        "Scoring rows never contain long_view. Any new aggregate must be "
+        "deterministic and use only interactions earlier than the row it scores."
+    ),
+    "solution/model.py": (
+        "Candidate-owned model components. FactorizationMachine is the compact "
+        "pointwise starting implementation. Approved experiments may add or "
+        "replace trainable components here, but must preserve deterministic seeds, "
+        "finite unconstrained ranking scores, and non-zero trainable gradients."
+    ),
+    "solution/train.py": (
+        "Candidate-owned training orchestration. fit_pointwise is a helper, not an "
+        "entrypoint. Training may read train.csv only, must respect the supplied "
+        "fidelity and seed, and must not evaluate, select, or early-stop on public "
+        "validation or score-population labels."
+    ),
+    "solution/inference.py": (
+        "Candidate-owned scoring and output helpers. Preserve authenticated, "
+        "row-aligned FM parent scores, add only the approved bounded residual on "
+        "the original score scale, retain exact parent fallback, and create exactly "
+        "one ordered finite output CSV exclusively."
+    ),
+}
+
+PRODUCTION_TARGET_INTERFACE_EXCERPTS = {
+    **DEFAULT_TARGET_INTERFACE_EXCERPTS,
+    "solution/candidate.py": (
+        "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
+        "-> None; this is the stable production entrypoint and must remain wired "
+        "to every approved helper edited by the experiment. Read only "
+        "invocation.input_root and write exactly invocation.output_path as "
+        "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
+        "invocation.seed; return None. train.csv columns are exactly "
+        "date,user_id,video_id,author_id,tab,duration_ms,long_view; score.csv "
+        "columns are exactly row_id,date,user_id,video_id,author_id,tab,duration_ms "
+        "and never expose long_view. fm_baseline_predictions.csv contains the "
+        "setup-verified official FM score aligned one-to-one with score.csv; its "
+        ".sha256 file authenticates it. These are unconstrained real-valued "
+        "ranking scores, not probabilities. Never sigmoid, clip to [0,1], "
+        "normalize, or rescale the FM parent or the parent-plus-residual result. "
+        "Bound only the residual on the parent's original score scale and preserve "
+        "the exact parent when no supported residual is available. duration_ms is "
+        "video duration, never watch time. Training dates strictly precede score "
+        "dates. Preserve contiguous row_id order, duplicate rows, finite "
+        "deterministic scores, and exclusive output creation. Use all training rows "
+        "or an explicit deterministic representative sample."
+    ),
 }
 
 
@@ -55,6 +105,8 @@ class RunConfig(StrictModel):
     evaluator_sha256: str
     baseline_commit_sha: NonEmptyStr
     max_experiments: int = Field(default=50, gt=0)
+    parallel_directions: int = Field(default=1, gt=0, le=7)
+    synthesize_parallel_improvements: bool = True
     wall_time_limit_seconds: int = Field(default=21_600, gt=0)
     token_limit: Optional[int] = Field(default=None, gt=0)
     gpu_seconds_limit: Optional[int] = Field(default=None, gt=0)
@@ -68,6 +120,7 @@ class RunConfig(StrictModel):
     max_confirmation_attempts: int = Field(default=2, ge=0)
     seed_schedule: List[int]
     context_token_limit: int = Field(default=6_000, gt=0)
+    synthesis_context_token_limit: int = Field(default=16_000, gt=0)
     adapter_mode: Literal["live"] = "live"
     live_adapter_config_sha256: Optional[str] = None
     editable_roots: List[str] = Field(default_factory=lambda: ["solution"])
@@ -115,7 +168,11 @@ class RunConfig(StrictModel):
     deepseek_model: NonEmptyStr = "deepseek-v4-flash"
     deepseek_base_url: NonEmptyStr = "https://api.deepseek.com"
     deepseek_api_key_env: NonEmptyStr = "DEEPSEEK_API_KEY"
-    deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
+    deepseek_timeout_seconds: int = Field(default=300, gt=0, le=600)
+    research_planning_max_attempts: int = Field(default=2, gt=0, le=3)
+    research_planning_retry_backoff_seconds: float = Field(
+        default=1.0, ge=0.0, le=30.0
+    )
     deepseek_max_output_tokens: int = Field(default=8_192, gt=0)
     deepseek_thinking_enabled: bool = True
     deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"

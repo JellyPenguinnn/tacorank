@@ -21,6 +21,29 @@ def run_failure(outcome="code_error", summary="candidate failure", upstream_hash
     )
 
 
+def test_failure_evidence_preserves_terminal_exception_after_bounding() -> None:
+    result = SimpleNamespace(
+        accepted=False,
+        checks=[SimpleNamespace(name="smoke_test", status="fail")],
+        violations=[
+            SimpleNamespace(
+                code="SMOKE_FAILURE",
+                message=(
+                    "isolated import traceback "
+                    + "frame " * 300
+                    + "ModuleNotFoundError: No module named 'numpy'"
+                ),
+            )
+        ],
+    )
+
+    classification = classify_failure(result)
+
+    assert len(classification.evidence) <= 800
+    assert classification.evidence.startswith("smoke_test SMOKE_FAILURE")
+    assert "ModuleNotFoundError: No module named 'numpy'" in classification.evidence
+
+
 def context(*, remaining=2, previous=(), retries=0, adjustments=None):
     return SimpleNamespace(
         run_id="run-1",

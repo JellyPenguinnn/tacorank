@@ -26,6 +26,14 @@ class ProviderError(RuntimeError):
     pass
 
 
+class TransientProviderError(ProviderError):
+    """Provider failure that is safe to retry without changing the request."""
+
+
+class ProviderTimeoutError(TransientProviderError):
+    """Provider request exceeded its configured network timeout."""
+
+
 class MockResearchProvider:
     """Deterministic provider for unit and integration tests."""
 

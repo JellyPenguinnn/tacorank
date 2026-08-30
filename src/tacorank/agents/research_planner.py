@@ -85,6 +85,30 @@ class ResearchPlanner:
         return output
 
     async def propose(self, context: Any) -> Any:
+        return await self._propose(context)
+
+    async def propose_parallel_direction(
+        self, context: Any, direction_index: int, direction_count: int
+    ) -> Any:
+        choice = self.policy.choose_parallel_direction(
+            context, direction_index, direction_count
+        )
+        return await self._propose(context, forced_choice=choice)
+
+    def parallel_direction_capacity(self, context: Any) -> int:
+        """Expose the policy's unique lane count to the deterministic router."""
+
+        return self.policy.parallel_direction_capacity(context)
+
+    async def propose_synthesis(
+        self, context: Any, component_experiment_ids: list[str]
+    ) -> Any:
+        choice = self.policy.choose_synthesis(
+            context, component_experiment_ids
+        )
+        return await self._propose(context, forced_choice=choice)
+
+    async def _propose(self, context: Any, forced_choice: PolicyChoice | None = None) -> Any:
         logger.info(
             "research_planner_started context_id=%s run_id=%s",
             _get(context, "context_id", None),
@@ -106,7 +130,7 @@ class ResearchPlanner:
                 list(advice.supporting_event_ids) or supporting,
             )
 
-        choice = self.policy.choose(context)
+        choice = forced_choice or self.policy.choose(context)
         if choice.action != "propose":
             logger.info(
                 "research_planner_blocked context_id=%s reason_code=%s",

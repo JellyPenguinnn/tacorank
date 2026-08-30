@@ -34,6 +34,13 @@ placeholder code, or a material contradiction of the approved plan. Use warnings
 non-blocking uncertainty. Accept when the planned mechanism is materially present and
 the remaining questions require execution rather than another code edit.
 
+Treat parent_commit_sha as the executable research parent. For a child experiment,
+reject final source that deletes, bypasses, or replaces inherited parent behavior
+unless the ExperimentSpec explicitly authorizes replacement or ablation. Git ancestry
+alone is not proof of executable preservation. fm_baseline_predictions.csv is the
+original official-FM input, not an automatic materialization of a non-baseline
+experiment parent; loading it alone does not preserve an inherited parent mechanism.
+
 Required JSON shape:
 {
   "accepted": true,

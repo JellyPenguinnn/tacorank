@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import json
 import logging
 import re
@@ -20,7 +21,12 @@ from ..research.code_blind import redact_implementation_references
 from ..research.duplicate_detection import compute_duplicate_key
 from ..research.graph_view import as_list, get_value
 from ..schemas import ResourceDelta, TokenMeasurement
-from .research_provider import ProviderError, ProviderRequest
+from .research_provider import (
+    ProviderError,
+    ProviderRequest,
+    ProviderTimeoutError,
+    TransientProviderError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +67,12 @@ negative proxy, no-op, inconclusive, redundant, and suspicious outcomes; weight 
 item by its fidelity, population, decision, stability, integrity, and trust flags.
 Treat active_lessons as separately curated long-term memory. Do not promote an item
 from family_history into a durable belief merely because it appears in the context.
+Use failure_hypotheses, diagnostic_best_slice, diagnostic_worst_slice, and their
+diagnostic_metrics as actionable cohort evidence. When prior movement is sparse or
+concentrated, do not merely increase residual magnitude; propose a bounded mechanism
+that broadens justified coverage or targets the evidenced weak cohort. When movement
+is broad and all protected metrics regress, change the mechanism rather than scaling
+the same residual.
 
 The context data_profile was computed before this request by fixed read-only aggregate
 EDA tools over the candidate-visible training and unlabeled scoring views. Use its
@@ -86,9 +98,10 @@ Required JSON fields:
 }
 """
 
-COMPACT_RETRY_INSTRUCTION = """The previous completion reached its output-token limit.
-Return the same required JSON object compactly. Do not include analysis, commentary,
-Markdown, optional fields, or more than two short sentences in any string field.
+COMPACT_RETRY_INSTRUCTION = """The previous completion was unusable or reached its
+output-token limit. Return the same required JSON object compactly. Do not include
+analysis, commentary, Markdown, optional fields, or more than two short sentences
+in any string field.
 """
 
 
@@ -183,6 +196,10 @@ def _research_summary(value: Any) -> Dict[str, Any]:
         "stability",
         "integrity",
         "trust_flags",
+        "failure_hypotheses",
+        "diagnostic_limitations",
+        "diagnostic_best_slice",
+        "diagnostic_worst_slice",
         "decision",
         "decision_reason_code",
         "highest_completed_fidelity",
@@ -307,11 +324,20 @@ def default_chat_transport(
             body = response.read()
     except HTTPError as exc:
         detail = exc.read(2_048).decode("utf-8", errors="replace").strip()
-        raise ProviderError("DeepSeek HTTP %d: %s" % (exc.code, detail or "request failed")) from exc
+        error_type = (
+            TransientProviderError
+            if exc.code in {408, 429, 500, 502, 503, 504}
+            else ProviderError
+        )
+        raise error_type(
+            "DeepSeek HTTP %d: %s" % (exc.code, detail or "request failed")
+        ) from exc
     except URLError as exc:
-        raise ProviderError("DeepSeek connection failed: %s" % exc.reason) from exc
+        raise TransientProviderError(
+            "DeepSeek connection failed: %s" % exc.reason
+        ) from exc
     except TimeoutError as exc:
-        raise ProviderError("DeepSeek request timed out") from exc
+        raise ProviderTimeoutError("DeepSeek request timed out") from exc
 
     try:
         decoded = json.loads(body)
@@ -351,15 +377,28 @@ class DeepSeekResearchProvider:
         self.thinking_enabled = thinking_enabled
         self.reasoning_effort = reasoning_effort
         self.transport = transport or default_chat_transport
-        self._last_candidate: Optional[Dict[str, Any]] = None
-        self._input_tokens = 0
-        self._output_tokens = 0
+        self._last_candidate: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+            "deepseek_last_candidate", default=None
+        )
+        self._input_tokens: ContextVar[Optional[int]] = ContextVar(
+            "deepseek_input_tokens", default=None
+        )
+        self._output_tokens: ContextVar[Optional[int]] = ContextVar(
+            "deepseek_output_tokens", default=None
+        )
+        self._last_completed_input_tokens = 0
+        self._last_completed_output_tokens = 0
 
     @property
     def resource_delta(self) -> ResourceDelta:
+        input_tokens = self._input_tokens.get()
+        output_tokens = self._output_tokens.get()
+        if input_tokens is None or output_tokens is None:
+            input_tokens = self._last_completed_input_tokens
+            output_tokens = self._last_completed_output_tokens
         return ResourceDelta(
-            llm_input_tokens=self._input_tokens,
-            llm_output_tokens=self._output_tokens,
+            llm_input_tokens=input_tokens,
+            llm_output_tokens=output_tokens,
             token_measurement=TokenMeasurement.PROVIDER,
         )
 
@@ -470,7 +509,9 @@ class DeepSeekResearchProvider:
         if validation_errors:
             payload["repair"] = {
                 "validation_errors": list(validation_errors),
-                "previous_candidate": _research_candidate(self._last_candidate),
+                "previous_candidate": _research_candidate(
+                    self._last_candidate.get()
+                ),
                 "instruction": _repair_instruction(validation_errors),
             }
         return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -521,8 +562,14 @@ class DeepSeekResearchProvider:
         usage = response.get("usage")
         if not isinstance(usage, Mapping):
             return
-        self._input_tokens += _nonnegative_int(usage.get("prompt_tokens"), 0)
-        self._output_tokens += _nonnegative_int(usage.get("completion_tokens"), 0)
+        self._input_tokens.set(
+            (self._input_tokens.get() or 0)
+            + _nonnegative_int(usage.get("prompt_tokens"), 0)
+        )
+        self._output_tokens.set(
+            (self._output_tokens.get() or 0)
+            + _nonnegative_int(usage.get("completion_tokens"), 0)
+        )
 
     def _content(self, response: Mapping[str, Any]) -> Mapping[str, Any]:
         choices = response.get("choices")
@@ -654,27 +701,45 @@ class DeepSeekResearchProvider:
             )
             self._record_usage(response)
             if self._finish_reason(response) != "length" or attempt == 1:
-                break
+                try:
+                    content = self._content(response)
+                except ProviderError as error:
+                    if (
+                        attempt == 0
+                        and str(error) == "DeepSeek returned empty planner JSON"
+                    ):
+                        logger.warning(
+                            "deepseek_planner_empty_retry model=%s context_id=%s repair=%s",
+                            self.model,
+                            get_value(request.context, "context_id", None),
+                            bool(validation_errors),
+                        )
+                        continue
+                    raise
+                normalized = self._normalize(content, request)
+                self._last_candidate.set(normalized)
+                self._last_completed_input_tokens = self._input_tokens.get() or 0
+                self._last_completed_output_tokens = self._output_tokens.get() or 0
+                logger.info(
+                    "deepseek_planner_response model=%s experiment_id=%s input_tokens=%d output_tokens=%d",
+                    self.model,
+                    normalized["experiment_id"],
+                    self._input_tokens.get() or 0,
+                    self._output_tokens.get() or 0,
+                )
+                return normalized
             logger.warning(
                 "deepseek_planner_length_retry model=%s context_id=%s",
                 self.model,
                 get_value(request.context, "context_id", None),
             )
-        normalized = self._normalize(self._content(response), request)
-        self._last_candidate = normalized
-        logger.info(
-            "deepseek_planner_response model=%s experiment_id=%s input_tokens=%d output_tokens=%d",
-            self.model,
-            normalized["experiment_id"],
-            self._input_tokens,
-            self._output_tokens,
-        )
-        return normalized
+        # The second response was truncated and must be rejected by _content().
+        raise AssertionError("planner completion retry loop exited unexpectedly")
 
     async def generate(self, request: ProviderRequest) -> Dict[str, Any]:
-        self._input_tokens = 0
-        self._output_tokens = 0
-        self._last_candidate = None
+        self._input_tokens.set(0)
+        self._output_tokens.set(0)
+        self._last_candidate.set(None)
         return await self._complete(request, None)
 
     async def repair(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Optional, Sequence
 
 from ..config import RunConfig
 from ..orchestrator.state import RunState
@@ -22,6 +22,24 @@ class StopDecision:
     stop: bool
     reason_code: str = "continue"
     reason: str = "No deterministic stop condition matched."
+
+
+FINALIZABLE_STOP_REASON_CODES = frozenset(
+    {
+        "experiment_budget",
+        "wall_time_budget",
+        "token_budget",
+        "gpu_budget",
+        "converged",
+        "no_legal_proposal",
+    }
+)
+
+
+def is_finalizable_stop_reason(reason_code: Optional[str]) -> bool:
+    """Return whether a stop is a normal, frozen end-of-search condition."""
+
+    return reason_code in FINALIZABLE_STOP_REASON_CODES
 
 
 def convergence_pressure(events: Sequence[Event], config: RunConfig) -> int:
