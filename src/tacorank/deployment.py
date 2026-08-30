@@ -261,7 +261,7 @@ def setup_live_deployment(
         "evaluator_sha256": evaluator_hash,
         "baseline_commit_sha": baseline_commit,
         "max_experiments": 50,
-        "parallel_directions": 7,
+        "parallel_directions": 2,
         "synthesize_parallel_improvements": True,
         "wall_time_limit_seconds": 21600,
         "convergence_epsilon": 0.002,

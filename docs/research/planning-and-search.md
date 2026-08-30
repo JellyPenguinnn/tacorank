@@ -30,18 +30,20 @@ Evaluation-driven family selection must apply the mandatory decision order in
 policy. Invalid, suspicious, no-op, unstable, and proxy-only results never
 become positive research rewards or parent nodes.
 
-The proxy gate uses a symmetric `0.0016` primary-score noise band. Clean proxy
-results inside the band receive one full-fidelity evaluation instead of being
-pruned on the sign of a tiny delta. Results below `-0.0016` remain hard proxy
-regressions; proxy results never become parents or best checkpoints directly.
+The proxy trust assessment keeps a symmetric `0.0016` primary-score noise
+band, but the resource gate promotes an inconclusive within-noise proxy only
+when its measured parent delta is positive. A zero or negative within-noise
+proxy is cleanly pruned with `PROXY_NON_POSITIVE_WITHIN_NOISE`; results below
+`-0.0016` remain hard proxy regressions. Proxy results never become parents or
+best checkpoints directly.
 
 Full-fidelity branching and validation-best selection use separate gates. A
 clean, confirmed result within `0.0016` of the current validation best may be
-an explicitly accepted exploratory DFS parent, even if its small delta is not
-directionally positive. It remains ineligible for validation-best selection
-until it clears the full Ladder threshold against the current best. This lets
-research deepen a near-best mechanism without allowing cumulative drift away
-from the protected best.
+an explicitly accepted exploratory DFS parent only when its aggregate gain
+over its declared parent is strictly positive. It remains
+ineligible for validation-best selection until it clears the full Ladder
+threshold against the current best. Equal-score copies and regressions no
+longer expand the frontier.
 
 Proxy/full direction disagreement is advisory rather than an integrity
 failure. The controller records `PROXY_FULL_DIRECTION_CONFLICT` and completes
@@ -73,8 +75,9 @@ The core policy is deterministic, score-guided AIDE-style depth-first search:
   clean, confirmed full-fidelity result may be branch parents; an inconclusive
   node additionally requires explicit exploratory parent approval and must
   remain within `0.0016` of validation best;
-- clean proxy/full results within `max(5 * epsilon, 0.01)` of their parent, or
-  with a component-metric trade-off, are soft-pruned rather than forgotten;
+- clean proxy/full results within one `epsilon` of their parent, or with an
+  eligible component-metric trade-off inside that same bound, are soft-pruned
+  rather than forgotten;
 - a soft result may receive at most one documented metric-trade-off refinement
   and never becomes validation-best eligible through that permission;
 - a clean soft result whose prediction Spearman magnitude is below `0.98` may
@@ -96,6 +99,12 @@ The core policy is deterministic, score-guided AIDE-style depth-first search:
 - a stateless LinUCB ranker is reconstructed from verified ledger history and
   reorders only the legal choices emitted by these deterministic gates. It
   cannot invent a family, method, parent, refinement, or ensemble component.
+
+New live deployments use a parallel width of two. Lane zero is the normal
+policy choice and may repeat a method only for an explicit outcome-routed
+refinement or deepening. Any spare lane is restricted to a method card never
+attempted anywhere in the ledger. When no globally untried scouting method
+remains, the round automatically contracts to one lane.
 
 `eligible_frontier`, `refinement_frontier_ids`, and `ensemble_candidate_ids`
 are separate authoritative context collections. Empty collections remain empty;

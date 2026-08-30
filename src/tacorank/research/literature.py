@@ -36,15 +36,13 @@ LiteratureTransport = Callable[
 
 METHOD_QUERIES = {
     "objective_pairwise_bpr": (
-        "Bayesian personalized ranking pairwise learning to rank recommender "
-        "systems implicit feedback"
+        "Bayesian Personalized Ranking BPR pairwise recommender implicit feedback"
     ),
     "objective_listwise_user_softmax": (
-        "listwise learning to rank user impression softmax recommender systems nDCG"
+        "listwise learning to rank ListNet softmax recommender systems nDCG"
     ),
     "objective_loss_aligned_features": (
-        "feature engineering pairwise learning to rank recommender systems "
-        "within user interaction features"
+        "pairwise learning to rank recommender feature interactions user item context"
     ),
     "temporal_history_compact": (
         "sequential recommendation temporal user behavior history attention"
@@ -53,13 +51,22 @@ METHOD_QUERIES = {
         "multi task learning recommender systems auxiliary engagement ranking"
     ),
     "duration_bias_censored_watch_time": (
-        "duration bias censored watch time video recommendation ranking"
+        "Counteracting Duration Bias Video Recommendation Counterfactual Watch Time"
+    ),
+    "features_author_affinity_past_only": (
+        "author creator affinity context aware recommender temporal user preference"
+    ),
+    "features_tab_context_residual": (
+        "context aware recommender feature interaction residual ranking"
     ),
     "temporal_drift_past_only": (
         "temporal distribution shift recommender systems recency ranking"
     ),
     "model_compact_ranker": (
         "DeepFM deep cross network recommender ranking feature interaction"
+    ),
+    "sampling_deterministic_coverage": (
+        "negative sampling exposure bias recommender systems implicit feedback"
     ),
     "ensemble_diverse_residual_candidate": (
         "rank ensemble diverse recommender systems score fusion"
@@ -69,6 +76,79 @@ METHOD_QUERIES = {
     ),
     "evaluation_random_exposure_robustness": (
         "unbiased evaluation recommender systems random exposure data"
+    ),
+}
+
+# Every tuple is an AND group; a paper must contain at least one phrase from
+# each group in its title or abstract. These static gates keep a highly cited
+# but topically unrelated paper from grounding an implementation proposal.
+METHOD_RELEVANCE_GROUPS = {
+    "objective_pairwise_bpr": (
+        ("recommend", "ranking"),
+        (
+            "bayesian personalized ranking",
+            "bpr",
+            "pairwise",
+            "preference ordering",
+        ),
+    ),
+    "objective_listwise_user_softmax": (
+        ("recommend", "ranking"),
+        ("listwise", "listnet", "listmle", "softmax"),
+    ),
+    "objective_loss_aligned_features": (
+        ("recommend", "ranking"),
+        ("pairwise", "listwise", "learning to rank", "preference"),
+        ("feature", "representation", "interaction", "embedding"),
+    ),
+    "temporal_history_compact": (
+        ("recommend",),
+        ("temporal", "sequential", "history", "behavior sequence"),
+    ),
+    "multitask_single_auxiliary": (
+        ("recommend", "ranking"),
+        ("multi task", "multitask", "auxiliary task"),
+    ),
+    "duration_bias_censored_watch_time": (
+        ("recommend", "video ranking"),
+        ("watch time", "watch-time", "duration bias", "view duration"),
+    ),
+    "features_author_affinity_past_only": (
+        ("recommend",),
+        ("author", "creator", "affinity", "context aware"),
+    ),
+    "features_tab_context_residual": (
+        ("recommend", "ranking"),
+        ("context aware", "contextual feature", "feature interaction"),
+    ),
+    "temporal_drift_past_only": (
+        ("recommend",),
+        ("temporal", "distribution shift", "drift", "recency"),
+    ),
+    "model_compact_ranker": (
+        ("recommend", "click through rate", "ctr"),
+        (
+            "deepfm",
+            "factorization machine",
+            "cross network",
+            "feature interaction",
+        ),
+    ),
+    "sampling_deterministic_coverage": (
+        ("recommend",),
+        ("negative sampling", "exposure sampling", "implicit feedback sampling"),
+    ),
+    "ensemble_diverse_residual_candidate": (
+        ("recommend", "ranking"),
+        ("ensemble", "rank fusion", "model combination"),
+    ),
+    "ensemble_confirmed_members": (
+        ("recommend", "ranking"),
+        ("ensemble", "rank averaging", "model combination"),
+    ),
+    "evaluation_random_exposure_robustness": (
+        ("recommend",),
+        ("unbiased evaluation", "random exposure", "off policy evaluation"),
     ),
 }
 
@@ -122,6 +202,28 @@ def _abstract_from_inverted_index(value: Any) -> str:
         " ".join(by_position[position] for position in sorted(by_position)),
         limit=_MAX_ABSTRACT_CHARACTERS,
     )
+
+
+def _relevance_score(method_id: str, title: str, abstract: str) -> int:
+    groups = METHOD_RELEVANCE_GROUPS.get(method_id, ())
+    if not groups:
+        return 1
+    text = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        ("%s %s" % (title, abstract)).lower(),
+    )
+    matched = []
+    for group in groups:
+        count = sum(
+            1
+            for phrase in group
+            if re.sub(r"[^a-z0-9]+", " ", phrase.lower()).strip() in text
+        )
+        if count == 0:
+            return 0
+        matched.append(count)
+    return sum(matched)
 
 
 def _default_transport(
@@ -228,13 +330,18 @@ class OpenAlexLiteratureSkill:
             "%s %s recommender systems ranking" % (family, method), limit=200
         )
 
-    def _parse(self, payload: Mapping[str, Any], query: str) -> list[LiteratureEvidence]:
+    def _parse(
+        self,
+        payload: Mapping[str, Any],
+        query: str,
+        method_id: str,
+    ) -> list[LiteratureEvidence]:
         records = payload.get("results")
         if not isinstance(records, list):
             raise LiteratureResearchError(
                 "OpenAlex search returned an invalid paper collection"
             )
-        evidence: list[LiteratureEvidence] = []
+        ranked_evidence: list[tuple[int, LiteratureEvidence]] = []
         seen: set[str] = set()
         for raw in records:
             if not isinstance(raw, Mapping):
@@ -254,6 +361,9 @@ class OpenAlexLiteratureSkill:
                 or not abstract
                 or citation_count < self.min_citation_count
             ):
+                continue
+            relevance = _relevance_score(method_id, title, abstract)
+            if relevance <= 0:
                 continue
             raw_authors = raw.get("authorships")
             authors = []
@@ -286,28 +396,37 @@ class OpenAlexLiteratureSkill:
                 get_value(source, "display_name", ""), limit=200
             ) or None
             digest = hashlib.sha256(paper_id.encode("utf-8")).hexdigest()[:16]
-            evidence.append(
-                LiteratureEvidence(
-                    evidence_id="lit_" + digest,
-                    provider="openalex",
-                    paper_id=paper_id,
-                    title=title,
-                    abstract=abstract,
-                    year=year,
-                    authors=authors,
-                    venue=venue,
-                    citation_count=citation_count,
-                    influential_citation_count=0,
-                    url=url,
-                    query=query,
+            ranked_evidence.append(
+                (
+                    relevance,
+                    LiteratureEvidence(
+                        evidence_id="lit_" + digest,
+                        provider="openalex",
+                        paper_id=paper_id,
+                        title=title,
+                        abstract=abstract,
+                        year=year,
+                        authors=authors,
+                        venue=venue,
+                        citation_count=citation_count,
+                        influential_citation_count=0,
+                        url=url,
+                        query=query,
+                    ),
                 )
             )
             seen.add(paper_id)
-            if len(evidence) >= self.max_papers:
-                break
+        ranked_evidence.sort(
+            key=lambda item: (
+                -item[0],
+                -item[1].citation_count,
+                item[1].paper_id,
+            )
+        )
+        evidence = [item[1] for item in ranked_evidence[: self.max_papers]]
         if not evidence:
             raise LiteratureResearchError(
-                "OpenAlex returned no usable cited papers for the selected method"
+                "OpenAlex returned no usable relevant cited papers for the selected method"
             )
         return evidence
 
@@ -317,17 +436,18 @@ class OpenAlexLiteratureSkill:
         # The query is derived only from frozen method metadata. No dataset,
         # metric, run, or user identifiers leave the controller.
         del context
+        method_id = str(get_value(policy_choice, "method_card_id", ""))
         query = self._query(policy_choice)
         started = time.monotonic()
         self._wall_time_ms = 0
         try:
             payload = await asyncio.to_thread(
                 self.transport,
-                self._search_url(query, limit=max(10, self.max_papers * 3)),
+                self._search_url(query, limit=max(20, self.max_papers * 8)),
                 self._headers(),
                 self.timeout_seconds,
             )
-            return self._parse(payload, query)
+            return self._parse(payload, query, method_id)
         finally:
             self._wall_time_ms = max(
                 0, int(round((time.monotonic() - started) * 1_000))
@@ -338,5 +458,6 @@ __all__ = [
     "LiteratureResearchError",
     "LiteratureResearchSkill",
     "METHOD_QUERIES",
+    "METHOD_RELEVANCE_GROUPS",
     "OpenAlexLiteratureSkill",
 ]

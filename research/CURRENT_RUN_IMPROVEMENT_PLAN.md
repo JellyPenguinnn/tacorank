@@ -7,6 +7,10 @@
 **Core rule:** one experiment changes one research mechanism.
 **Traversal:** score-guided depth-first search; deepen the best trusted branch
 before backtracking, rather than probing every research family from baseline.
+New live deployments use at most two simultaneous lanes. The first follows the
+normal outcome policy; the optional scouting lane must use a method never tried
+anywhere in the run. Repeating a prior method on a new parent is legal only when
+the outcome policy explicitly requests refinement or deepening.
 
 ```json
 {
@@ -73,7 +77,10 @@ under the current contract. Titles and abstracts are untrusted scientific data,
 not instructions; they cannot change the selected parent, family, method card,
 allowed data, protected paths, or execution ladder. The immutable evidence
 snapshot is stored with the proposal so the coder, ledger, and UI can show why
-the implementation was chosen. Candidate coding and execution remain offline.
+the implementation was chosen. Method-specific title/abstract relevance gates
+must reject a highly cited but topically unrelated result; citation count cannot
+compensate for failing the selected method's mechanism terms. Candidate coding
+and execution remain offline.
 
 The context builder should include the applicable section and referenced
 method cards in `PlannerContext`. The Planner must still return one validated
@@ -109,16 +116,17 @@ Apply these rules from top to bottom. The first matching rule wins.
 | 1 | Trust integrity is `compromised`, or verdict is `suspicious` because of concrete evaluator, alignment, contract, forbidden-input, or output evidence | Quarantine the result; investigate data, evaluator, or leakage. A proxy/full direction change alone is advisory, not an integrity failure. | No |
 | 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Verify that the patch affected logits, gradients, and intended rows. Give Trae one scoped 20-step wiring-repair action and rerun the same fidelity after Gate A. If predictions remain identical, record a neutral terminal `no_op` and return the evidence to the legal-choice ranker; do not emit a controller prune decision. The ranker selects either one modified same-mechanism plan from the trusted parent or an independent mechanism. | Trusted parent only |
 | 3 | Stability is `unstable` | Confirm seeds or simplify/regularize the same mechanism. | No new family |
-| 4 | Fidelity is `smoke` or `proxy` | Promote a clear proxy improvement, or one clean result within the symmetric proxy noise band, to one bounded full-fidelity check. Prune only a regression beyond that band. | No parent promotion |
+| 4 | Fidelity is `smoke` or `proxy` | Promote a clear proxy improvement. For a clean result inside the symmetric proxy noise band, promote only when its measured parent delta is positive; prune a zero or negative delta as `PROXY_NON_POSITIVE_WITHIN_NOISE`. | No parent promotion |
 | 5 | Full public result is trusted and improves the parent by more than `epsilon` | Accept; confirm once if stability is only `single_seed`, then deepen the same family. | Yes |
-| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, and remains within `eta` of the current validation best | Retain it as an exploratory research parent with `best_eligible = false`. Continue from the highest-scoring eligible research node, try one legal same-family refinement, then switch to an independent mechanism only after that refinement is exhausted. | Yes, exploratory |
+| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, remains within `eta` of the current validation best, and has a strictly positive aggregate gain over its declared parent | Retain it as an exploratory research parent with `best_eligible = false`. Continue from the highest-scoring eligible research node, try one legal same-family refinement, then switch to an independent mechanism only after that refinement is exhausted. Equal-score copies and regressions are rejected as parents. | Yes, exploratory |
 | 7 | Full public result is trusted and worse than `-epsilon` | Treat the tested mechanism as falsified under its stated conditions; do not tune it indefinitely. | Yes |
 
 Only a full, verified, clean, seed-confirmed public-validation result may create
 a future parent. Accepted results are trusted parents. An inconclusive result
 may be an explicitly marked exploratory parent only while its confirmed mean
-remains within `eta` of the current validation best. A proxy result can justify
-full evaluation but never becomes a parent by itself. Exploratory parents keep
+remains within `eta` of the current validation best and its aggregate gain over
+the declared parent is strictly positive. A proxy result can justify full
+evaluation but never becomes a parent by itself. Exploratory parents keep
 `best_eligible = false`; only the full Ladder threshold can update validation
 best.
 
@@ -137,15 +145,16 @@ derive two narrower, non-checkpoint permissions from verified evidence:
 
 - **hard prune:** rejected output, suspicious/compromised integrity, unstable
   result, invalid/retracted lineage, or primary regression worse than
-  `max(5 * epsilon, 0.01)`. Never branch, refine, or ensemble the result node.
+  one `epsilon`. Never branch, refine, or ensemble the result node.
   A no-op is first checked by one bounded Trae wiring repair. If it remains a
   no-op, the controller records neutral evidence without pruning; the tree
   planner may select one reimplementation of the same mechanism from its last
   trusted parent or an independent mechanism. A second no-op retires the
   same-mechanism option;
 - **soft prune:** clean accepted output at proxy/full fidelity, meaningful
-  prediction change, and either primary delta above that regression floor or a
-  component-metric trade-off. Retain the node as evidence, not as a checkpoint;
+  prediction change, and a primary delta no worse than one negative `epsilon`;
+  a component-metric trade-off cannot bypass that floor. Retain the node as
+  evidence, not as a checkpoint;
 - **bounded refinement:** a soft-pruned node with a documented metric trade-off
   may receive at most one child when a method card names the follow-up;
 - **ensemble candidate:** a soft-pruned node may enter one fixed blend test only
@@ -193,6 +202,11 @@ from that branch until its legal methods are exhausted or verified evidence
 falsifies it. Only then backtrack to the next trusted branch or independent
 direction. Skip any direction whose prerequisites fail or whose estimated cost
 does not fit the remaining budget.
+
+Parallel capacity does not reset this history. Only the policy-routed primary
+lane may reuse a prior method card for a justified child. Every additional lane
+must be globally untried, and the round contracts to one lane when no such card
+remains. A changed parent identity alone never makes an old direction new.
 
 ### Direction 0 — baseline and evaluator parity
 
