@@ -5,14 +5,14 @@
 This document records the implemented Person 5 evaluation, trust, final-selection,
 reflection, and reporting design. It explains the intended end-to-end flow and the
 rationale for the major implementation decisions. The executable authorities are
-`src/tacorank/schemas.py`, `src/tacorank/evaluation/`, and the KuaiRand adapters under
+`src/tacorank/schemas.py`, `src/tacorank/evaluation/`, the production bridge in
+`src/tacorank/orchestrator/live.py`, and the KuaiRand adapters under
 `benchmarks/kuairand_pure/`.
 
 The deterministic evaluation components and their integration tests are implemented.
-The repository-wide harness currently runs with fake execution adapters. Production
-candidate isolation and container orchestration still require the real Person 3
-runner, but protected metric computation already runs in a separate isolated Python
-process.
+Production composition uses the real Person 3 Docker runner, Gate B, and protected
+evaluation bridge. Deterministic fake adapters remain test fixtures only. Protected
+metric computation runs in a separate isolated Python process.
 
 ## Design Goals
 
@@ -267,10 +267,16 @@ accepted lessons require confirmation. Hidden-final evidence never creates plann
 memory. Suspicious evidence creates integrity warnings rather than positive research
 reward.
 
+The protected decision bridge creates the canonical `LessonCandidate` from the
+persisted evaluation event, its seed-evidence events, the evaluated commit, and the
+original `ExperimentSpec`. The controller then appends `lesson.recorded`; it remains
+the sole ledger writer. Replay exposes active lessons to later planner and coder
+contexts, while reporting materializes the human-readable lesson files.
+
 Reporting has two distinct APIs:
 
 - `render_summary(events)` and `rebuild_views()` generate ledger-derived `STATUS.md`,
-  `LESSONS.md`, and `SUMMARY.md` projections.
+  `lessons/INDEX.md`, per-lesson Markdown files, and `reports/SUMMARY.md` projections.
 - `render_evaluation_summary()` and `render_metric_table()` generate judge-facing
   evaluation detail from typed evaluation results.
 
@@ -344,23 +350,24 @@ Run syntax compilation with:
 python3 -m compileall -q src benchmarks
 ```
 
-At the time this document was written, the complete suite passed with 185 tests.
+At the time of the latest wiring review, the complete suite passed with 488 tests;
+11 platform-specific cases were skipped on macOS.
 
 ## Known Limitations and Next Work
 
-1. The repository harness still uses fake execution/evaluation adapters for integrated
-   lifecycle tests. The production router must adapt canonical `EvaluationRequest` and
-   resolved `output.checked` events into `EvaluationInputs` without dropping digests.
+1. Integrated lifecycle tests use deterministic fake adapters, while production uses
+   `ProtectedEvaluationBridge`. The bridge resolves canonical `EvaluationRequest`,
+   `output.checked`, artifact/digest identity, reference predictions, and seed events
+   into `EvaluationInputs`.
 2. The isolated evaluator worker is a process boundary, not a complete OS/container
    sandbox. Person 3 must enforce filesystem, network, resource, and candidate-process
    isolation in the real runner.
 3. Full FM baseline reproduction requires the external KuaiRand data and is not part of
    the unit-test suite.
-4. Population manifests must be frozen from the real dataset loader before production
-   evaluation. Omitting them is acceptable only when no expected data-manifest hash is
-   configured.
-5. Finalization intentionally fails closed until a real clean-reproduction runner and
-   evaluator replace fake adapter mode.
+4. Production population manifests are frozen from the deployment data views. Unit
+   tests may omit them only when no expected data-manifest hash is configured.
+5. Candidate finalization remains deliberately strict: clean reproduction must match
+   the trusted best score exactly before final inference and submission checking.
 
 These limitations are explicit boundaries. They must not be bypassed by weakening hash,
 route, trust, or final-selection validation.

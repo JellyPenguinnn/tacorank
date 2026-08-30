@@ -4,32 +4,9 @@ from dataclasses import dataclass
 from typing import Mapping, Optional, Sequence, Tuple
 
 from tacorank.evaluation.types import EvaluationResult, Integrity, Stability, Verdict
+from tacorank.schemas import LessonCandidate
 
 from .lesson_rules import lesson_allowed
-
-
-@dataclass(frozen=True)
-class LessonCandidate:
-    origin: str
-    category: str
-    tags: Tuple[str, ...]
-    summary: str
-    applicability: str
-    avoid_when: str
-    confidence: float
-    source_event_ids: Tuple[str, ...]
-    source_commit_shas: Tuple[str, ...]
-    measured_under_frame_experiment_id: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        if self.origin != "research":
-            raise ValueError("research lessons must have origin='research'")
-        if not 0.0 <= self.confidence <= 1.0:
-            raise ValueError("lesson confidence must be in [0, 1]")
-        if not self.summary or not self.applicability or not self.avoid_when:
-            raise ValueError("lesson narrative fields must not be empty")
-        if not self.source_event_ids:
-            raise ValueError("research lessons require source events")
 
 
 @dataclass(frozen=True)
@@ -106,13 +83,13 @@ def build_research_lesson(
     return LessonCandidate(
         origin="research",
         category=category,
-        tags=tags,
+        tags=list(tags),
         summary=summary,
         applicability=applicability,
         avoid_when=avoid_when,
         confidence=confidence,
-        source_event_ids=tuple(evaluation_event_ids),
-        source_commit_shas=tuple(commit_shas),
+        source_event_ids=list(evaluation_event_ids),
+        source_commit_shas=list(commit_shas),
         measured_under_frame_experiment_id=measured_under_frame_experiment_id,
     )
 

@@ -257,15 +257,24 @@ def _render_lesson(lesson_id: str, record: dict) -> str:
         "- Confidence: `%.2f`" % candidate.confidence,
         "- Tags: %s" % (", ".join(candidate.tags) if candidate.tags else "none"),
         "- Recorded by: `%s`" % record["recorded_event_id"],
-        "",
-        "## Finding",
-        "",
-        candidate.summary,
-        "",
-        "## Applies when",
-        "",
-        candidate.applicability,
     ]
+    if candidate.measured_under_frame_experiment_id:
+        lines.append(
+            "- Evaluation frame: `%s`"
+            % candidate.measured_under_frame_experiment_id
+        )
+    lines.extend(
+        [
+            "",
+            "## Finding",
+            "",
+            candidate.summary,
+            "",
+            "## Applies when",
+            "",
+            candidate.applicability,
+        ]
+    )
     if candidate.avoid_when:
         lines.extend(("", "## Avoid when", "", candidate.avoid_when))
     lines.extend(

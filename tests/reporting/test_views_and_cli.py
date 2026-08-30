@@ -23,7 +23,10 @@ def test_views_are_derived_and_cli_validates(harness, baseline_evaluation, capsy
     assert "exp_001" in summary
     assert "Unmeasured tokens:" in summary
     assert "Total reported tokens:" in summary
-    assert "No lessons recorded" in (run_directory / "lessons/INDEX.md").read_text()
+    lesson_index = (run_directory / "lessons/INDEX.md").read_text()
+    assert "lesson_001" in lesson_index
+    lesson = (run_directory / "lessons/lesson_001.md").read_text()
+    assert "confirmed clean result" in lesson
     assert '"best_experiment_id": "exp_001"' in (
         run_directory / "STATUS.md"
     ).read_text()

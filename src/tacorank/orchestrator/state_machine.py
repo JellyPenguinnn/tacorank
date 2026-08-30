@@ -12,9 +12,12 @@ from ..schemas import (
     ExperimentDecisionKind,
     Fidelity,
     Integrity,
+    LessonCategory,
+    LessonOrigin,
     Population,
     RecoveryAction,
     RunOutcome,
+    Stability,
     TrustVerdict,
 )
 from .state import ExperimentStatus, RunStatus
@@ -440,6 +443,37 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             result.public_query_index == expected_query_index,
             "evaluation public query index is not the next frozen index",
         )
+        seed_results = []
+        for event_id in result.seed_evidence_event_ids:
+            seed_event = next(
+                (
+                    event
+                    for event in events
+                    if event.event_id == event_id
+                    and event.event_type == EventType.EVALUATION_COMPLETED
+                ),
+                None,
+            )
+            _require(seed_event is not None, "evaluation cites unknown seed evidence")
+            seed_result = seed_event.payload.result
+            seed_index = events.index(seed_event)
+            seed_request = _evaluation_request(events[:seed_index], seed_result)
+            _require(
+                seed_result.experiment_id == result.experiment_id
+                and seed_result.population == result.population
+                and seed_result.fidelity == result.fidelity
+                and seed_result.evaluator_sha256 == result.evaluator_sha256
+                and seed_result.contract_sha256 == result.contract_sha256
+                and seed_result.attempt < result.attempt
+                and seed_request.patch_commit_sha == request.patch_commit_sha,
+                "evaluation seed evidence is incompatible",
+            )
+            seed_results.append(seed_result)
+        _require(
+            len({item.seed for item in seed_results} | {result.seed})
+            == len(seed_results) + 1,
+            "evaluation seed evidence must use distinct seeds",
+        )
     elif event_type == EventType.EXPERIMENT_DECIDED:
         decision = payload.decision
         node = state.experiments.get(decision.experiment_id)
@@ -465,6 +499,11 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
                     and result.population == Population.PUBLIC_VALIDATION
                     and result.trust.verdict == TrustVerdict.ACCEPTED,
                     "best eligibility requires trusted public full evaluation",
+                )
+                _require(
+                    result.trust.stability == Stability.CONFIRMED
+                    and result.trust.integrity == Integrity.CLEAN,
+                    "best eligibility requires confirmed clean evaluation",
                 )
                 _require(
                     decision.decision == ExperimentDecisionKind.ACCEPT,
@@ -531,6 +570,52 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             set(payload.candidate.source_event_ids).issubset(known_ids),
             "lesson cites unknown evidence",
         )
+        if payload.candidate.origin == LessonOrigin.RESEARCH:
+            source_evaluations = [
+                event
+                for event in events
+                if event.event_id in payload.candidate.source_event_ids
+                and event.event_type == EventType.EVALUATION_COMPLETED
+            ]
+            _require(source_evaluations, "research lesson requires evaluation evidence")
+            evidence = source_evaluations[-1].payload.result
+            eligible = (
+                evidence.population != Population.HIDDEN_FINAL
+                and evidence.fidelity != Fidelity.FINAL
+                and evidence.trust.verdict
+                not in (TrustVerdict.NO_OP, TrustVerdict.INCONCLUSIVE)
+                and (
+                    evidence.trust.verdict != TrustVerdict.NEGATIVE
+                    or (
+                        evidence.fidelity == Fidelity.FULL
+                        and evidence.population == Population.PUBLIC_VALIDATION
+                    )
+                )
+                and (
+                    evidence.trust.verdict != TrustVerdict.ACCEPTED
+                    or evidence.trust.stability == Stability.CONFIRMED
+                )
+            )
+            _require(eligible, "research lesson is not supported by eligible evidence")
+            expected_category = (
+                LessonCategory.INTEGRITY_WARNING
+                if evidence.trust.verdict == TrustVerdict.SUSPICIOUS
+                else LessonCategory.RESEARCH_RESULT
+            )
+            _require(
+                payload.candidate.category == expected_category,
+                "research lesson category does not match evaluation trust",
+            )
+            _require(
+                set(evidence.seed_evidence_event_ids).issubset(
+                    payload.candidate.source_event_ids
+                ),
+                "research lesson omits seed evidence",
+            )
+            _require(
+                bool(payload.candidate.source_commit_shas),
+                "research lesson requires candidate commit evidence",
+            )
     elif event_type == EventType.LESSON_STATUS_CHANGED:
         _require(payload.lesson_id in state.lessons, "unknown lesson_id")
     elif event_type == EventType.RUN_STOPPED:

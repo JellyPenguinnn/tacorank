@@ -25,6 +25,9 @@ from ..schemas import (
     ExperimentSpec,
     Fidelity,
     Integrity,
+    LessonCandidate,
+    LessonCategory,
+    LessonOrigin,
     MetricSet,
     MonitorAction,
     MonitorDirective,
@@ -277,13 +280,41 @@ class FakeOutputGate:
 
 
 class FakeEvaluator:
-    def __init__(self, metric_names, primary_metric_name):
+    def __init__(self, metric_names, primary_metric_name, event_store):
         self.metric_names = list(metric_names)
         self.primary_metric_name = primary_metric_name
+        self.event_store = event_store
 
     async def evaluate(self, request: EvaluationRequest) -> EvaluationResult:
         primary = 0.61 if request.fidelity == Fidelity.PROXY else 0.62
         metrics = {name: primary for name in self.metric_names}
+        seed_evidence_event_ids = []
+        stability = Stability.NOT_APPLICABLE
+        if request.fidelity == Fidelity.FULL:
+            execution = next(
+                event.payload.request
+                for event in reversed(
+                    self.event_store.read_events(repair_tail=True)
+                )
+                if event.event_type.value == "execution.started"
+                and event.payload.request.experiment_id == request.experiment_id
+                and event.payload.request.attempt == request.attempt
+            )
+            if execution.command_id != "clean_reproduce":
+                seed_evidence_event_ids = [
+                    event.event_id
+                    for event in self.event_store.read_events(repair_tail=True)
+                    if event.event_type.value == "evaluation.completed"
+                    and event.payload.result.experiment_id == request.experiment_id
+                    and event.payload.result.population == request.population
+                    and event.payload.result.fidelity == request.fidelity
+                ]
+            stability = (
+                Stability.CONFIRMED
+                if len(seed_evidence_event_ids) >= 2
+                else Stability.SINGLE_SEED
+            )
+        confirmed = stability == Stability.CONFIRMED
         return EvaluationResult(
             run_id=request.run_id,
             experiment_id=request.experiment_id,
@@ -309,10 +340,15 @@ class FakeEvaluator:
             ),
             trust=TrustAssessment(
                 verdict=TrustVerdict.ACCEPTED,
-                stability=Stability.SINGLE_SEED,
+                stability=stability,
                 integrity=Integrity.CLEAN,
                 flags=[],
+                eta_applied=0.0016,
+                seed_mean=primary if confirmed else None,
+                seed_stderr=0.0 if confirmed else None,
+                seed_count=len(seed_evidence_event_ids) + 1,
             ),
+            seed_evidence_event_ids=seed_evidence_event_ids,
         )
 
     async def decide(
@@ -322,10 +358,47 @@ class FakeEvaluator:
             decision = ExperimentDecisionKind.PROMOTE
             next_fidelity = Fidelity.FULL
             best_eligible = False
+        elif result.trust.stability != Stability.CONFIRMED:
+            decision = ExperimentDecisionKind.PROMOTE
+            next_fidelity = Fidelity.FULL
+            best_eligible = False
         else:
             decision = ExperimentDecisionKind.ACCEPT
             next_fidelity = None
             best_eligible = result.metric_set.primary_score > context.previous_best_score
+        evaluation_event = next(
+            (
+                event
+                for event in reversed(
+                    self.event_store.read_events(repair_tail=True)
+                )
+                if event.event_type.value == "evaluation.completed"
+                and event.payload.result.experiment_id == result.experiment_id
+                and event.payload.result.attempt == result.attempt
+            ),
+            None,
+        )
+        lesson_candidate = None
+        if result.trust.stability == Stability.CONFIRMED:
+            assert evaluation_event is not None
+            lesson_candidate = LessonCandidate(
+                origin=LessonOrigin.RESEARCH,
+                category=LessonCategory.RESEARCH_RESULT,
+                tags=["feature_cross", "confirmed"],
+                summary=(
+                    "The deterministic feature-cross experiment produced a "
+                    "confirmed clean result."
+                ),
+                applicability="The frozen fake full public-validation frame.",
+                avoid_when="Do not generalize beyond the recorded evaluation frame.",
+                confidence=0.9,
+                source_event_ids=(
+                    list(result.seed_evidence_event_ids)
+                    + [evaluation_event.event_id]
+                ),
+                source_commit_shas=["c" * 40],
+                measured_under_frame_experiment_id="baseline",
+            )
         return ExperimentDecision(
             run_id=result.run_id,
             experiment_id=result.experiment_id,
@@ -336,6 +409,7 @@ class FakeEvaluator:
             parent_eligible=True,
             best_eligible=best_eligible,
             next_fidelity=next_fidelity,
+            lesson_candidate=lesson_candidate,
         )
 
 

@@ -54,6 +54,7 @@ from ..git import WorktreeManager
 from ..memory.event_store import EventStore
 from ..memory.projections import project
 from ..recovery import RecoveryManager
+from ..reflection import build_research_lesson
 from ..run_layout import run_artifact_root
 from ..safety import (
     DataAccessPolicy,
@@ -589,6 +590,8 @@ class ProtectedEvaluationBridge:
                 and event.payload.result.population == request.population
                 and event.payload.result.fidelity == request.fidelity
                 and event.payload.result.attempt < request.attempt
+                and self._execution_request(event.causation_event_id).patch_commit_sha
+                == execution_request.patch_commit_sha
             )
             if execution_request.command_id != "clean_reproduce"
             else ()
@@ -660,7 +663,61 @@ class ProtectedEvaluationBridge:
                 ),
             ),
         )
-        return decision.to_canonical()
+        canonical = decision.to_canonical()
+        spec = self._experiment_spec(result.experiment_id)
+        execution = self._execution_request(evaluation_event.causation_event_id)
+        lesson = build_research_lesson(
+            domain,
+            tuple(domain.seed_evidence_event_ids) + (evaluation_event.event_id,),
+            (execution.patch_commit_sha,),
+            spec.family,
+            spec.hypothesis,
+            spec.expected_mechanism,
+            (
+                "The frozen %s/%s evaluation frame for the %s stage."
+                % (result.population.value, result.fidelity.value, spec.target_stage)
+            ),
+            (
+                "Do not generalize beyond this frame; the proposal's falsification "
+                "condition was: %s" % spec.falsification_condition
+            ),
+            self._research_frame_id(spec, decision.decision.value),
+        )
+        if lesson is not None:
+            canonical = canonical.model_copy(update={"lesson_candidate": lesson})
+        return canonical
+
+    def _experiment_spec(self, experiment_id: str) -> Any:
+        event = next(
+            (
+                item
+                for item in self.event_store.read_events(repair_tail=True)
+                if item.payload.type == "experiment.proposed"
+                and item.payload.spec.experiment_id == experiment_id
+            ),
+            None,
+        )
+        if event is None:
+            raise ContractError("evaluation cannot resolve its experiment proposal")
+        return event.payload.spec
+
+    def _research_frame_id(self, spec: Any, decision: str) -> str:
+        if spec.family == "objective" and decision == "accept":
+            return spec.experiment_id
+        proposals = {
+            event.payload.spec.experiment_id: event.payload.spec
+            for event in self.event_store.read_events(repair_tail=True)
+            if event.payload.type == "experiment.proposed"
+        }
+        parent_id = spec.parent_experiment_id
+        while parent_id and parent_id != "baseline":
+            parent = proposals.get(parent_id)
+            if parent is None:
+                break
+            if parent.family == "objective":
+                return parent.experiment_id
+            parent_id = parent.parent_experiment_id
+        return "baseline"
 
     def _resolve_gate(self, event_id: str) -> OutputGateEvidence:
         event = next(

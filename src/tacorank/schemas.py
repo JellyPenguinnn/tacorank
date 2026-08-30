@@ -498,6 +498,16 @@ class LessonCandidate(StrictModel):
     confidence: float = Field(ge=0.0, le=1.0)
     source_event_ids: List[NonEmptyStr] = Field(default_factory=list)
     source_commit_shas: List[NonEmptyStr] = Field(default_factory=list)
+    measured_under_frame_experiment_id: Optional[NonEmptyStr] = None
+
+    @field_validator("measured_under_frame_experiment_id")
+    @classmethod
+    def validate_frame_id(cls, value: Optional[str]) -> Optional[str]:
+        return (
+            None
+            if value is None
+            else _validate_id(value, "measured_under_frame_experiment_id")
+        )
 
 
 class ExperimentSpec(StrictModel):

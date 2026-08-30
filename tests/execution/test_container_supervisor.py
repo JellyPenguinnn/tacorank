@@ -68,7 +68,7 @@ def test_supervisor_holds_candidate_container_until_controller_release(
     control = Path("/tmp/tacorank-{0}-control".format(secrets.token_hex(12)))
     marker = tmp_path / "candidate-finished"
     command = (
-        str(Path(sys.executable).resolve()),
+        sys.executable,
         "-m",
         "tacorank.execution.container_supervisor",
         "run",

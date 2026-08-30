@@ -133,5 +133,7 @@ def test_execution_attempts_are_unique_across_fidelities(harness, baseline_evalu
         "smoke",
         "proxy",
         "full",
+        "full",
+        "full",
     ]
-    assert [request.attempt for request in requests] == [1, 2, 3]
+    assert [request.attempt for request in requests] == [1, 2, 3, 4, 5]

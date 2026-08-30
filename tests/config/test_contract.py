@@ -75,3 +75,18 @@ def test_coding_token_limit_is_unbounded_by_default(config):
     parsed = RunConfig.model_validate(payload)
 
     assert parsed.coding_token_limit is None
+
+
+@pytest.mark.parametrize(
+    "seeds,match",
+    [
+        ([11, 11, 33], "distinct seeds"),
+        ([11, 22], "confirmation seed"),
+    ],
+)
+def test_seed_schedule_covers_distinct_confirmation_evidence(config, seeds, match):
+    payload = config.model_dump(mode="python")
+    payload["seed_schedule"] = seeds
+
+    with pytest.raises(ValueError, match=match):
+        RunConfig.model_validate(payload)

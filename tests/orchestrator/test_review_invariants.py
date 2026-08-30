@@ -20,6 +20,7 @@ from tacorank.schemas import (
     RecoveryDecidedPayload,
     RecoveryDecision,
     RunOutcome,
+    Stability,
 )
 
 
@@ -208,7 +209,10 @@ def test_rejected_decision_cannot_be_best_eligible(harness, baseline_evaluation)
     index = event_index(
         events,
         EventType.EXPERIMENT_DECIDED,
-        lambda event: event.payload.decision.fidelity_completed == Fidelity.FULL,
+        lambda event: (
+            event.payload.decision.fidelity_completed == Fidelity.FULL
+            and event.payload.decision.decision == ExperimentDecisionKind.ACCEPT
+        ),
     )
     original = events[index].payload
     rejected = original.decision.model_copy(
@@ -222,6 +226,66 @@ def test_rejected_decision_cannot_be_best_eligible(harness, baseline_evaluation)
     with pytest.raises(TransitionError, match="accepted experiment"):
         validate_transition(
             events[:index], original.model_copy(update={"decision": rejected})
+        )
+
+
+def test_unconfirmed_decision_cannot_be_best_eligible(harness, baseline_evaluation):
+    events = completed_events(harness, baseline_evaluation)
+    decision_index = event_index(
+        events,
+        EventType.EXPERIMENT_DECIDED,
+        lambda event: (
+            event.payload.decision.fidelity_completed == Fidelity.FULL
+            and event.payload.decision.decision == ExperimentDecisionKind.ACCEPT
+        ),
+    )
+    decision = events[decision_index].payload
+    evaluation_index = next(
+        index
+        for index, event in enumerate(events[:decision_index])
+        if event.event_id == decision.decision.evaluation_event_id
+    )
+    evaluation_event = events[evaluation_index]
+    unconfirmed = evaluation_event.payload.result.model_copy(
+        update={
+            "trust": evaluation_event.payload.result.trust.model_copy(
+                update={"stability": Stability.SINGLE_SEED}
+            )
+        }
+    )
+    prefix = list(events[:decision_index])
+    prefix[evaluation_index] = evaluation_event.model_copy(
+        update={
+            "payload": evaluation_event.payload.model_copy(
+                update={"result": unconfirmed}
+            )
+        }
+    )
+
+    with pytest.raises(TransitionError, match="confirmed clean"):
+        validate_transition(prefix, decision)
+
+
+def test_proxy_negative_cannot_be_recorded_as_research_lesson(
+    harness, baseline_evaluation
+):
+    events = completed_events(harness, baseline_evaluation)
+    lesson_index = event_index(events, EventType.LESSON_RECORDED)
+    lesson = events[lesson_index].payload
+    proxy_evaluation = next(
+        event
+        for event in events[:lesson_index]
+        if event.event_type == EventType.EVALUATION_COMPLETED
+        and event.payload.result.fidelity == Fidelity.PROXY
+    )
+    unsupported = lesson.candidate.model_copy(
+        update={"source_event_ids": [proxy_evaluation.event_id]}
+    )
+
+    with pytest.raises(TransitionError, match="eligible evidence"):
+        validate_transition(
+            events[:lesson_index],
+            lesson.model_copy(update={"candidate": unsupported}),
         )
 
 
