@@ -304,14 +304,14 @@ Deterministic tests do not substitute for a live provider, Docker, data, or elap
 
 As of 2026-08-30:
 
-- The current complete automated suite passes 488 tests, with 11 expected platform skips.
+- The current complete automated suite passes 509 tests, with 11 expected platform skips.
 - A bounded live CPU run used the production DeepSeek researcher, pinned Trae worker, hardened Docker runner, and official KuaiRand-Pure data.
 - Trae produced a pairwise BPR candidate that changed only `solution/candidate.py`; all 14 Gate A checks and all 11 Gate B checks passed for both smoke and proxy execution.
 - Protected proxy evaluation scored GAUC `0.62112551`, nDCG@5 `0.51277198`, and primary `0.56694875`, so the controller correctly pruned the candidate.
 - The one-experiment budget selected the still-best official FM baseline and produced a manifest-attested 170,588-row test submission accepted by both TacoRank and the official checker. The 20-event ledger replayed successfully.
 - A separate live iterative regression run completed its first real coding, Gate A, CPU smoke/proxy, Gate B, protected evaluation, and prune cycle, then durably created and proposed `exp_002` and entered its new Trae coding context. It was intentionally stopped during that second coding pass after the continuation behavior was observed.
 - Post-run forensics found that the editable popularity parent scored `0.580721929` while the separately evaluated official FM scored `0.601468756`. The repaired candidate now reproduces the official FM bytes exactly; a full 124,909-row CPU replay returned GAUC `0.6671326322`, nDCG@5 `0.5358048805`, and primary `0.6014687564`.
-- The `exp_006` malformed DeepSeek tool-argument path is covered by an executable compatibility-patch test plus controller integration tests for redacted evidence, provider-token/wall-time accounting, one bounded coding retry, causal attempt identity, experiment-local abandonment, and continued planning. A new live provider run still requires a fresh clean deployment and is not implied by these deterministic checks.
+- The `exp_006` malformed DeepSeek tool-argument path is covered by an executable compatibility-patch test plus integration with Waihong's bounded self-recovery policy. The worker retains redacted evidence and exact provider-token/wall-time accounting; malformed arguments are corrected inside Trae first, while any remaining adapter failure follows the policy's classified same-commit retry, abandon, or stop decision. A new live provider run still requires a fresh clean deployment and is not implied by these deterministic checks.
 
 This proves a real integrated baseline path, live cross-iteration continuation, and current executable FM parity—not elapsed live convergence or a winning candidate. The bounded acceptance could not exercise three non-improving full iterations, and the candidate-best clean-reproduction path was not entered because the candidate failed proxy. Deterministic integration tests cover those control paths. Full historical evidence and scope are recorded in [`docs/person3-handoff.md`](docs/person3-handoff.md).
 

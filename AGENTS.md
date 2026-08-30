@@ -393,7 +393,7 @@ Use the exact immutable configurations generated for that run:
 | Run ID already has a ledger | Do not reuse it. Inspect/validate it or select a new run ID. |
 | `resume` rejects the phase | Preserve evidence; the state is ambiguous and requires operator review. |
 | Candidate fails Gate A or Gate B | Follow typed bounded recovery; never weaken a gate to admit the candidate. |
-| Trae reports malformed or truncated tool JSON | Preserve the `adapter.failed` evidence. The pinned client first requests a smaller valid call in-loop, then the controller allows one clean retry of the same frozen assignment. A second failure invalidates only that experiment; do not hand-edit its worktree or ledger. |
+| Trae reports malformed or truncated tool JSON | Preserve the `adapter.failed` evidence. The pinned client first requests a smaller valid call in-loop. If a failure remains, follow Waihong's bounded self-recovery classification and its same-commit retry, abandon, or stop decision; do not hand-edit the worktree or ledger. |
 | Proxy/full score regresses | Let the deterministic controller prune/reject and continue with the legal search policy. |
 | `fatal_integrity` or final `failed` | Stop, preserve evidence, identify the violated invariant, and do not call the run successful. |
 

@@ -304,14 +304,14 @@ PYTHONPATH=src:. .venv/bin/python -m pytest \
 
 截至 2026-08-30：
 
-- 当前完整自动化测试套件通过 488 项测试，并有 11 项符合预期的平台跳过。
+- 当前完整自动化测试套件通过 509 项测试，并有 11 项符合预期的平台跳过。
 - 一次有界实时 CPU 运行使用了生产 DeepSeek 研究员、固定 Trae 工作器、加固 Docker runner 和官方 KuaiRand-Pure 数据。
 - Trae 生成了仅修改 `solution/candidate.py` 的 pairwise BPR 候选；14 项 Gate A 检查全部通过，smoke 与 proxy 的 11 项 Gate B 检查也全部通过。
 - 受保护 proxy 评测得到 GAUC `0.62112551`、nDCG@5 `0.51277198`、primary `0.56694875`，因此控制器正确剪枝该候选。
 - 一实验预算选择了仍然最优的官方 FM 基线，生成了通过 TacoRank 和官方 checker 的、由 manifest 证明的 170,588 行 test 提交；20 事件账本成功重放。
 - 另一次真实迭代回归运行完成了第一轮编码、Gate A、CPU smoke/proxy、Gate B、受保护评测与剪枝，随后持久化创建并提出 `exp_002`，进入新的 Trae 编码上下文。观察到跨轮继续行为后，该运行在第二轮编码期间被有意停止。
 - 运行后取证发现，可编辑的 popularity 父模型得分为 `0.580721929`，而被单独评测的官方 FM 为 `0.601468756`。修复后的候选现在会逐字节复现官方 FM；对 124,909 行 full validation 的 CPU 重放得到 GAUC `0.6671326322`、nDCG@5 `0.5358048805`、primary `0.6014687564`。
-- 针对 `exp_006` 的 DeepSeek 畸形工具参数路径，现有可执行兼容补丁测试和控制器集成测试覆盖了脱敏证据、provider token/耗时记账、一次有界编码重试、因果 attempt identity、仅放弃当前实验以及继续规划。新的真实 provider 验证仍需从干净 commit 重新生成 deployment，不能由这些确定性检查推断。
+- 针对 `exp_006` 的 DeepSeek 畸形工具参数路径，现有可执行兼容补丁测试已与 Waihong 的有界自恢复策略集成。工作器会保留脱敏证据以及准确的 provider token/耗时记账；畸形参数先在 Trae 内部纠正，若仍形成 adapter failure，则由该策略分类决定同 commit 重试、放弃或停止。新的真实 provider 验证仍需从干净 commit 重新生成 deployment，不能由这些确定性检查推断。
 
 以上证据证明了真实集成的基线路径、跨迭代继续行为和当前可执行 FM 一致性，但并不证明经过实际时间的实时收敛，也不证明已经产生获胜候选。有界验收没有执行连续三次无提升的 full 迭代；由于候选在 proxy 失败，也没有进入 candidate-best clean reproduction 路径。确定性集成测试覆盖了这些控制路径。历史证据与范围见 [`docs/person3-handoff.md`](docs/person3-handoff.md)。
 
