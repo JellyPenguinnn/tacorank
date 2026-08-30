@@ -8,7 +8,13 @@ from tacorank.context.builder import ContextBuildError
 from tacorank.orchestrator.fakes import FakeCodingWorker, FakeExecutionRunner
 from tacorank.orchestrator.state import ExperimentStatus
 from tacorank.recovery.policy import RecoveryManager
-from tacorank.schemas import EventType, RecoveryAction, RunOutcome
+from tacorank.schemas import (
+    EventType,
+    PlannerAction,
+    PlannerOutput,
+    RecoveryAction,
+    RunOutcome,
+)
 
 
 class RepairingCodingWorker(FakeCodingWorker):
@@ -82,6 +88,23 @@ class PermanentInitialCodingWorker(FakeCodingWorker):
         )
 
 
+class ProposeThenBlockPlanner:
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.calls = 0
+
+    async def propose(self, context):
+        self.calls += 1
+        if self.calls == 1:
+            return await self.delegate.propose(context)
+        return PlannerOutput(
+            action=PlannerAction.BLOCKED,
+            reason_code="portfolio_exhausted",
+            reason="No reviewed non-duplicate method remains.",
+            supporting_event_ids=context.source_event_ids,
+        )
+
+
 def test_coder_context_failure_is_recorded_at_the_coding_boundary(
     harness, baseline_evaluation, monkeypatch
 ):
@@ -102,7 +125,9 @@ def test_coder_context_failure_is_recorded_at_the_coding_boundary(
         if event.event_type == EventType.ADAPTER_FAILED
     )
     assert failure.payload.result.failure_stage == "coding"
-    assert state.stop_reason_code == "ADAPTER_FAILURE_ABANDON"
+    assert state.stop_reason_code is None
+    assert state.phase == "planning"
+    assert state.current_experiment.status.value == "invalid"
 
 
 class FailOnceRunner(FakeExecutionRunner):
@@ -235,7 +260,7 @@ def test_real_recovery_repairs_gates_reruns_and_replays(
     assert replay(events).experiments["exp_001"].repair_count == 1
 
 
-def test_trae_exception_is_recorded_and_stops_fail_closed(
+def test_trae_exception_quarantines_candidate_and_returns_to_planning(
     harness, baseline_evaluation
 ):
     artifacts = harness.event_store.artifact_store
@@ -260,8 +285,10 @@ def test_trae_exception_is_recorded_and_stops_fail_closed(
     assert adapter_failures[0].payload.result.failure_stage == "coding"
     assert len(worker.repair_calls) == 1
     assert decisions[-1].action == RecoveryAction.ABANDON
-    assert state.status.value == "stopped"
-    assert replay(events).status.value == "stopped"
+    assert state.status.value == "running"
+    assert state.phase == "planning"
+    assert state.current_experiment.status == ExperimentStatus.INVALID
+    assert replay(events).status.value == "running"
 
 
 def test_transient_initial_coding_failure_retries_and_persists_redacted_tail(
@@ -353,6 +380,29 @@ def test_permanent_initial_coding_failure_abandons_only_the_experiment(
     assert state.experiments["exp_001"].status == ExperimentStatus.INVALID
     assert state.phase == "planning"
     assert state.status.value == "running"
+
+
+def test_outer_loop_replans_after_abandoned_candidate(
+    harness, baseline_evaluation
+) -> None:
+    planner = ProposeThenBlockPlanner(harness.planner)
+    harness.planner = planner
+    harness.coding_worker = PermanentInitialCodingWorker(
+        harness.event_store.artifact_store
+    )
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_until_stopped())
+
+    assert planner.calls == 2
+    assert state.experiments["exp_001"].status == ExperimentStatus.INVALID
+    assert state.stop_reason_code == "no_legal_proposal"
+    assert [
+        event.payload.reason_code
+        for event in harness.events()
+        if event.event_type == EventType.RUN_STOPPED
+    ] == ["no_legal_proposal"]
 
 
 def test_real_recovery_allows_only_one_same_commit_retry_across_fingerprints(

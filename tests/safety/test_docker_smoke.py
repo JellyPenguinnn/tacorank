@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 from types import SimpleNamespace
 
 import pytest
 
-from tacorank.safety.docker_smoke import DockerEntrypointSmokeCheck
+from tacorank.safety.docker_smoke import DockerEntrypointSmokeCheck, _IMPORT_SCRIPT
 
 
 _FAKE_DOCKER = r'''import json
@@ -80,6 +83,35 @@ def test_docker_smoke_uses_read_only_no_network_import_boundary(
     assert run[-1] == "solution.candidate:run"
     assert calls[-2][:2] == ["rm", "--force"]
     assert calls[-1][:3] == ["inspect", "--type", "container"]
+
+
+def test_docker_smoke_executes_history_affinity_with_hash_bound_inputs(
+    tmp_path: Path,
+) -> None:
+    source = Path(__file__).resolve().parents[2] / "solution"
+    target = tmp_path / "solution"
+    shutil.copytree(source, target)
+    config_path = target / "experiment_config.py"
+    config = config_path.read_text(encoding="utf-8")
+    config = config.replace('"family": "objective"', '"family": "features"')
+    config = config.replace(
+        '"formulation": "passthrough"',
+        '"formulation": "history_affinity"',
+    )
+    config_path.write_text(config, encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", _IMPORT_SCRIPT, "solution.candidate:run"],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stdout
 
 
 def test_docker_smoke_reports_candidate_import_failure(

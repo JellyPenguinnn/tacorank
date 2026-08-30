@@ -22,6 +22,7 @@ _IMPORT_SCRIPT = """import csv
 import hashlib
 import importlib
 import inspect
+import json
 import math
 from pathlib import Path
 import sys
@@ -38,7 +39,7 @@ parameters = tuple(inspect.signature(implementation).parameters)
 if parameters != ("invocation",):
     raise SystemExit("entrypoint signature must be run(invocation)")
 
-with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+with tempfile.TemporaryDirectory(dir=str(Path("/tmp").resolve())) as temporary:
     root = Path(temporary)
     input_root = root / "input"
     input_root.mkdir()
@@ -64,6 +65,45 @@ with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
     digest = hashlib.sha256(parent.read_bytes()).hexdigest()
     (input_root / "fm_baseline_predictions.sha256").write_text(
         digest + "\\n", encoding="ascii"
+    )
+    history_columns = (
+        "row_id", "date", "time_ms", "user_id", "video_id",
+        "history_exposure", "global_positive_rate", "tag_exposure",
+        "tag_positive", "tag_coverage", "tag_positive_age_days",
+        "author_exposure", "author_positive", "author_positive_age_days",
+        "duration_exposure", "duration_positive", "tab_exposure",
+        "tab_positive", "hour_sin", "hour_cos", "weekday_sin",
+        "weekday_cos", "log_duration_scaled", "item_age_scaled",
+        "duration_bucket",
+    )
+    history_train = input_root / "history_train.csv"
+    history_train.write_text(
+        ",".join((*history_columns, "long_view")) + "\\n"
+        "0,20220401,1648771200000,1,10,0,0.5,0,0,0,-1,0,0,-1,0,0,0,0,0,1,0.5,-0.5,0.5,0.1,le_7s,1\\n"
+        "1,20220402,1648857600000,1,11,1,0.5,2,1,1,1,1,0,-1,1,0,1,0,0.5,0.5,-0.5,-0.5,0.7,0.2,le_18s,0\\n",
+        encoding="utf-8",
+    )
+    history_score = input_root / "history_score.csv"
+    history_score.write_text(
+        ",".join(history_columns) + "\\n"
+        "0,20220403,1648944000000,1,10,2,0.5,3,2,1,1,2,1,1,2,1,2,1,0,1,0.5,-0.5,0.5,0.1,le_7s\\n"
+        "1,20220403,1648944001000,1,11,2,0.5,3,1,1,1,2,0,-1,2,0,2,0,0,1,0.5,-0.5,0.7,0.2,le_18s\\n",
+        encoding="utf-8",
+    )
+    history_manifest = {
+        "schema_version": "1.0",
+        "train_file": history_train.name,
+        "train_sha256": hashlib.sha256(history_train.read_bytes()).hexdigest(),
+        "score_file": history_score.name,
+        "score_sha256": hashlib.sha256(history_score.read_bytes()).hexdigest(),
+        "train_columns": [*history_columns, "long_view"],
+        "score_columns": list(history_columns),
+        "feature_columns": list(history_columns[5:]),
+        "history_update_policy": "emit_before_update_train_frozen_for_score",
+        "static_feature_policy": "candidate_conditioned_context_only",
+    }
+    (input_root / "history-feature-manifest.json").write_text(
+        json.dumps(history_manifest, sort_keys=True), encoding="utf-8"
     )
     outputs = []
     for attempt in (1, 2):

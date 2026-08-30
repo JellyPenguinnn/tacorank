@@ -742,9 +742,14 @@ class Harness:
             failure_event.payload.result,
             experiment_id,
         )
-        # An exception means the normal continuation point is unknown. Even
-        # when policy records a repair/retry action, stop rather than guessing
-        # which side effects completed. Resume can inspect the durable evidence.
+        # A terminal recovery action has already quarantined the experiment and
+        # restored the deterministic planning boundary. Retry/repair actions
+        # still stop because their continuation point may contain unknown side
+        # effects and must not be guessed.
+        if action in (RecoveryAction.ABANDON, RecoveryAction.ROLLBACK):
+            recovered = self.state()
+            if recovered.phase == "planning":
+                return recovered
         self.stop(
             StopDecision(
                 True,
