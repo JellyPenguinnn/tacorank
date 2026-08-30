@@ -605,6 +605,40 @@ def test_gate_a_attempt_one_rejects_different_experiment_root(tmp_path: Path) ->
     }
 
 
+def test_gate_a_rejects_files_outside_experiment_spec_targets(tmp_path: Path) -> None:
+    repository, artifacts, root_commit, manifest = layout(tmp_path)
+    candidate = commit_candidate(
+        repository,
+        {
+            "solution/candidate.py": "def run(invocation):\n    return None\n",
+            "solution/smoke_check.py": "UNPLANNED = True\n",
+        },
+        artifact_repository_root=artifacts,
+    )
+    gate = make_patch_gate(
+        repository,
+        manifest,
+        artifact_repository_root=artifacts,
+    )
+
+    result = run(
+        gate.check(
+            candidate,
+            experiment_root_commit_sha=root_commit,
+            authorized_changed_files=("solution/candidate.py",),
+        )
+    )
+
+    assert not result.accepted
+    assert ViolationCode.UNAPPROVED_TARGET_FILE.value in {
+        violation.code for violation in result.violations
+    }
+    assert any(
+        violation.path == "solution/smoke_check.py"
+        for violation in result.violations
+    )
+
+
 def test_diff_parser_marks_traversal_without_resolving_it() -> None:
     diff_bytes = diff_for("../contract/rules.md", "changed = True\n")
     parsed = parse_git_diff(diff_bytes)

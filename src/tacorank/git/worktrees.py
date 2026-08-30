@@ -380,6 +380,59 @@ class WorktreeManager:
     ) -> str:
         """Verify path ownership, branch identity, commit, and optional cleanliness."""
 
+        actual_path, expected = self._verify_identity_and_head(
+            record, expected_commit_sha=expected_commit_sha
+        )
+        self._verify_submodules(actual_path, expected)
+        if require_clean:
+            status = _git(
+                actual_path,
+                (
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignored=matching",
+                ),
+            ).stdout
+            if status:
+                raise GitOperationError("WORKTREE_DIRTY", "experiment worktree is not clean")
+        return expected
+
+    def discard_uncommitted_changes(
+        self,
+        record: WorktreeRecord,
+        *,
+        expected_commit_sha: str,
+    ) -> None:
+        """Restore a leased disposable worktree to its exact clean commit.
+
+        This is intentionally narrower than a general reset primitive.  The
+        caller must hold the worktree lease, and identity, branch, HEAD, and
+        every required submodule are verified before any cleanup occurs.
+        """
+
+        actual_path, expected = self._verify_identity_and_head(
+            record, expected_commit_sha=expected_commit_sha
+        )
+        self._verify_submodules(actual_path, expected, require_clean=False)
+        for path in self.required_submodules:
+            target = actual_path.joinpath(*PurePosixPath(path).parts)
+            submodule_commit = self._gitlink_sha(expected, path)
+            _git(target, ("reset", "--hard", submodule_commit))
+            _git(target, ("clean", "-ffdx", "--", "."))
+        _git(actual_path, ("reset", "--hard", expected))
+        _git(actual_path, ("clean", "-ffdx", "--", "."))
+        self.verify(record, expected_commit_sha=expected, require_clean=True)
+
+    def _verify_identity_and_head(
+        self,
+        record: WorktreeRecord,
+        *,
+        expected_commit_sha: str,
+    ) -> Tuple[Path, str]:
+        """Bind a record to one registered branch and immutable HEAD."""
+
         expected_path = self.path_for(record.run_id, record.experiment_id)
         actual_path = Path(record.path).resolve(strict=True)
         if actual_path != expected_path:
@@ -416,21 +469,7 @@ class WorktreeManager:
                 "WORKTREE_BRANCH_MISMATCH",
                 f"worktree branch {checked_out_branch!r} is not {expected_branch!r}",
             )
-        self._verify_submodules(actual_path, expected)
-        if require_clean:
-            status = _git(
-                actual_path,
-                (
-                    "status",
-                    "--porcelain=v1",
-                    "-z",
-                    "--untracked-files=all",
-                    "--ignored=matching",
-                ),
-            ).stdout
-            if status:
-                raise GitOperationError("WORKTREE_DIRTY", "experiment worktree is not clean")
-        return current
+        return actual_path, current
 
     def remove(
         self,
@@ -522,7 +561,13 @@ class WorktreeManager:
             )
         self._verify_submodules(record.path, commit_sha)
 
-    def _verify_submodules(self, worktree: Path, commit_sha: str) -> None:
+    def _verify_submodules(
+        self,
+        worktree: Path,
+        commit_sha: str,
+        *,
+        require_clean: bool = True,
+    ) -> None:
         declarations = self._submodule_declarations(commit_sha)
         for path in sorted(declarations):
             target = worktree.joinpath(*PurePosixPath(path).parts)
@@ -547,20 +592,21 @@ class WorktreeManager:
                     "SUBMODULE_COMMIT_MISMATCH",
                     f"submodule {path} is not at the exact reviewed gitlink commit",
                 )
-            status = _git(
-                target,
-                (
-                    "status",
-                    "--porcelain=v1",
-                    "-z",
-                    "--untracked-files=all",
-                    "--ignored=matching",
-                ),
-            ).stdout
-            if status:
-                raise GitOperationError(
-                    "SUBMODULE_DIRTY", f"submodule worktree is dirty: {path}"
-                )
+            if require_clean:
+                status = _git(
+                    target,
+                    (
+                        "status",
+                        "--porcelain=v1",
+                        "-z",
+                        "--untracked-files=all",
+                        "--ignored=matching",
+                    ),
+                ).stdout
+                if status:
+                    raise GitOperationError(
+                        "SUBMODULE_DIRTY", f"submodule worktree is dirty: {path}"
+                    )
 
     def _submodule_declarations(self, commit_sha: str) -> Dict[str, str]:
         commit = resolve_commit(self.repository, commit_sha)

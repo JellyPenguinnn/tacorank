@@ -50,6 +50,7 @@ Coding and execution share `WorktreeManager.acquire_lease(record, timeout_second
 approved ExperimentSpec
   -> disposable experiment/<run_id>/<experiment_id> worktree
   -> bounded Trae invocation and exact diff/trajectory capture
+  -> DeepSeek plan-to-code review <-> bounded Trae revision (maximum 5 reviews)
   -> deterministic Gate A checks
   -> commit/diff/hash-bound verification receipt
   -> allowlisted command in a sanitized process group or container
@@ -58,6 +59,8 @@ approved ExperimentSpec
   -> deterministic Gate B prediction checks
   -> accepted OutputCheckResult returned to Person 2
 ```
+
+The initial Trae allowance is 64 steps and a controller-requested external repair receives 48; verifier-requested revisions use a separate 32-step allowance while sharing the original coding action's hard wall deadline. Prompts require Trae to call `task_done` immediately after the required edit and one bounded recheck. The verifier receives no protected metrics or hidden labels and cannot issue a Gate A receipt. Gate A independently rejects files outside the exact `ExperimentSpec.target_files` set and imports `solution.candidate:run` in a read-only, network-disabled Docker container before acceptance.
 
 No execution may consume a raw LLM command. A repaired commit invalidates the earlier receipt and must pass Gate A again.
 
@@ -84,7 +87,8 @@ The controller-owned `tacorank.execution.solution_cli` is the research-neutral f
 Person 2 now routes this stage for every proposal and for post-stop finalization:
 
 ```text
-Trae patch -> Gate A -> smoke/proxy/full CPU execution -> Gate B
+Trae patch <-> implementation verifier (max 5) -> Gate A
+           -> smoke/proxy/full CPU execution -> Gate B
            -> protected evaluation/decision -> next ledger-derived proposal
 
 selected candidate -> clean_reproduce -> Gate B -> protected score check
@@ -150,7 +154,7 @@ This run proves the live researcher, Trae, Gate A, isolated CPU smoke/proxy exec
 
 Forensics on `run_004` found two independent defects. First, `solution/candidate.py` used a popularity approximation (`0.580721929` full-validation primary) while the controller compared it with a separately generated official FM baseline (`0.601468756`). `setup-live` now places the exact FM score and digest in every candidate view, executes the checked-in candidate on all four routes, and binds a byte-parity receipt into preflight. A direct 124,909-row full replay of the corrected candidate matched FM SHA-256 `2997989972ada35ab246966c0b2bc3f020a141d284bbe5dddee76327cda1a733` and returned GAUC `0.6671326321610643`, nDCG@5 `0.5358048805448538`, primary `0.601468756352959`.
 
-Second, `exp_006` ended when the pinned client called `json.loads()` directly on a truncated DeepSeek tool argument. The compatibility behavior above now corrects malformed arguments inside Trae; the outer controller records typed `adapter.failed` evidence, exact parsed provider usage when available, wall time, and redacted artifacts, then delegates any remaining failure to Waihong's bounded self-recovery policy. Label-free candidate diagnostics expose within-user rankability, repeated-item personalization, residual scale, and FM correlation to the next planner. The complete deterministic suite passes 509 tests with 11 expected platform skips. These rebased corrections have not yet been exercised by a new paid live provider run; regenerate deployment from the final clean commit before claiming that evidence level.
+Second, `exp_006` ended when the pinned client called `json.loads()` directly on a truncated DeepSeek tool argument. The compatibility behavior above now corrects malformed arguments inside Trae; the outer controller records typed `adapter.failed` evidence, exact parsed provider usage when available, wall time, and redacted artifacts, then delegates any remaining failure to Waihong's bounded self-recovery policy. Label-free candidate diagnostics expose within-user rankability, repeated-item personalization, residual scale, and FM correlation to the next planner. The complete deterministic suite passes 549 tests with 11 expected platform skips, including the semantic-verifier, clean same-commit retry, failure-trajectory accounting, and isolated-import regressions. These rebased corrections have not yet been exercised by a new paid live provider run; regenerate deployment from the final clean commit before claiming that evidence level.
 
 ## Earlier full-validation diagnostic evidence
 

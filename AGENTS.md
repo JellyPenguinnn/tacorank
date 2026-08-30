@@ -48,6 +48,7 @@ frozen contract and official FM baseline
   -> ledger-derived planner context
   -> DeepSeek research proposal
   -> Trae edit in a disposable Git worktree
+  -> DeepSeek implementation review and bounded Trae revision (at most 5 reviews)
   -> Gate A patch and lineage verification
   -> CPU smoke -> proxy -> full execution
   -> telemetry and bounded recovery
@@ -59,7 +60,7 @@ frozen contract and official FM baseline
   -> final Gate B and official submission check
 ```
 
-The deterministic controller owns workflow state, budgets, recovery routing, promotion, rollback, convergence, final selection, and ledger appends. DeepSeek proposes a bounded research plan. Trae is an edit-only coding worker. Role components return canonical typed records and cannot independently mutate workflow state.
+The deterministic controller owns workflow state, budgets, recovery routing, promotion, rollback, convergence, final selection, and ledger appends. DeepSeek proposes a bounded research plan. Trae is an edit-only coding worker. Before sealing a patch, a separate DeepSeek verifier checks plan-to-code fidelity and may return concrete corrections for at most five internal passes. This verifier is not Gate A, does not receive protected metrics or hidden labels, and does not consume Waihong's two external recovery repairs. Role components return canonical typed records and cannot independently mutate workflow state.
 
 Authoritative surfaces are:
 
@@ -392,6 +393,7 @@ Use the exact immutable configurations generated for that run:
 | Setup directory already exists | Choose a new run/deployment/runtime identity after preserving the existing directory. |
 | Run ID already has a ledger | Do not reuse it. Inspect/validate it or select a new run ID. |
 | `resume` rejects the phase | Preserve evidence; the state is ambiguous and requires operator review. |
+| Candidate fails plan-to-code verification | Inspect `solution_verification.json` and its per-pass trajectory/process artifacts. Do not bypass the verifier; its internal loop is capped at five. |
 | Candidate fails Gate A or Gate B | Follow typed bounded recovery; never weaken a gate to admit the candidate. |
 | Trae reports malformed or truncated tool JSON | Preserve the `adapter.failed` evidence. The pinned client first requests a smaller valid call in-loop. If a failure remains, follow Waihong's bounded self-recovery classification and its same-commit retry, abandon, or stop decision; do not hand-edit the worktree or ledger. |
 | Proxy/full score regresses | Let the deterministic controller prune/reject and continue with the legal search policy. |
@@ -403,7 +405,7 @@ Core code lives under `src/tacorank/`:
 
 - `agents/`, `providers/`, `research/`: bounded research planning and search policy;
 - `memory/`, `context/`, `orchestrator/`: ledger, replay, contexts, state machine, and routing;
-- `coding/`, `git/`, `safety/`, `execution/`: Trae, worktrees, both gates, Docker, and telemetry;
+- `coding/`, `git/`, `safety/`, `execution/`: Trae, bounded implementation verification, worktrees, both gates, Docker, and telemetry;
 - `sre/`, `recovery/`: health observation and bounded recovery;
 - `evaluation/`, `reflection/`, `reporting/`: protected metrics, selection, lessons, and views;
 - `benchmarks/kuairand_pure/`: KuaiRand adapters;
