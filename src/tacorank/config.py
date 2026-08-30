@@ -25,6 +25,17 @@ class ContractError(RuntimeError):
     pass
 
 
+DEFAULT_TARGET_INTERFACE_EXCERPTS = {
+    "solution/candidate.py": (
+        "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
+        "-> None; include this file in target_files; read only "
+        "invocation.input_root and write exactly invocation.output_path as "
+        "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
+        "invocation.seed; return None"
+    )
+}
+
+
 class RunConfig(StrictModel):
     schema_version: Literal["1.0"] = "1.0"
     run_id: NonEmptyStr
@@ -52,16 +63,56 @@ class RunConfig(StrictModel):
     max_confirmation_attempts: int = Field(default=2, ge=0)
     seed_schedule: List[int]
     context_token_limit: int = Field(default=6_000, gt=0)
-    adapter_mode: Literal["fake"] = "fake"
-    research_provider: Literal["fake", "deepseek"]
-    deepseek_model: NonEmptyStr = "deepseek-v4-pro"
+    adapter_mode: Literal["live"] = "live"
+    live_adapter_config_sha256: Optional[str] = None
+    editable_roots: List[str] = Field(default_factory=lambda: ["solution"])
+    allowed_research_families: List[NonEmptyStr] = Field(
+        default_factory=lambda: [
+            "objective",
+            "temporal_history",
+            "multitask",
+            "duration_bias",
+            "features",
+            "model",
+            "sampling",
+            "ensemble",
+            "evaluation",
+            "other",
+        ]
+    )
+    allowed_research_data: List[NonEmptyStr] = Field(
+        default_factory=lambda: [
+            "train_interactions",
+            "public_validation",
+            "user_id",
+            "video_id",
+            "author_id",
+            "tab",
+            "date",
+            "duration_ms",
+            "long_view",
+            "verified_predictions",
+        ]
+    )
+    research_capabilities: List[NonEmptyStr] = Field(default_factory=list)
+    active_research_prohibitions: List[NonEmptyStr] = Field(default_factory=list)
+    prediction_change_no_op_threshold: float = Field(default=0.001, ge=0.0, le=1.0)
+    target_interface_excerpts: Dict[str, str] = Field(
+        default_factory=lambda: dict(DEFAULT_TARGET_INTERFACE_EXCERPTS)
+    )
+    coding_step_limit: int = Field(default=40, gt=0)
+    # ``None`` explicitly disables TacoRank's cumulative coding-trajectory
+    # token gate. Provider/model request limits remain independently enforced.
+    coding_token_limit: Optional[int] = Field(default=None, gt=0)
+    coding_wall_time_limit_seconds: int = Field(default=1800, gt=0)
+    research_provider: Literal["deepseek"] = "deepseek"
+    deepseek_model: NonEmptyStr = "deepseek-v4-flash"
     deepseek_base_url: NonEmptyStr = "https://api.deepseek.com"
     deepseek_api_key_env: NonEmptyStr = "DEEPSEEK_API_KEY"
     deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
-    deepseek_max_output_tokens: int = Field(default=2_000, gt=0)
+    deepseek_max_output_tokens: int = Field(default=8_192, gt=0)
     deepseek_thinking_enabled: bool = True
     deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
-    baseline_metrics: Optional[Dict[str, float]] = None
 
     @field_validator("run_id")
     @classmethod
@@ -85,11 +136,66 @@ class RunConfig(StrictModel):
             raise ValueError("artifact_roots must be unique")
         return roots
 
+    @field_validator("editable_roots")
+    @classmethod
+    def validate_editable_roots(cls, values: List[str]) -> List[str]:
+        if not values:
+            raise ValueError("editable_roots must not be empty")
+        roots = [normalize_relative_path(value) for value in values]
+        if len(roots) != len(set(roots)):
+            raise ValueError("editable_roots must be unique")
+        return roots
+
+    @field_validator(
+        "allowed_research_families",
+        "allowed_research_data",
+        "research_capabilities",
+        "active_research_prohibitions",
+    )
+    @classmethod
+    def validate_unique_research_values(cls, values: List[str]) -> List[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("research contract values must not be blank")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("research contract values must be unique")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_research_contract(self) -> "RunConfig":
+        if not self.allowed_research_families:
+            raise ValueError("allowed_research_families must not be empty")
+        if not self.allowed_research_data:
+            raise ValueError("allowed_research_data must not be empty")
+        return self
+
+    @field_validator("target_interface_excerpts")
+    @classmethod
+    def validate_target_interfaces(cls, values: Dict[str, str]) -> Dict[str, str]:
+        if not values:
+            raise ValueError("target_interface_excerpts must not be empty")
+        normalized: Dict[str, str] = {}
+        for path, excerpt in values.items():
+            target = normalize_relative_path(path)
+            if not excerpt.strip():
+                raise ValueError("target interface excerpts must not be blank")
+            if target in normalized:
+                raise ValueError("target interface paths must be unique")
+            normalized[target] = excerpt.strip()
+        return normalized
+
     @field_validator("data_manifest_sha256", "evaluator_sha256")
     @classmethod
     def validate_hashes(cls, value: str) -> str:
         if not SHA256_RE.fullmatch(value):
             raise ValueError("hashes must be lowercase sha256")
+        return value
+
+    @field_validator("live_adapter_config_sha256")
+    @classmethod
+    def validate_optional_live_config_hash(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not SHA256_RE.fullmatch(value):
+            raise ValueError("live_adapter_config_sha256 must be lowercase sha256")
         return value
 
     @field_validator("deepseek_base_url")
@@ -117,8 +223,8 @@ class RunConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_contract_fields(self) -> "RunConfig":
-        if self.primary_metric_name not in self.metric_names:
-            raise ValueError("primary_metric_name must be listed in metric_names")
+        if not self.metric_names:
+            raise ValueError("metric_names must not be empty")
         if len(set(self.metric_names)) != len(self.metric_names):
             raise ValueError("metric_names must be unique")
         if not self.command_ids or len(set(self.command_ids)) != len(self.command_ids):
@@ -131,11 +237,6 @@ class RunConfig(StrictModel):
             for name, seconds in self.timeout_profiles.items()
         ):
             raise ValueError("timeout profiles must have positive named durations")
-        if self.baseline_metrics is not None:
-            if set(self.baseline_metrics) != set(self.metric_names):
-                raise ValueError("baseline_metrics must exactly match metric_names")
-            if self.primary_metric_name not in self.baseline_metrics:
-                raise ValueError("baseline_metrics is missing the primary metric")
         return self
 
     @classmethod

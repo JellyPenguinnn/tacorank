@@ -14,7 +14,29 @@ TacoRank has exactly three authorities:
 2. `runs/<run_id>/events.jsonl` for dynamic evidence; and
 3. Git for code bytes, diffs, ancestry, and the best pointer.
 
-All status, lesson, summary, graph, and context Markdown files are derived artifacts.
+`state.json`, status, lesson, summary, resource, and graph files are derived
+projections. Context and run-artifact files are immutable evidence referenced by events.
+
+## Run layout
+
+New runs use:
+
+```text
+runs/<run_id>/
+  events.jsonl
+  events.jsonl.lock
+  state.json
+  STATUS.md
+  contexts/
+  lessons/
+  experiment-graph/
+  artifacts/
+  reports/
+```
+
+`state.json` is atomically overwritten after acknowledged events and identifies the
+exact ledger head from which it was built. It is the fast operational view, not an
+independent durable authority. If its head differs from `events.jsonl`, replay wins.
 
 ## Encoding
 
@@ -73,6 +95,7 @@ it never repeats an expensive external action.
 | `patch.checked` | Gate A checks and receipt |
 | `execution.started` | Legal `RunRequest` |
 | `execution.finished` | `RunResult` and measured resources |
+| `adapter.failed` | Typed adapter-boundary failure evidence for recovery |
 | `recovery.decided` | Person 4 `RecoveryDecision` |
 | `output.checked` | Gate B `OutputCheckResult` |
 | `evaluation.completed` | Person 5 metrics and trust assessment |

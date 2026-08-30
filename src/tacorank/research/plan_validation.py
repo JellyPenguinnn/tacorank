@@ -9,7 +9,7 @@ from typing import Any
 
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
 from .graph_view import GraphView, as_list, enum_value, get_value
-from .portfolio import ALL_FAMILIES
+from .method_eligibility import evaluate_method_card, method_card_map
 
 
 HIDDEN_PATTERNS = (
@@ -55,6 +55,10 @@ def _normalized_path(path: Any) -> str | None:
     if pure.is_absolute() or ".." in pure.parts or "\x00" in path:
         return None
     return str(pure)
+
+
+def _path_is_within(path: str, root: str) -> bool:
+    return path == root or path.startswith(root + "/")
 
 
 def _budget_value(budget: Any, *names: str) -> float | None:
@@ -133,12 +137,16 @@ class PlanValidator:
             errors.append("INVALID_PARENT_COMMIT_SHA")
 
         family = str(get_value(spec, "family", ""))
-        allowed = get_value(contract, "allowed_families", None) or get_value(
-            contract, "experiment_families", None
-        )
-        legal_families = set(map(str, as_list(allowed))) if allowed is not None else set(ALL_FAMILIES)
+        allowed = get_value(contract, "allowed_families", None)
+        if allowed is None:
+            allowed = get_value(contract, "experiment_families", None)
+        legal_families = set(map(str, as_list(allowed)))
+        if not legal_families:
+            errors.append("CONTRACT_ALLOWED_FAMILIES_MISSING")
         if family not in legal_families:
             errors.append("ILLEGAL_EXPERIMENT_FAMILY")
+        if not as_list(get_value(contract, "allowed_data", None)):
+            errors.append("CONTRACT_ALLOWED_DATA_MISSING")
         if choice is not None:
             if get_value(choice, "parent", None) is not None and get_value(
                 spec, "parent_experiment_id", None
@@ -172,14 +180,47 @@ class PlanValidator:
             str(item).rstrip("/")
             for item in (get_value(contract, "protected_paths", []) or [])
         }
-        editable = get_value(contract, "editable_paths", None)
+        raw_editable = as_list(get_value(contract, "editable_paths", None))
+        editable = [
+            _normalized_path(str(item).rstrip("/")) for item in raw_editable
+        ]
+        if not raw_editable:
+            errors.append("CONTRACT_EDITABLE_PATHS_MISSING")
+        elif any(path is None for path in editable):
+            errors.append("INVALID_EDITABLE_PATH")
+        editable_roots = [path for path in editable if path is not None]
         for path in normalized_files:
             if path is None:
                 continue
-            if any(path == item or path.startswith(f"{item}/") for item in protected):
+            if any(_path_is_within(path, item) for item in protected):
                 errors.append("PROTECTED_TARGET_PATH")
-            if editable and not any(path == item or path.startswith(f"{item.rstrip('/')}/") for item in editable):
+            if not any(_path_is_within(path, root) for root in editable_roots):
                 errors.append("TARGET_OUTSIDE_EDITABLE_PATHS")
+
+        raw_interfaces = get_value(context, "target_interface_excerpts", None)
+        try:
+            interface_items = list(dict(raw_interfaces or {}).items())
+        except (TypeError, ValueError):
+            interface_items = []
+            errors.append("INVALID_TARGET_INTERFACES")
+        interface_paths: set[str] = set()
+        if not interface_items:
+            errors.append("TARGET_INTERFACES_MISSING")
+        for raw_path, excerpt in interface_items:
+            path = _normalized_path(raw_path)
+            if path is None or not _nonempty(excerpt):
+                errors.append("INVALID_TARGET_INTERFACE")
+                continue
+            interface_paths.add(path)
+        normalized_target_set = {
+            path for path in normalized_files if path is not None
+        }
+        if (
+            normalized_target_set
+            and interface_paths
+            and normalized_target_set.isdisjoint(interface_paths)
+        ):
+            errors.append("TARGET_INTERFACE_NOT_TOUCHED")
 
         fidelity_plan = [
             _normalized_enum(item)
@@ -203,16 +244,43 @@ class PlanValidator:
         if "full" not in fidelity_plan and str(family) == "ensemble":
             warnings.append("ENSEMBLE_WITHOUT_FULL_FIDELITY")
 
-        method_ids = set(map(str, as_list(get_value(spec, "method_card_ids", None))))
+        raw_method_ids = list(
+            map(str, as_list(get_value(spec, "method_card_ids", None)))
+        )
+        method_ids = set(raw_method_ids)
+        if not raw_method_ids:
+            errors.append("METHOD_CARD_REQUIRED")
+        if len(raw_method_ids) != len(method_ids):
+            errors.append("DUPLICATE_METHOD_CARD")
         required_method_id = get_value(choice, "method_card_id", None)
-        if required_method_id and str(required_method_id) not in method_ids:
+        if required_method_id and method_ids != {str(required_method_id)}:
             errors.append("METHOD_POLICY_MISMATCH")
-        known_method_ids = {
-            str(get_value(card, "method_id", ""))
-            for card in as_list(get_value(context, "method_cards", None))
-        }
-        if method_ids and known_method_ids and not method_ids.issubset(known_method_ids):
-            errors.append("UNKNOWN_METHOD_CARD")
+        cards = method_card_map(context)
+        if not cards:
+            errors.append("CONTEXT_METHOD_CARDS_MISSING")
+        for method_id in sorted(method_ids):
+            card = cards.get(method_id)
+            if card is None:
+                errors.append("UNKNOWN_METHOD_CARD")
+                continue
+            eligibility = evaluate_method_card(card, context, family=family)
+            errors.extend(eligibility.reasons)
+            implementation_targets = [
+                _normalized_path(item)
+                for item in as_list(
+                    get_value(card, "implementation_targets", None)
+                )
+            ]
+            if any(item is None for item in implementation_targets):
+                errors.append("METHOD_IMPLEMENTATION_TARGET_INVALID")
+                continue
+            required_targets = {
+                item for item in implementation_targets if item is not None
+            }
+            if required_targets and not required_targets.issubset(interface_paths):
+                errors.append("METHOD_IMPLEMENTATION_TARGET_UNAUTHORIZED")
+            if required_targets and normalized_target_set.isdisjoint(required_targets):
+                errors.append("METHOD_IMPLEMENTATION_TARGET_NOT_TOUCHED")
 
         source_events = set(map(str, as_list(get_value(context, "source_event_ids", None))))
         if any(not EVENT_ID_PATTERN.fullmatch(event_id) for event_id in source_events):
@@ -247,6 +315,15 @@ class PlanValidator:
         cost_tier = _normalized_enum(get_value(cost, "cost_tier", ""))
         if cost_tier not in {"low", "medium", "high"}:
             errors.append("INVALID_COST_TIER")
+        else:
+            cost_order = {"low": 0, "medium": 1, "high": 2}
+            for method_id in method_ids:
+                card = cards.get(method_id)
+                if card is None:
+                    continue
+                method_cost = _normalized_enum(get_value(card, "cost_tier", ""))
+                if method_cost in cost_order and cost_order[cost_tier] < cost_order[method_cost]:
+                    errors.append("METHOD_COST_UNDERESTIMATED")
         budget = get_value(context, "remaining_budget", None) or get_value(
             context, "remaining_budgets", None
         )

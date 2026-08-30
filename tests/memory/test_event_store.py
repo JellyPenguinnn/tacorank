@@ -64,6 +64,25 @@ def test_hash_chain_and_duplicate_idempotency(repository):
         )
 
 
+def test_backward_compatible_defaults_do_not_rewrite_old_ledger(repository):
+    path = repository / "runs/r/events.jsonl"
+    store = EventStore(path, transition_validator=validator)
+    payload = started_payload()
+    store.append(run_id="r", payload=payload, idempotency_key=event_key(payload))
+
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    legacy["payload"].pop("convergence_epsilon")
+    legacy["payload"].pop("convergence_patience")
+    payload_hash = canonical_sha256(legacy["payload"])
+    legacy["idempotency_key"] = "r:run:start:0:%s" % payload_hash
+    legacy["event_hash"] = canonical_sha256(event_hash_input(legacy))
+    path.write_text(canonical_dumps(legacy) + "\n", encoding="utf-8")
+
+    restored = store.read_events()[0]
+    assert restored.payload.convergence_epsilon == 0.002
+    assert restored.payload.convergence_patience == 3
+
+
 def test_complete_line_tampering_is_detected(repository):
     path = repository / "runs/r/events.jsonl"
     store = EventStore(path, transition_validator=validator)

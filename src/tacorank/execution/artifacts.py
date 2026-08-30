@@ -13,6 +13,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 from tacorank.execution.commands import ExpectedArtifact, ResolvedCommand, executable_identity
 from tacorank.execution.interfaces import ExecutionArtifactStore, sha256_file
+from tacorank.run_layout import experiment_artifact_prefix
 
 
 @dataclass(frozen=True)
@@ -280,21 +281,36 @@ def verify_execution_seal(
         or any(part in {"", ".", ".."} for part in prediction_relative.parts)
     ):
         raise ExecutionSealVerificationError("prediction path is not normalized")
-    expected_prefix = PurePosixPath(
-        "artifacts",
-        run_id,
-        experiment_id,
-        "attempt_{0}".format(execution_attempt),
-        "outputs",
+    expected_prefixes = (
+        PurePosixPath(
+            "artifacts",
+            run_id,
+            experiment_id,
+            "attempt_{0}".format(execution_attempt),
+            "outputs",
+        ),
+        PurePosixPath(
+            experiment_artifact_prefix(
+                run_id,
+                experiment_id,
+                attempt=execution_attempt,
+            )
+        )
+        / "outputs",
     )
-    try:
-        prediction_relative.relative_to(expected_prefix)
-    except ValueError as error:
+    matching_prefixes = []
+    for prefix in expected_prefixes:
+        try:
+            prediction_relative.relative_to(prefix)
+        except ValueError:
+            continue
+        if prediction_relative != prefix:
+            matching_prefixes.append(prefix)
+    if len(matching_prefixes) != 1:
         raise ExecutionSealVerificationError(
             "prediction is outside the exact execution output directory"
-        ) from error
-    if prediction_relative == expected_prefix:
-        raise ExecutionSealVerificationError("prediction path names no file")
+        )
+    expected_prefix = matching_prefixes[0]
 
     root = Path(repository_root).resolve(strict=True)
     prediction_path = root.joinpath(*prediction_relative.parts)

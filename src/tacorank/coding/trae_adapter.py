@@ -32,7 +32,9 @@ from tacorank.git.patches import (
     write_artifact,
 )
 from tacorank.git.refs import GitOperationError, require_ancestor, resolve_commit
+from tacorank.docker_host import normalize_local_docker_host
 from tacorank.git.worktrees import WorktreeManager, WorktreeRecord
+from tacorank.run_layout import experiment_artifact_prefix
 
 from .output_parser import ParsedTrajectory, TrajectoryParseError, parse_trajectory_file
 from .prompts import build_coding_prompt, build_repair_prompt, prompt_sha256
@@ -42,7 +44,13 @@ from .redaction import SecretRedactor
 _REVIEWED_TRAE_SOURCE_REVISION = "e839e559ac61bdd0e057c375dd1dee391fee797d"
 _REVIEWED_TRAE_SOURCE_URL = "https://github.com/bytedance/trae-agent.git"
 _REVIEWED_DOTENV_VERSION = "1.2.2"
-_PINNED_IMAGE_RE = re.compile(r"^[^\s@]+@sha256:([0-9a-f]{64})$")
+TRAE_DEEPSEEK_REASONING_MARKER = (
+    "TacoRank: force DeepSeek Responses reasoning effort and preserve reasoning items"
+)
+TRAE_DOCKER_EDIT_TOOL_MARKER = (
+    "TacoRank: normalize and shell-quote command-specific edit arguments"
+)
+_PINNED_IMAGE_RE = re.compile(r"^(?:[^\s@]+@)?sha256:([0-9a-f]{64})$")
 _CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _DEFAULT_REVIEWED_TOOLS = (
     "str_replace_based_edit_tool",
@@ -158,14 +166,17 @@ class TraeConfig:
     config_file: Path
     config_sha256: str
     max_steps_cap: int
-    max_token_cap: int
+    max_token_cap: Optional[int]
     max_wall_time_seconds_cap: int
     repair_step_limit: int
-    repair_token_limit: int
+    repair_token_limit: Optional[int]
     repair_wall_time_limit_seconds: int
     repair_allowed_command_ids: Tuple[str, ...]
     approved_environment_names: Tuple[str, ...] = ()
     credential_environment_names: Tuple[str, ...] = ()
+    credential_environment_aliases: Tuple[Tuple[str, str], ...] = ()
+    provider_base_url: Optional[str] = None
+    reasoning_effort: str = "high"
     trae_source_revision: Optional[str] = None
     trae_install_root: Optional[Path] = None
     trae_install_identity_file: Optional[Path] = None
@@ -177,13 +188,14 @@ class TraeConfig:
     python_dotenv_metadata_sha256: Optional[str] = None
     docker_image: Optional[str] = None
     docker_executable: Optional[Path] = None
+    docker_host: Optional[str] = None
     trusted_test_mode: bool = False
     reviewed_tool_names: Tuple[str, ...] = _DEFAULT_REVIEWED_TOOLS
     docker_memory_limit_mb: int = 4096
     docker_pids_limit: int = 128
     docker_cpu_limit: float = 2.0
     docker_tmpfs_limit_mb: int = 256
-    docker_agent_tools_tmpfs_limit_mb: int = 64
+    docker_agent_tools_size_limit_mb: int = 64
     docker_cli_timeout_seconds: int = 30
     version_timeout_seconds: int = 10
     termination_grace_seconds: int = 5
@@ -191,6 +203,35 @@ class TraeConfig:
     max_trajectory_bytes: int = 50 * 1024 * 1024
     max_patch_bytes: int = 10 * 1024 * 1024
     worktree_lease_timeout_seconds: float = 30.0
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any]) -> "TraeConfig":
+        """Normalize a JSON-shaped deployment mapping at the adapter boundary."""
+
+        normalized = dict(values)
+        normalized["command_prefix"] = tuple(normalized["command_prefix"])
+        for key in (
+            "config_file",
+            "docker_executable",
+            "trae_install_root",
+            "trae_install_identity_file",
+            "trae_runtime_root",
+            "python_dotenv_metadata_file",
+        ):
+            if normalized.get(key) is not None:
+                normalized[key] = Path(normalized[key])
+        for key in (
+            "repair_allowed_command_ids",
+            "approved_environment_names",
+            "credential_environment_names",
+        ):
+            if key in normalized:
+                normalized[key] = tuple(normalized[key])
+        if "credential_environment_aliases" in normalized:
+            normalized["credential_environment_aliases"] = tuple(
+                tuple(item) for item in normalized["credential_environment_aliases"]
+            )
+        return cls(**normalized)
 
 
 @dataclass(frozen=True)
@@ -249,6 +290,60 @@ class TraeCodingWorker:
         self._environment = self._sanitized_environment()
         self._verify_config_file()
 
+    def preflight(self) -> None:
+        """Verify credentials and all local production capabilities."""
+
+        missing_credentials = [
+            name
+            for name in self.config.credential_environment_names
+            if not self._source_environment.get(name, "").strip()
+        ]
+        if missing_credentials:
+            raise CodingWorkerError(
+                "TRAE_CREDENTIAL_MISSING",
+                "required coding credential environment is missing: "
+                + ", ".join(sorted(missing_credentials)),
+            )
+        self.preflight_local()
+
+    def preflight_local(self) -> None:
+        """Verify the pinned Trae and Docker boundary without using credentials."""
+
+        self._schema_factories()
+        self._verify_config_file()
+        self._verify_install_identity()
+        runtime_root, _ = self._verify_runtime_root()
+        self._verify_cli_version(runtime_root)
+        image = self.config.docker_image
+        if image is None:
+            raise CodingWorkerError(
+                "TRAE_ISOLATION_REQUIRED", "production Docker image is unavailable"
+            )
+        match = _PINNED_IMAGE_RE.fullmatch(image)
+        if match is None:
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID", "Docker image is not pinned by an exact digest"
+            )
+        with tempfile.TemporaryDirectory(prefix="tacorank-trae-preflight-") as temporary:
+            docker_config_root = Path(temporary) / "docker-config"
+            docker_config_root.mkdir(mode=0o700)
+            inspected = self._run_docker_cli(
+                ("image", "inspect", "--format", "{{.Id}}", image),
+                docker_config_root=docker_config_root,
+                check=True,
+            )
+            image_id = inspected.stdout.decode("ascii", errors="ignore").strip()
+            if image_id != "sha256:" + match.group(1):
+                raise CodingWorkerError(
+                    "TRAE_IMAGE_IDENTITY_MISMATCH",
+                    "Docker resolved a different image than the reviewed digest",
+                )
+            self._preflight_tool_mount(
+                runtime_root,
+                image,
+                docker_config_root=docker_config_root,
+            )
+
     async def create_patch(self, context: Any, spec: Any) -> Any:
         """Create an initial patch on a new experiment branch."""
 
@@ -275,7 +370,7 @@ class TraeCodingWorker:
             identity,
             prompt,
             _context_int(context, "step_limit"),
-            _context_int(context, "token_limit"),
+            _context_optional_positive_int(context, "token_limit"),
             _context_int(context, "wall_time_limit_seconds"),
         )
 
@@ -289,10 +384,10 @@ class TraeCodingWorker:
             self.identity_resolver.for_repair(context, decision)
         )
         repair_attempt = _context_int(context, "repair_attempt")
-        if identity.attempt != repair_attempt:
+        if identity.attempt != repair_attempt + 1:
             raise CodingWorkerError(
                 "CANDIDATE_IDENTITY_MISMATCH",
-                "resolved attempt does not match recovery context repair_attempt",
+                "resolved coding attempt does not follow the recovery attempt",
             )
         current_commit = _context_text(context, "current_patch_commit_sha")
         original_spec = getattr(context, "original_experiment_spec", None)
@@ -360,7 +455,7 @@ class TraeCodingWorker:
         identity: CandidateIdentity,
         prompt: str,
         step_limit: int,
-        token_limit: int,
+        token_limit: Optional[int],
         wall_time_limit_seconds: int,
     ) -> Any:
         try:
@@ -389,7 +484,7 @@ class TraeCodingWorker:
         identity: CandidateIdentity,
         prompt: str,
         step_limit: int,
-        token_limit: int,
+        token_limit: Optional[int],
         wall_time_limit_seconds: int,
     ) -> Any:
         started = time.monotonic()
@@ -404,6 +499,11 @@ class TraeCodingWorker:
         install_identity = self._verify_install_identity()
         runtime_root, runtime_identity = self._verify_runtime_root()
         self._verify_cli_version(runtime_root)
+        artifact_prefix = experiment_artifact_prefix(
+            record.run_id,
+            record.experiment_id,
+            attempt=identity.attempt,
+        )
 
         with tempfile.TemporaryDirectory(prefix="tacorank-trae-") as temporary:
             temporary_root = Path(temporary)
@@ -467,7 +567,6 @@ class TraeCodingWorker:
                     )
                 except TrajectoryParseError as exc:
                     raise CodingWorkerError(exc.code, str(exc)) from exc
-                self._validate_trajectory(parsed, step_limit, token_limit)
                 trajectory_bytes = self._redacted_trajectory_bytes(
                     parsed,
                     prompt,
@@ -476,6 +575,28 @@ class TraeCodingWorker:
                     install_identity=install_identity,
                     runtime_identity=runtime_identity,
                 )
+                try:
+                    self._validate_trajectory(parsed, step_limit, token_limit)
+                except CodingWorkerError as exc:
+                    try:
+                        failure_written = write_artifact(
+                            self.artifact_repository_root,
+                            f"{artifact_prefix}/trae_failure_trajectory.json",
+                            trajectory_bytes,
+                            content_type="application/json",
+                        )
+                    except GitOperationError as artifact_error:
+                        raise CodingWorkerError(
+                            "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                            "validated Trae failure evidence could not be retained",
+                        ) from artifact_error
+                    diagnostic = (exc.output_tail or "").strip()
+                    artifact_note = "diagnostic_artifact=" + failure_written.path
+                    raise CodingWorkerError(
+                        exc.code,
+                        exc.summary,
+                        output_tail=(diagnostic + "\n" + artifact_note).strip(),
+                    ) from exc
             except BaseException as primary_error:
                 try:
                     self._close_isolation(
@@ -529,10 +650,6 @@ class TraeCodingWorker:
         except GitOperationError as exc:
             raise CodingWorkerError(exc.code, str(exc)) from exc
 
-        artifact_prefix = (
-            f"artifacts/{record.run_id}/{record.experiment_id}/"
-            f"attempt_{identity.attempt}"
-        )
         try:
             diff_written = write_artifact(
                 self.artifact_repository_root,
@@ -601,7 +718,7 @@ class TraeCodingWorker:
         parsed: ParsedTrajectory,
         prompt: str,
         *,
-        token_limit: int,
+        token_limit: Optional[int],
         isolation: _IsolationSession,
         install_identity: Mapping[str, Any],
         runtime_identity: Mapping[str, Any],
@@ -624,6 +741,7 @@ class TraeCodingWorker:
             "trae_runtime_identity": dict(runtime_identity),
             "provider": self.config.provider,
             "model_id": self.config.model_id,
+            "reasoning_effort": self.config.reasoning_effort,
             "config_sha256": self.config.config_sha256,
             "prompt_sha256": prompt_sha256(prompt),
             "max_steps": parsed.max_steps,
@@ -725,6 +843,7 @@ class TraeCodingWorker:
             raise CodingWorkerError(
                 "TRAE_CONFIG_INVALID", "Docker image is not pinned by an exact digest"
             )
+        asset_source = self._reviewed_tool_mount_source()
 
         worktree = record.path.resolve(strict=True)
         if any(character in str(worktree) for character in (",", "\n", "\r", "\x00")):
@@ -792,10 +911,10 @@ class TraeCodingWorker:
                 "/tmp:rw,noexec,nosuid,nodev,"
                 f"size={self.config.docker_tmpfs_limit_mb}m,mode=1777"
             ),
-            "--tmpfs",
+            "--mount",
             (
-                "/agent_tools:rw,exec,nosuid,nodev,"
-                f"size={self.config.docker_agent_tools_tmpfs_limit_mb}m,mode=0755"
+                f"type=bind,src={asset_source},dst=/agent_tools,"
+                "readonly,bind-propagation=rprivate"
             ),
             "--mount",
             (
@@ -811,7 +930,7 @@ class TraeCodingWorker:
             "--workdir",
             "/workspace",
             "--user",
-            f"{os.getuid()}:{os.getgid()}",
+            _container_user(),
             "--init",
             "--ulimit",
             "nofile=256:256",
@@ -911,43 +1030,154 @@ class TraeCodingWorker:
                 "TRAE_ISOLATION_SETUP_FAILED",
                 "hardened Docker container failed to start",
             )
-        runtime_root = self.config.trae_runtime_root
-        if runtime_root is None:
+        return session
+
+    def _reviewed_tool_mount_source(
+        self, runtime_root: Optional[Path] = None
+    ) -> Path:
+        configured_root = runtime_root or self.config.trae_runtime_root
+        if configured_root is None:
             raise CodingWorkerError(
                 "TRAE_ISOLATION_SETUP_FAILED", "Trae runtime assets are unavailable"
             )
-        asset_source = str(runtime_root / "trae_agent" / "dist") + os.sep + "."
         try:
-            copied = self._run_docker_cli(
-                ("cp", asset_source, f"{raw_id}:/agent_tools"),
+            source = (
+                Path(configured_root) / "trae_agent" / "dist"
+            ).resolve(strict=True)
+        except OSError as exc:
+            raise CodingWorkerError(
+                "TRAE_ISOLATION_SETUP_FAILED", "Trae runtime assets are unavailable"
+            ) from exc
+        if not source.is_dir() or any(
+            character in str(source) for character in (",", "\n", "\r", "\x00")
+        ):
+            raise CodingWorkerError(
+                "TRAE_ISOLATION_SETUP_FAILED",
+                "Trae tool path cannot be represented by the reviewed Docker mount",
+            )
+        return source
+
+    def _preflight_tool_mount(
+        self,
+        runtime_root: Path,
+        image: str,
+        *,
+        docker_config_root: Path,
+    ) -> None:
+        """Execute a reviewed tool through the production read-only mount."""
+
+        source = self._reviewed_tool_mount_source(runtime_root)
+        cidfile = docker_config_root / "tool-mount.cid"
+        suffix = hashlib.sha256(str(docker_config_root).encode("utf-8")).hexdigest()[:20]
+        name = "tacorank-trae-preflight-" + suffix
+        create_args = (
+            "create",
+            "--cidfile",
+            str(cidfile),
+            "--name",
+            name,
+            "--label",
+            "com.tacorank.owner=coding-worker-preflight",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--memory",
+            "256m",
+            "--memory-swap",
+            "256m",
+            "--cpus",
+            "1",
+            "--pids-limit",
+            "32",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+            "--mount",
+            (
+                f"type=bind,src={source},dst=/agent_tools,"
+                "readonly,bind-propagation=rprivate"
+            ),
+            "--user",
+            _container_user(),
+            "--pull",
+            "never",
+            "--entrypoint",
+            "/agent_tools/edit_tool",
+            image,
+            "--help",
+        )
+        try:
+            created = self._run_docker_cli(
+                create_args,
                 docker_config_root=docker_config_root,
                 check=False,
             )
         except CodingWorkerError as exc:
-            try:
-                self._close_isolation(
-                    session,
-                    docker_config_root=docker_config_root,
-                )
-            except CodingWorkerError as cleanup_error:
-                raise cleanup_error from exc
+            container_id = self._read_container_id(cidfile)
+            if container_id is not None:
+                try:
+                    self._close_isolation(
+                        _IsolationSession(
+                            mode="preflight",
+                            container_id=container_id,
+                            image=image,
+                            image_digest=None,
+                        ),
+                        docker_config_root=docker_config_root,
+                    )
+                except CodingWorkerError as cleanup_error:
+                    raise cleanup_error from exc
             raise CodingWorkerError(
                 "TRAE_ISOLATION_SETUP_FAILED",
-                "manifest-verified Trae tools could not be staged in the container",
+                "reviewed Trae tool mount could not be created",
             ) from exc
-        if copied.returncode != 0:
-            try:
+        raw_id = created.stdout.decode("ascii", errors="ignore").strip()
+        cidfile_id = self._read_container_id(cidfile) or ""
+        usable_id = cidfile_id if _CONTAINER_ID_RE.fullmatch(cidfile_id) else raw_id
+        if (
+            created.returncode != 0
+            or _CONTAINER_ID_RE.fullmatch(raw_id) is None
+            or raw_id != cidfile_id
+        ):
+            if _CONTAINER_ID_RE.fullmatch(usable_id):
                 self._close_isolation(
-                    session,
+                    _IsolationSession(
+                        mode="preflight",
+                        container_id=usable_id,
+                        image=image,
+                        image_digest=None,
+                    ),
                     docker_config_root=docker_config_root,
                 )
-            except CodingWorkerError as cleanup_error:
-                raise cleanup_error
             raise CodingWorkerError(
                 "TRAE_ISOLATION_SETUP_FAILED",
-                "manifest-verified Trae tools could not be staged in the container",
+                "reviewed Trae tool mount could not be created",
             )
-        return session
+        session = _IsolationSession(
+            mode="preflight",
+            container_id=raw_id,
+            image=image,
+            image_digest=None,
+        )
+        try:
+            executed = self._run_docker_cli(
+                ("start", "--attach", raw_id),
+                docker_config_root=docker_config_root,
+                check=False,
+            )
+            if executed.returncode != 0:
+                raise CodingWorkerError(
+                    "TRAE_ISOLATION_SETUP_FAILED",
+                    "reviewed Trae tools are not executable in the Docker boundary",
+                )
+        finally:
+            self._close_isolation(
+                session,
+                docker_config_root=docker_config_root,
+            )
 
     def _close_isolation(
         self,
@@ -1028,13 +1258,20 @@ class TraeCodingWorker:
             raise CodingWorkerError(
                 "TRAE_ISOLATION_REQUIRED", "Docker executable is not configured"
             )
+        docker_path = str(executable.parent)
         environment = {
-            "PATH": f"{executable.parent}:/usr/bin:/bin",
+            "PATH": (
+                os.pathsep.join((docker_path, os.environ.get("PATH", "")))
+                if os.name == "nt"
+                else f"{docker_path}:/usr/bin:/bin"
+            ),
             "HOME": str(docker_config_root),
             "DOCKER_CONFIG": str(docker_config_root),
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
         }
+        if self.config.docker_host is not None:
+            environment["DOCKER_HOST"] = self.config.docker_host
         try:
             result = subprocess.run(
                 (str(executable), *args),
@@ -1081,7 +1318,10 @@ class TraeCodingWorker:
             )
 
     def _validate_trajectory(
-        self, parsed: ParsedTrajectory, step_limit: int, token_limit: int
+        self,
+        parsed: ParsedTrajectory,
+        step_limit: int,
+        token_limit: Optional[int],
     ) -> None:
         if parsed.provider != self.config.provider or parsed.model != self.config.model_id:
             raise CodingWorkerError(
@@ -1093,20 +1333,28 @@ class TraeCodingWorker:
                 "STEP_LIMIT_MISMATCH", "trajectory step limit differs from the request"
             )
         total_tokens = parsed.usage.input_tokens + parsed.usage.output_tokens
-        if total_tokens > token_limit:
+        if token_limit is not None and total_tokens > token_limit:
             raise CodingWorkerError(
                 "TOKEN_LIMIT_EXCEEDED",
                 f"provider usage {total_tokens} exceeded the {token_limit} token limit",
             )
         if not parsed.success:
+            detail = self.redactor.redact(parsed.final_result or "").strip()
+            detail = "".join(
+                character
+                if character in {"\n", "\t"} or ord(character) >= 32
+                else " "
+                for character in detail
+            )[:2_048]
             raise CodingWorkerError(
-                "TRAE_REPORTED_FAILURE", "Trae trajectory reports an unsuccessful task"
+                "TRAE_REPORTED_FAILURE",
+                "Trae trajectory reports an unsuccessful task",
+                output_tail=detail or None,
             )
 
     def _validate_context_bounds(self, context: Any) -> None:
         limits = (
             ("step_limit", self.config.max_steps_cap),
-            ("token_limit", self.config.max_token_cap),
             ("wall_time_limit_seconds", self.config.max_wall_time_seconds_cap),
         )
         for field, cap in limits:
@@ -1115,6 +1363,16 @@ class TraeCodingWorker:
                 raise CodingWorkerError(
                     "CODING_LIMIT_INVALID", f"{field} must be in [1, {cap}]"
                 )
+        token_limit = _context_optional_positive_int(context, "token_limit")
+        if (
+            token_limit is not None
+            and self.config.max_token_cap is not None
+            and token_limit > self.config.max_token_cap
+        ):
+            raise CodingWorkerError(
+                "CODING_LIMIT_INVALID",
+                "token_limit exceeds the reviewed coding token cap",
+            )
 
     def _validate_config(self) -> None:
         config = self.config
@@ -1139,6 +1397,14 @@ class TraeCodingWorker:
             if not isinstance(value, str) or not value.strip() or "\x00" in value:
                 raise CodingWorkerError("TRAE_CONFIG_INVALID", f"invalid {field}")
         if (
+            config.provider_base_url == "https://api.deepseek.com"
+            and config.reasoning_effort != "high"
+        ):
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID",
+                "the reviewed DeepSeek coding path requires high reasoning effort",
+            )
+        if (
             not isinstance(config.config_sha256, str)
             or len(config.config_sha256) != 64
             or any(character not in "0123456789abcdef" for character in config.config_sha256)
@@ -1157,6 +1423,42 @@ class TraeCodingWorker:
                 "TRAE_CONFIG_INVALID",
                 "credential names must be explicitly approved environment names",
             )
+        if any(
+            not isinstance(item, (tuple, list)) or len(item) != 2
+            for item in config.credential_environment_aliases
+        ):
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID", "invalid credential environment alias"
+            )
+        alias_sources = [source for source, _ in config.credential_environment_aliases]
+        alias_targets = [target for _, target in config.credential_environment_aliases]
+        if (
+            len(alias_sources) != len(set(alias_sources))
+            or len(alias_targets) != len(set(alias_targets))
+            or not set(alias_sources).issubset(config.credential_environment_names)
+        ):
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID",
+                "credential environment aliases must be unique approved credentials",
+            )
+        for source, target in config.credential_environment_aliases:
+            if any(
+                not isinstance(name, str)
+                or re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) is None
+                for name in (source, target)
+            ):
+                raise CodingWorkerError(
+                    "TRAE_CONFIG_INVALID", "invalid credential environment alias"
+                )
+        if config.provider_base_url is not None:
+            if (
+                not isinstance(config.provider_base_url, str)
+                or re.fullmatch(r"https://[^\s/?#]+(?::[0-9]+)?", config.provider_base_url)
+                is None
+            ):
+                raise CodingWorkerError(
+                    "TRAE_CONFIG_INVALID", "provider base URL must be an HTTPS origin"
+                )
         if not config.trusted_test_mode:
             forbidden = sorted(
                 name
@@ -1171,10 +1473,8 @@ class TraeCodingWorker:
                 )
         integer_fields = (
             "max_steps_cap",
-            "max_token_cap",
             "max_wall_time_seconds_cap",
             "repair_step_limit",
-            "repair_token_limit",
             "repair_wall_time_limit_seconds",
             "version_timeout_seconds",
             "termination_grace_seconds",
@@ -1186,9 +1486,21 @@ class TraeCodingWorker:
             value = getattr(config, field)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise CodingWorkerError("TRAE_CONFIG_INVALID", f"invalid {field}")
+        for field in ("max_token_cap", "repair_token_limit"):
+            value = getattr(config, field)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise CodingWorkerError("TRAE_CONFIG_INVALID", f"invalid {field}")
         if config.repair_step_limit > config.max_steps_cap:
             raise CodingWorkerError("TRAE_CONFIG_INVALID", "repair step limit exceeds cap")
-        if config.repair_token_limit > config.max_token_cap:
+        if (
+            config.max_token_cap is not None
+            and (
+                config.repair_token_limit is None
+                or config.repair_token_limit > config.max_token_cap
+            )
+        ):
             raise CodingWorkerError("TRAE_CONFIG_INVALID", "repair token limit exceeds cap")
         if config.repair_wall_time_limit_seconds > config.max_wall_time_seconds_cap:
             raise CodingWorkerError("TRAE_CONFIG_INVALID", "repair wall limit exceeds cap")
@@ -1309,13 +1621,22 @@ class TraeCodingWorker:
                 or not docker_path.is_file()
                 or docker_path.is_symlink()
                 or docker_path.resolve(strict=True) != docker_path
-                or docker_path.name != "docker"
+                or docker_path.name
+                not in (("docker", "docker.exe") if os.name == "nt" else ("docker",))
                 or not os.access(docker_path, os.X_OK)
             ):
                 raise CodingWorkerError(
                     "TRAE_CONFIG_INVALID",
                     "docker_executable must be an absolute executable regular file named docker",
                 )
+            if config.docker_host is not None:
+                try:
+                    normalize_local_docker_host(config.docker_host)
+                except ValueError as exc:
+                    raise CodingWorkerError(
+                        "TRAE_CONFIG_INVALID",
+                        str(exc),
+                    ) from exc
         if config.docker_image is not None and _PINNED_IMAGE_RE.fullmatch(
             config.docker_image
         ) is None:
@@ -1337,7 +1658,7 @@ class TraeCodingWorker:
             "docker_memory_limit_mb",
             "docker_pids_limit",
             "docker_tmpfs_limit_mb",
-            "docker_agent_tools_tmpfs_limit_mb",
+            "docker_agent_tools_size_limit_mb",
             "docker_cli_timeout_seconds",
         )
         for field in docker_integer_fields:
@@ -1505,12 +1826,49 @@ class TraeCodingWorker:
                 "TRAE_RUNTIME_IDENTITY_MISMATCH",
                 "Trae Docker tool assets differ from the reviewed manifest",
             )
+        if self.config.provider_base_url == "https://api.deepseek.com":
+            reasoning_client = (
+                root / "trae_agent" / "utils" / "llm_clients" / "openai_client.py"
+            )
+            try:
+                reasoning_source = reasoning_client.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise CodingWorkerError(
+                    "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                    "reviewed DeepSeek Trae client patch is unavailable",
+                ) from exc
+            if (
+                TRAE_DEEPSEEK_REASONING_MARKER not in reasoning_source
+                or 'reasoning={"effort": "high"}' not in reasoning_source
+                or 'output_block.type == "reasoning"' not in reasoning_source
+                or "content += message_content" not in reasoning_source
+            ):
+                raise CodingWorkerError(
+                    "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                    "reviewed DeepSeek reasoning continuity patch is missing",
+                )
+            edit_executor = root / "trae_agent" / "tools" / "docker_tool_executor.py"
+            try:
+                edit_source = edit_executor.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise CodingWorkerError(
+                    "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                    "reviewed DeepSeek edit-tool compatibility patch is unavailable",
+                ) from exc
+            if (
+                TRAE_DOCKER_EDIT_TOOL_MARKER not in edit_source
+                or "command_arguments =" not in edit_source
+                or "shlex.join(cmd_parts)" not in edit_source
+            ):
+                raise CodingWorkerError(
+                    "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                    "reviewed DeepSeek edit-tool compatibility patch is missing",
+                )
         asset_bytes = _trae_runtime_asset_bytes(root)
-        required_bytes = 2 * asset_bytes + 1024 * 1024
-        if required_bytes > self.config.docker_agent_tools_tmpfs_limit_mb * 1024 * 1024:
+        if asset_bytes > self.config.docker_agent_tools_size_limit_mb * 1024 * 1024:
             raise CodingWorkerError(
                 "TRAE_RUNTIME_IDENTITY_MISMATCH",
-                "agent-tools tmpfs is too small for reviewed and upstream copies",
+                "reviewed agent-tools bundle exceeds the Docker mount size limit",
             )
         _reject_dotenv_candidates(root)
         return root, {
@@ -1659,7 +2017,10 @@ class TraeCodingWorker:
             isinstance(max_tokens, bool)
             or not isinstance(max_tokens, int)
             or max_tokens < 1
-            or max_tokens > self.config.max_token_cap
+            or (
+                self.config.max_token_cap is not None
+                and max_tokens > self.config.max_token_cap
+            )
         ):
             raise CodingWorkerError(
                 "TRAE_CONFIG_INVALID", "model max_tokens exceeds the reviewed token cap"
@@ -1680,10 +2041,14 @@ class TraeCodingWorker:
                 "TRAE_CONFIG_INVALID", "Trae provider alias is not uniquely defined"
             )
         provider = providers.get(provider_alias)
+        expected_provider_keys = {"provider", "api_key"}
+        if self.config.provider_base_url is not None:
+            expected_provider_keys.add("base_url")
         if (
             not isinstance(provider, Mapping)
-            or set(provider) != {"provider", "api_key"}
+            or set(provider) != expected_provider_keys
             or provider.get("provider") != self.config.provider
+            or provider.get("base_url") != self.config.provider_base_url
         ):
             raise CodingWorkerError(
                 "TRAE_CONFIG_INVALID", "Trae YAML provider differs from TraeConfig"
@@ -1707,18 +2072,45 @@ class TraeCodingWorker:
                         "TRAE_CONFIG_INVALID", "approved environment value is invalid"
                     )
                 environment[name] = value
+        for source, target in self.config.credential_environment_aliases:
+            value = environment.get(source)
+            if value is not None:
+                environment[target] = value
         environment["LANG"] = "C.UTF-8"
         environment["LC_ALL"] = "C.UTF-8"
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHON_DOTENV_DISABLED"] = "1"
         environment["GIT_TERMINAL_PROMPT"] = "0"
+        if os.name == "nt":
+            # Python's Windows runtime needs these system values to load DLLs
+            # and resolve subprocesses after the rest of the environment is
+            # intentionally reduced to approved names.
+            for name in (
+                "SystemRoot",
+                "WINDIR",
+                "ComSpec",
+                "PATHEXT",
+                "SystemDrive",
+                "ProgramData",
+            ):
+                value = os.environ.get(name)
+                if value:
+                    environment[name] = value
         if not self.config.trusted_test_mode:
             docker_executable = self.config.docker_executable
             if docker_executable is None:
                 raise CodingWorkerError(
                     "TRAE_CONFIG_INVALID", "Docker executable is required in production"
                 )
-            environment["PATH"] = f"{docker_executable.parent}:/usr/bin:/bin"
+            if os.name == "nt":
+                environment["PATH"] = os.pathsep.join(
+                    (str(docker_executable.parent), os.environ.get("PATH", ""))
+                )
+            else:
+                environment["PATH"] = f"{docker_executable.parent}:/usr/bin:/bin"
+            if self.config.docker_host is not None:
+                environment["DOCKER_HOST"] = self.config.docker_host
         return environment
 
     def _action_environment(
@@ -1737,6 +2129,10 @@ class TraeCodingWorker:
             "XDG_CONFIG_HOME": temporary_root / "xdg-config",
             "XDG_CACHE_HOME": temporary_root / "xdg-cache",
         }
+        if os.name == "nt":
+            # pathlib.Path.home() uses USERPROFILE on Windows and ignores
+            # HOME. Keep Trae's home isolated from the operator's profile.
+            roots["USERPROFILE"] = temporary_root / "home"
         for path in set(roots.values()):
             path.mkdir(mode=0o700)
         selected_docker_config = docker_config_root or temporary_root / "docker-config"
@@ -1935,6 +2331,11 @@ def _run_bounded_process(
     output_limited = False
     with Path(output_path).open("wb") as output:
         try:
+            process_options = (
+                {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                if os.name == "nt"
+                else {"start_new_session": True}
+            )
             process = subprocess.Popen(
                 list(command),
                 cwd=str(cwd),
@@ -1943,8 +2344,8 @@ def _run_bounded_process(
                 stdout=output,
                 stderr=subprocess.STDOUT,
                 shell=False,
-                start_new_session=True,
                 close_fds=True,
+                **process_options,
             )
         except OSError as exc:
             raise CodingWorkerError(
@@ -1987,8 +2388,24 @@ def _fake_result(value: Any) -> Any:
     return value
 
 
+def _container_user() -> str:
+    """Return a portable numeric uid:gid for the Linux Trae container."""
+
+    get_uid = getattr(os, "getuid", lambda: 65534)
+    get_gid = getattr(os, "getgid", lambda: 65534)
+    return f"{get_uid()}:{get_gid()}"
+
+
 def _terminate_process_group(process: subprocess.Popen[Any], grace_seconds: int) -> None:
     if process.poll() is None:
+        if os.name == "nt":
+            _windows_terminate_tree(process.pid)
+            try:
+                process.wait(timeout=grace_seconds)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            return
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -2006,6 +2423,10 @@ def _terminate_process_group(process: subprocess.Popen[Any], grace_seconds: int)
 
 def _cleanup_process_group(process_group_id: int, grace_seconds: int) -> None:
     """Terminate descendants left in the dedicated coding process group."""
+
+    if os.name == "nt":
+        _windows_terminate_tree(process_group_id)
+        return
 
     try:
         os.killpg(process_group_id, 0)
@@ -2028,6 +2449,24 @@ def _cleanup_process_group(process_group_id: int, grace_seconds: int) -> None:
         pass
 
 
+def _windows_terminate_tree(process_id: int) -> None:
+    """Terminate a Windows child tree (the native equivalent of ``killpg``)."""
+
+    try:
+        subprocess.run(
+            ("taskkill", "/PID", str(process_id), "/T", "/F"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            shell=False,
+        )
+    except OSError:
+        # The child may already have exited, or taskkill may be unavailable in
+        # a constrained test environment. The parent wait/kill path remains the
+        # final bound.
+        pass
+
+
 def _read_tail(path: Path, maximum_bytes: int) -> str:
     with path.open("rb") as handle:
         size = path.stat().st_size
@@ -2047,6 +2486,22 @@ def _context_int(context: Any, field: str) -> int:
     value = getattr(context, field, None)
     if isinstance(value, bool) or not isinstance(value, int):
         raise CodingWorkerError("CONTEXT_INVALID", f"missing or invalid {field}")
+    return value
+
+
+def _context_optional_positive_int(context: Any, field: str) -> Optional[int]:
+    try:
+        value = getattr(context, field)
+    except AttributeError as exc:
+        raise CodingWorkerError(
+            "CONTEXT_INVALID", f"missing or invalid {field}"
+        ) from exc
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise CodingWorkerError(
+            "CONTEXT_INVALID", f"{field} must be null or a positive integer"
+        )
     return value
 
 

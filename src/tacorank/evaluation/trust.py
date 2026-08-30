@@ -214,13 +214,14 @@ def _assessment(
     flags: Sequence[str],
     aggregate,
 ) -> TrustAssessment:
+    has_confirmed_aggregate = aggregate.count >= 3
     return TrustAssessment(
         verdict=verdict,
         stability=stability,
         integrity=integrity,
         flags=tuple(flags),
         eta_applied=aggregate.eta,
-        seed_mean=aggregate.mean,
-        seed_stderr=aggregate.standard_error,
+        seed_mean=aggregate.mean if has_confirmed_aggregate else None,
+        seed_stderr=(aggregate.standard_error if has_confirmed_aggregate else None),
         seed_count=aggregate.count,
     )

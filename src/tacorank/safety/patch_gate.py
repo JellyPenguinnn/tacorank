@@ -31,6 +31,7 @@ from tacorank.git import (
     resolve_commit,
     validated_repository,
 )
+from tacorank.run_layout import experiment_artifact_prefix
 
 from .command_policy import (
     inspect_dependency_changes,
@@ -532,7 +533,13 @@ class PatchGate:
         root = validated_repository(self.repository_root)
         status = _git_output(
             root,
-            ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+            (
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ),
         )
         if status:
             raise GitOperationError(
@@ -650,6 +657,15 @@ class PatchGate:
             )
             for root in self.artifact_roots
         }
+        if "runs" in self.artifact_roots:
+            expected_paths.add(
+                experiment_artifact_prefix(
+                    run_id,
+                    experiment_id,
+                    attempt=attempt,
+                )
+                + "/patch.diff"
+            )
         if normalized not in expected_paths:
             raise ValueError("diff artifact path does not match candidate identity")
         if _field(artifact_ref, "kind") != "diff":

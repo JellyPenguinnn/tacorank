@@ -63,6 +63,10 @@ def _latest_recoverable_failure(events: List[Event], experiment_id: str) -> Opti
             result = event.payload.result
             if result.experiment_id == experiment_id and result.outcome != RunOutcome.SUCCESS:
                 return event
+        elif event.event_type == EventType.ADAPTER_FAILED:
+            result = event.payload.result
+            if result.experiment_id == experiment_id:
+                return event
         elif event.event_type == EventType.OUTPUT_CHECKED:
             result = event.payload.result
             if result.experiment_id == experiment_id and not result.accepted:
@@ -112,14 +116,16 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         raise TransitionError("no events may follow a finalized run")
     if state.status == RunStatus.STOPPED:
         _require(
-            event_type in (EventType.EVALUATION_COMPLETED, EventType.FINAL_SELECTED),
-            "only hidden-final evaluation or final selection may follow run.stopped",
+            event_type
+            in (
+                EventType.EXECUTION_STARTED,
+                EventType.EXECUTION_FINISHED,
+                EventType.OUTPUT_CHECKED,
+                EventType.EVALUATION_COMPLETED,
+                EventType.FINAL_SELECTED,
+            ),
+            "only sealed finalization evidence may follow run.stopped",
         )
-        if event_type == EventType.EVALUATION_COMPLETED:
-            _require(
-                payload.result.population == Population.HIDDEN_FINAL,
-                "only hidden-final evaluation may follow run.stopped",
-            )
     if state.status == RunStatus.FINALIZING:
         _require(
             event_type == EventType.SUBMISSION_CHECKED,
@@ -226,7 +232,67 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
     elif event_type == EventType.EXECUTION_STARTED:
         request = payload.request
         node = state.experiments.get(request.experiment_id)
-        _require(node is not None and node.status == ExperimentStatus.READY_TO_RUN, "patch is not runnable")
+        if state.status == RunStatus.STOPPED:
+            _require(
+                node is not None
+                and request.experiment_id == state.best_experiment_id
+                and request.patch_commit_sha == state.best_commit_sha
+                and request.fidelity == Fidelity.FULL
+                and request.command_id
+                in {"clean_reproduce", "candidate_final_infer", "submission_check"},
+                "post-stop execution must target the selected sealed commit",
+            )
+            if request.command_id == "candidate_final_infer":
+                _require(
+                    any(
+                        event.event_type == EventType.EVALUATION_COMPLETED
+                        and event.payload.result.experiment_id == request.experiment_id
+                        and event.payload.result.population
+                        == Population.PUBLIC_VALIDATION
+                        and event.payload.result.fidelity == Fidelity.FULL
+                        and event.payload.result.trust.verdict == TrustVerdict.ACCEPTED
+                        and event.payload.result.trust.integrity == Integrity.CLEAN
+                        and _evaluation_request(
+                            events[: events.index(event)], event.payload.result
+                        ).command_id
+                        == "clean_reproduce"
+                        for event in events
+                    ),
+                    "final inference requires trusted clean reproduction",
+                )
+            if request.command_id == "submission_check":
+                final_outputs = [
+                    event
+                    for event in events
+                    if event.event_type == EventType.OUTPUT_CHECKED
+                    and event.payload.result.experiment_id == request.experiment_id
+                    and event.payload.result.accepted
+                ]
+                _require(
+                    bool(final_outputs),
+                    "submission check requires accepted final output",
+                )
+                final_request = next(
+                    (
+                        event.payload.request
+                        for event in reversed(events)
+                        if event.event_type == EventType.EXECUTION_STARTED
+                        and event.payload.request.experiment_id == request.experiment_id
+                        and event.payload.request.attempt
+                        == final_outputs[-1].payload.result.attempt
+                    ),
+                    None,
+                )
+                _require(
+                    final_request is not None
+                    and final_request.command_id == "candidate_final_infer",
+                    "submission check requires accepted final-inference output",
+                )
+        else:
+            _require(
+                node is not None and node.status == ExperimentStatus.READY_TO_RUN,
+                "patch is not runnable",
+            )
         check = _last_for_experiment(events, EventType.PATCH_CHECKED, request.experiment_id)
         _require(check is not None and check.payload.result.accepted, "execution requires Gate A receipt")
         _require(
@@ -245,6 +311,35 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             (request.attempt, request.fidelity, request.patch_commit_sha)
             == (result.attempt, result.fidelity, result.patch_commit_sha),
             "execution result identity mismatch",
+        )
+    elif event_type == EventType.ADAPTER_FAILED:
+        result = payload.result
+        node = state.experiments.get(result.experiment_id)
+        _require(node is not None, "adapter failure has unknown experiment")
+        _require(
+            node.status
+            in (
+                ExperimentStatus.PROPOSED,
+                ExperimentStatus.PATCH_READY,
+                ExperimentStatus.RUNNING,
+                ExperimentStatus.OUTPUT_READY,
+                ExperimentStatus.OUTPUT_VERIFIED,
+                ExperimentStatus.EVALUATED,
+                ExperimentStatus.RECOVERING,
+            ),
+            "adapter failure is not legal in the current experiment state",
+        )
+        expected_states = {
+            "coding": (ExperimentStatus.PROPOSED, ExperimentStatus.RECOVERING),
+            "patch_gate": (ExperimentStatus.PATCH_READY,),
+            "execution": (ExperimentStatus.RUNNING,),
+            "output_gate": (ExperimentStatus.OUTPUT_READY,),
+            "evaluation": (ExperimentStatus.OUTPUT_VERIFIED, ExperimentStatus.EVALUATED),
+            "recovery": (ExperimentStatus.RECOVERING,),
+        }
+        _require(
+            node.status in expected_states[result.failure_stage],
+            "adapter failure stage does not match experiment state",
         )
     elif event_type == EventType.RECOVERY_DECIDED:
         decision = payload.decision
@@ -319,7 +414,13 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             _require(state.status == RunStatus.STOPPED, "hidden-final is available only after stop")
             _require(result.fidelity == Fidelity.FULL, "hidden-final requires full fidelity")
         else:
-            _require(state.status != RunStatus.STOPPED, "development evaluation cannot occur after stop")
+            if state.status == RunStatus.STOPPED:
+                _require(
+                    request.command_id == "clean_reproduce"
+                    and result.population == Population.PUBLIC_VALIDATION
+                    and result.fidelity == Fidelity.FULL,
+                    "post-stop evaluation is restricted to clean public reproduction",
+                )
             expected_population = (
                 Population.INTERNAL_PROXY
                 if request.fidelity == Fidelity.PROXY
@@ -444,12 +545,17 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
                 event
                 for event in events
                 if event.event_id == payload.reproduction_evaluation_event_id
-                and event.event_type == EventType.EVALUATION_COMPLETED
+                and event.event_type
+                in (EventType.EVALUATION_COMPLETED, EventType.BASELINE_VERIFIED)
             ),
             None,
         )
         _require(reproduction is not None, "final selection cites unknown reproduction evidence")
-        result = reproduction.payload.result
+        result = (
+            reproduction.payload.evaluation
+            if reproduction.event_type == EventType.BASELINE_VERIFIED
+            else reproduction.payload.result
+        )
         _require(
             result.experiment_id == payload.experiment_id
             and result.fidelity == Fidelity.FULL
@@ -459,12 +565,20 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             and result.metric_set.primary_score == state.best_primary_score,
             "final reproduction is not trusted evidence for the verified best",
         )
-        reproduction_index = events.index(reproduction)
-        request = _evaluation_request(events[:reproduction_index], result)
-        _require(
-            request.patch_commit_sha == payload.commit_sha,
-            "final reproduction did not evaluate the selected commit",
-        )
+        if reproduction.event_type == EventType.BASELINE_VERIFIED:
+            _require(
+                payload.experiment_id == "baseline"
+                and reproduction.payload.commit_sha == payload.commit_sha,
+                "baseline finalization does not match frozen parity evidence",
+            )
+        else:
+            reproduction_index = events.index(reproduction)
+            request = _evaluation_request(events[:reproduction_index], result)
+            _require(
+                request.patch_commit_sha == payload.commit_sha
+                and request.command_id == "clean_reproduce",
+                "final reproduction did not cleanly evaluate the selected commit",
+            )
     elif event_type == EventType.SUBMISSION_CHECKED:
         _require(state.status == RunStatus.FINALIZING, "submission check requires final selection")
 

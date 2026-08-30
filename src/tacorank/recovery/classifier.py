@@ -94,6 +94,11 @@ def classify_failure(result: Any) -> FailureClassification:
             "infrastructure_error": "INFRASTRUCTURE_ERROR",
         }[failure_class]
         evidence = getattr(result, "error_summary", None) or str(getattr(result, "error_class", ""))
+        # A coding adapter failure means Trae did not produce a candidate. It
+        # must not be treated as an execution infrastructure retry, because
+        # retrying the sealed commit would not address the failed coding call.
+        if getattr(result, "failure_stage", None) == "coding":
+            failure_class, reason = "code_error", "CODING_WORKER_FAILURE"
     else:
         accepted = getattr(result, "accepted", None)
         if accepted is not False:

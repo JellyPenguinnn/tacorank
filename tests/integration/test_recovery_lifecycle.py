@@ -32,6 +32,12 @@ class RepairingCodingWorker(FakeCodingWorker):
         return self.initial_patch.__class__.model_validate(values)
 
 
+class FailingRepairWorker(RepairingCodingWorker):
+    async def repair_patch(self, context, decision):
+        self.repair_calls.append((context, decision))
+        raise RuntimeError("TRAE_REPORTED_FAILURE: trajectory was unsuccessful")
+
+
 class FailOnceRunner(FakeExecutionRunner):
     def __init__(self, artifacts):
         super().__init__(artifacts)
@@ -53,6 +59,18 @@ class FailOnceRunner(FakeExecutionRunner):
                 }
             )
         return result
+
+
+class RaisingOnceRunner(FakeExecutionRunner):
+    def __init__(self, artifacts):
+        super().__init__(artifacts)
+        self.requests = []
+
+    async def run(self, request, observer):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            raise RuntimeError("temporary execution backend loss")
+        return await super().run(request, observer)
 
 
 class TwoTransientFailuresRunner(FakeExecutionRunner):
@@ -122,6 +140,13 @@ def test_real_recovery_repairs_gates_reruns_and_replays(
     assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
     assert len(worker.repair_calls) == 1
     context, recovery_decision = worker.repair_calls[0]
+    assert context.repair_attempt == 1
+    assert context.original_experiment_spec.experiment_id == "exp_001"
+    assert context.current_patch_commit_sha == "a" * 40
+    assert context.accepted_patch_receipt_id == "receipt_exp_001_1"
+    assert context.failure_class == "code_error"
+    assert context.recovery_instructions == recovery_decision.instructions
+    assert context.failed_checks == []
     assert "Adding a deterministic user-item cross" in recovery_decision.instructions
     assert "solution/model.py" in recovery_decision.instructions
     assert recovery_decision.action == RecoveryAction.TRAE_REPAIR
@@ -141,6 +166,35 @@ def test_real_recovery_repairs_gates_reruns_and_replays(
     )
     assert repaired_patch_event.causation_event_id == recovery_event.event_id
     assert replay(events).experiments["exp_001"].repair_count == 1
+
+
+def test_trae_exception_is_recorded_and_stops_fail_closed(
+    harness, baseline_evaluation
+):
+    artifacts = harness.event_store.artifact_store
+    worker = FailingRepairWorker(artifacts)
+    harness.coding_worker = worker
+    harness.runner = FailOnceRunner(artifacts)
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    events = harness.events()
+    adapter_failures = [
+        event for event in events if event.event_type == EventType.ADAPTER_FAILED
+    ]
+    decisions = [
+        event.payload.decision
+        for event in events
+        if event.event_type == EventType.RECOVERY_DECIDED
+    ]
+    assert len(adapter_failures) == 1
+    assert adapter_failures[0].payload.result.failure_stage == "coding"
+    assert len(worker.repair_calls) == 1
+    assert decisions[-1].action == RecoveryAction.ABANDON
+    assert state.status.value == "stopped"
+    assert replay(events).status.value == "stopped"
 
 
 def test_real_recovery_allows_only_one_same_commit_retry_across_fingerprints(
@@ -168,6 +222,32 @@ def test_real_recovery_allows_only_one_same_commit_retry_across_fingerprints(
     assert runner.requests[0].patch_commit_sha == runner.requests[1].patch_commit_sha
     assert state.experiments["exp_001"].same_commit_retry_count == 1
     assert state.experiments["exp_001"].status == ExperimentStatus.INVALID
+
+
+def test_runner_exception_is_retried_as_infrastructure_failure(
+    harness, baseline_evaluation
+):
+    runner = RaisingOnceRunner(harness.event_store.artifact_store)
+    harness.runner = runner
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert len(runner.requests) == 4
+    assert runner.requests[0].seed == runner.requests[1].seed
+    assert runner.requests[0].patch_commit_sha == runner.requests[1].patch_commit_sha
+    assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
+    failure = next(
+        event for event in harness.events() if event.event_type == EventType.ADAPTER_FAILED
+    )
+    assert failure.payload.result.failure_stage == "execution"
+    decision = next(
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    )
+    assert decision.action == RecoveryAction.RETRY_SAME_COMMIT
 
 
 def test_approved_runtime_adjustment_is_applied_without_code_repair(

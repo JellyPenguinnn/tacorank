@@ -56,7 +56,7 @@ class CoderContextLike(Protocol):
     selected_method_cards: Sequence[Any]
     active_lessons: Sequence[Any]
     step_limit: int
-    token_limit: int
+    token_limit: Optional[int]
     wall_time_limit_seconds: int
     context_artifact: Any
 
@@ -109,8 +109,9 @@ def build_coding_prompt(
     )
     commands = _validated_commands(_required_attribute(context, "allowed_command_ids"))
     step_limit = _positive_int(context, "step_limit")
-    token_limit = _positive_int(context, "token_limit")
+    token_limit = _optional_positive_int(context, "token_limit")
     wall_limit = _positive_int(context, "wall_time_limit_seconds")
+    target_files = _validated_paths(spec_document.get("target_files"), "target_files")
 
     sections = [
         "# TacoRank bounded coding task",
@@ -131,7 +132,12 @@ def build_coding_prompt(
         "",
         "## Hard bounds",
         _bullet("max_steps", step_limit),
-        _bullet("max_provider_tokens", token_limit),
+        (
+            _bullet("max_provider_tokens", token_limit)
+            if token_limit is not None
+            else _json_bullet("max_provider_tokens", None)
+        ),
+        "A null max_provider_tokens value means TacoRank does not impose a cumulative trajectory token limit.",
         _bullet("wall_time_limit_seconds", wall_limit),
         "",
         "## File and tool policy",
@@ -144,6 +150,13 @@ def build_coding_prompt(
         ),
         "Only edit paths under editable_roots. Protected paths always win over editable roots.",
         "Dependency files may be inspected but not changed unless the ExperimentSpec explicitly names a reviewed dependency change.",
+        "",
+        "## Tool-use discipline",
+        _json_block({"authoritative_target_files": target_files}),
+        "Begin by viewing the authoritative target files directly; do not list the repository root or survey unrelated directories.",
+        "The interface excerpts and method cards below are the supplied integration context. Inspect one non-target file only when a concrete missing symbol or schema blocks the edit.",
+        "The symbolic allowed_command_ids are controller-owned post-patch checks, not shell tools available in this coding action. Do not search for or invoke them.",
+        "Use the next editing-capable tool call after the target view to make the smallest coherent edit, verify the edited target if needed, and then call task_done.",
         "",
         "## Required target interfaces",
         _json_block(_json_value(_required_attribute(context, "target_interface_excerpts"))),
@@ -158,7 +171,7 @@ def build_coding_prompt(
         _json_block(_json_value(_required_attribute(context, "active_lessons"))),
         "",
         "## Completion contract",
-        "Make the smallest coherent implementation of this exact hypothesis. Run only permitted lightweight checks. Finish with a non-empty patch and a concise account of files changed and checks actually run.",
+        "Make the smallest coherent implementation of this exact hypothesis. TacoRank runs Gate A and controller-owned checks after this action. Finish with a non-empty patch and a concise account of files changed; do not claim checks that this tool session could not run.",
     ]
     return _finalize("\n".join(sections), safe_redactor)
 
@@ -168,7 +181,7 @@ def build_repair_prompt(
     decision: Any,
     *,
     step_limit: int,
-    token_limit: int,
+    token_limit: Optional[int],
     wall_time_limit_seconds: int,
     allowed_command_ids: Sequence[str],
     redactor: Optional[SecretRedactor] = None,
@@ -205,7 +218,9 @@ def build_repair_prompt(
         )
     limits = {
         "max_steps": _standalone_positive_int(step_limit, "step_limit"),
-        "max_provider_tokens": _standalone_positive_int(token_limit, "token_limit"),
+        "max_provider_tokens": _standalone_optional_positive_int(
+            token_limit, "token_limit"
+        ),
         "wall_time_limit_seconds": _standalone_positive_int(
             wall_time_limit_seconds, "wall_time_limit_seconds"
         ),
@@ -242,6 +257,7 @@ def build_repair_prompt(
         "",
         "## Hard bounds",
         _json_block({**limits, "allowed_command_ids": commands}),
+        "A null max_provider_tokens value means TacoRank does not impose a cumulative trajectory token limit.",
         "",
         "## File policy",
         _json_block(
@@ -374,6 +390,20 @@ def _positive_int(value: Any, field: str) -> int:
     return result
 
 
+def _optional_positive_int(value: Any, field: str) -> Optional[int]:
+    try:
+        result = getattr(value, field)
+    except AttributeError as exc:
+        raise PromptContractError(f"coding context is missing {field}") from exc
+    if result is None:
+        return None
+    if isinstance(result, bool) or not isinstance(result, int) or result < 1:
+        raise PromptContractError(
+            f"coding context {field} must be null or a positive integer"
+        )
+    return result
+
+
 def _nonnegative_int(value: Any, field: str) -> int:
     result = _required_attribute(value, field)
     if isinstance(result, bool) or not isinstance(result, int) or result < 0:
@@ -387,6 +417,14 @@ def _standalone_positive_int(value: Any, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise PromptContractError(f"{field} must be a positive integer")
     return value
+
+
+def _standalone_optional_positive_int(
+    value: Any, field: str
+) -> Optional[int]:
+    if value is None:
+        return None
+    return _standalone_positive_int(value, field)
 
 
 def _validated_sha256(value: str) -> str:

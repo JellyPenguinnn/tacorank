@@ -1,0 +1,11 @@
+.git
+.tacorank
+.venv
+venv
+KuaiRand-Pure/data
+artifacts
+runs
+context
+tests
+__pycache__
+*.pyc

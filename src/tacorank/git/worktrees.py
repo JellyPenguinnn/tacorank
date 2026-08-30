@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import configparser
 import errno
-import fcntl
 import hashlib
 import math
 import os
@@ -30,6 +29,16 @@ from .refs import (
     validated_repository,
 )
 
+try:  # POSIX
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    _fcntl = None
+
+try:  # Windows
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX
+    _msvcrt = None
+
 
 @dataclass(frozen=True)
 class WorktreeRecord:
@@ -45,6 +54,30 @@ class WorktreeRecord:
 
 _THREAD_LOCKS_GUARD = threading.Lock()
 _THREAD_LOCKS: Dict[str, threading.Lock] = {}
+
+
+def _lock_descriptor(descriptor: int, *, nonblocking: bool) -> None:
+    if _fcntl is not None:
+        flags = _fcntl.LOCK_EX | (_fcntl.LOCK_NB if nonblocking else 0)
+        _fcntl.flock(descriptor, flags)
+        return
+    if _msvcrt is not None:
+        os.lseek(descriptor, 0, os.SEEK_END)
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"\0")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        mode = _msvcrt.LK_NBLCK if nonblocking else _msvcrt.LK_LOCK
+        _msvcrt.locking(descriptor, mode, 1)
+        return
+    raise OSError("no supported file-locking backend is available")
+
+
+def _unlock_descriptor(descriptor: int) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(descriptor, _fcntl.LOCK_UN)
+    elif _msvcrt is not None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        _msvcrt.locking(descriptor, _msvcrt.LK_UNLCK, 1)
 
 
 class WorktreeLease:
@@ -75,7 +108,7 @@ class WorktreeLease:
             return
         self._descriptor = None
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            _unlock_descriptor(descriptor)
         finally:
             os.close(descriptor)
             self._thread_lock.release()
@@ -128,6 +161,14 @@ class WorktreeManager:
             )
         os.chmod(locks_root, 0o700)
         self._locks_root = locks_root
+
+    def preflight(self, baseline_commit_sha: str) -> str:
+        """Verify the baseline and required submodules without creating a worktree."""
+
+        baseline = resolve_commit(self.repository, baseline_commit_sha)
+        self._submodule_declarations(baseline)
+        self._verify_submodules(self.repository, baseline)
+        return baseline
 
     def path_for(self, run_id: str, experiment_id: str) -> Path:
         """Return the deterministic path for a validated experiment identity."""
@@ -184,25 +225,30 @@ class WorktreeManager:
         descriptor: Optional[int] = None
         try:
             flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
-            if not hasattr(os, "O_NOFOLLOW"):
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            elif lock_path.is_symlink():
                 raise GitOperationError(
-                    "WORKTREE_LEASE_INVALID", "platform lacks no-follow lock creation"
+                    "WORKTREE_LEASE_INVALID", "lease path must not be a symlink"
                 )
-            flags |= os.O_NOFOLLOW
             descriptor = os.open(lock_path, flags, 0o600)
             metadata = os.fstat(descriptor)
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_nlink != 1
-                or metadata.st_uid != os.getuid()
+                or (
+                    hasattr(os, "getuid")
+                    and metadata.st_uid != os.getuid()
+                )
             ):
                 raise GitOperationError(
                     "WORKTREE_LEASE_INVALID", "lease file is not a private regular file"
                 )
-            os.fchmod(descriptor, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
             while True:
                 try:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    _lock_descriptor(descriptor, nonblocking=True)
                     break
                 except OSError as exc:
                     if exc.errno not in (errno.EACCES, errno.EAGAIN):
@@ -231,7 +277,6 @@ class WorktreeManager:
                 os.close(descriptor)
             thread_lock.release()
             raise
-
     def create(
         self,
         run_id: str,
@@ -375,7 +420,13 @@ class WorktreeManager:
         if require_clean:
             status = _git(
                 actual_path,
-                ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+                (
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignored=matching",
+                ),
             ).stdout
             if status:
                 raise GitOperationError("WORKTREE_DIRTY", "experiment worktree is not clean")
@@ -498,7 +549,13 @@ class WorktreeManager:
                 )
             status = _git(
                 target,
-                ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+                (
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignored=matching",
+                ),
             ).stdout
             if status:
                 raise GitOperationError(
@@ -652,7 +709,10 @@ class WorktreeManager:
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_nlink != 1
-                or metadata.st_uid != os.getuid()
+                or (
+                    hasattr(os, "getuid")
+                    and metadata.st_uid != os.getuid()
+                )
                 or metadata.st_size > 4096
             ):
                 raise GitOperationError(

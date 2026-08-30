@@ -1,176 +1,484 @@
-# TacoRank — Person 3 implementation
+[简体中文](README.zh-CN.md) | **English**
 
-This branch implements TacoRank's trusted coding and execution boundary. It turns one controller-approved `ExperimentSpec` into an exact Git patch, checks that patch deterministically, runs an accepted commit through a sealed execution path, records telemetry and artifacts, and validates prediction structure before Person 5 evaluation.
+# TacoRank
 
-The implementation is rebased on the current shared harness and uses the canonical models in `src/tacorank/schemas.py`. It does not duplicate Person 2's schemas, artifact authority, orchestration, event ledger, budgets, or routing logic.
+TacoRank is a deterministic, evidence-tracked harness for autonomous recommender-system research on KuaiRand-Pure. It connects research planning, Trae-based code generation, guarded CPU execution, failure recovery, protected evaluation, durable memory, convergence, and final submission checking in one reproducible workflow.
 
-For the detailed integration contract, see [`docs/person3-handoff.md`](docs/person3-handoff.md).
+> **Status:** The complete CPU workflow is implemented. The deterministic suite passes, a bounded production run completed through official submission checking, and a separate live regression run continued correctly into a second research iteration. See [Validation status](#validation-status) for the exact evidence boundary and [Current limitations](#current-limitations) before running it.
 
-## End-to-end boundary
+## Contents
+
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Agent-assisted operation](#agent-assisted-operation)
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration and end-to-end run](#configuration-and-end-to-end-run)
+- [Trae-only coding validation](#trae-only-coding-validation)
+- [Run operations](#run-operations)
+- [Dataset and evaluation contract](#dataset-and-evaluation-contract)
+- [Repository layout](#repository-layout)
+- [Team ownership](#team-ownership)
+- [Testing](#testing)
+- [Validation status](#validation-status)
+- [Safety and reproducibility](#safety-and-reproducibility)
+- [Contributing](#contributing)
+- [Troubleshooting](#troubleshooting)
+- [Current limitations](#current-limitations)
+- [Documentation](#documentation)
+- [License](#license)
+
+## Features
+
+- A complete researcher → coding worker → Gate A → CPU execution → Gate B → evaluation → reflection loop.
+- A deterministic controller that alone owns workflow state, budgets, recovery, convergence, promotion, rollback, and final selection.
+- Production adapters for DeepSeek research planning and the pinned Trae coding worker, with isolated test doubles restricted to tests.
+- Disposable Git worktrees, protected-path enforcement, symbolic execution commands, Docker isolation, resource limits, and typed recovery decisions.
+- An append-only, hash-chained event ledger with replayable state, immutable evidence artifacts, and reproducible derived reports.
+- KuaiRand-Pure evaluation fidelity: within-user ranking on `long_view`, protected GAUC and nDCG@5, label-free test inference, and official submission checking.
+
+## Quick start
+
+After completing [installation](#installation) and [deployment setup](#configuration-and-end-to-end-run), start the full autonomous workflow from the repository root with:
+
+```bash
+.venv/bin/tacorank run \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
+```
+
+This is the canonical end-to-end entry point. It runs one experiment at a time, rebuilds each planner context from durable memory, stops on a frozen convergence or resource rule, and finalizes the selected test submission automatically.
+
+## Agent-assisted operation
+
+[`AGENTS.md`](AGENTS.md) is the operational runbook for coding agents. It explains the system authorities and safety boundaries, development and Trae-only validation, complete live setup, monitoring, recovery, finalization, ledger validation, output inspection, and the evidence an agent must report.
+
+You can give a repository-aware coding agent this instruction:
+
+> Read `AGENTS.md` completely, inspect the current repository state, and help me set up and run the TacoRank workflow. Follow the documented credential and data boundaries, validate each stage with direct evidence, and do not claim completion until the requested completion contract is met.
+
+The guide separates three evidence levels: deterministic development tests, real Trae-only coding validation, and a complete live autonomous ML run. Tell the agent which level you want before it starts provider calls, downloads, Docker builds, or long CPU execution.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    P1[Person 1<br/>approved ExperimentSpec] --> C[TraeCodingWorker]
-    C --> G[Disposable Git worktree<br/>exact patch commit]
-    G --> A[Gate A<br/>deterministic patch checks]
-    A -->|accepted receipt| R[ExecutionRunner]
-    R --> T[Telemetry samples]
-    T --> P4[Person 4<br/>HealthObserver]
-    P4 -->|continue or terminate| R
-    R --> B[Gate B<br/>prediction checks]
-    B -->|accepted OutputCheckResult| P5[Person 5<br/>evaluation]
-    C --> P2[Person 2<br/>typed orchestration]
-    A --> P2
-    R --> P2
-    B --> P2
+    H[Human-frozen contract] --> O[Deterministic controller]
+    O --> P1[Research planner]
+    P1 -->|PlannerOutput / ExperimentSpec| O
+    O --> P3[Trae coding and execution]
+    P3 -->|TelemetrySample| P4[Health and recovery]
+    P4 -->|MonitorDirective / RecoveryDecision| O
+    P3 -->|Patch and run results| O
+    O --> P5[Evaluation and reflection]
+    P5 -->|EvaluationResult / decision| O
+    O --> E[(events.jsonl)]
+    O --> G[(Git lineage)]
+    O --> A[(hash-addressed artifacts)]
+    E --> C[role-specific contexts]
+    C --> O
 ```
 
-Person 3 owns mechanics and enforcement. It does not choose hypotheses, calculate official metrics, decide recovery policy, promote experiments, update memory, or append events directly.
+TacoRank has three independent authorities:
 
-## Implemented components
+- human-frozen rules in `contract/COMPETITION.md` and `PROTECTED_PATHS.md`;
+- dynamic evidence in `runs/<run_id>/events.jsonl`; and
+- exact code lineage in Git.
 
-| Area | Main implementation | Reviewer focus |
+Only the controller may append events or change workflow state. Role components return typed values and cannot promote candidates, change budgets, access protected labels, or override evaluator truth. Generated state, reports, lessons, and experiment graphs are replayable views rather than additional sources of truth.
+
+## Requirements
+
+| Dependency | Requirement | Purpose |
 | --- | --- | --- |
-| Trae coding | `src/tacorank/coding/` | Bounded prompts, credential redaction, pinned runtime identity, exact trajectory and patch capture |
-| Git lineage | `src/tacorank/git/` | Deterministic experiment branches, disposable worktrees, ancestry checks, exclusive leases and safe cleanup |
-| Gate A | `src/tacorank/safety/patch_gate.py` | Fourteen deterministic checks and commit/diff/hash-bound acceptance receipts |
-| Capability policy | `src/tacorank/safety/` | Editable/protected paths, data boundaries, imports, commands, network, dependencies and secret scanning |
-| Execution | `src/tacorank/execution/` | Symbolic commands, process/container isolation, hard limits, telemetry, cleanup and typed results |
-| Gate B | `src/tacorank/safety/output_gate.py` | Header, types, row count/order, identities, duplicate preservation, finite scores and producer seal |
-| Candidate surface | `solution/` | The only research implementation area intended for Trae edits |
+| Git | Submodule and worktree support | Starter-kit pinning and isolated candidate branches |
+| Python | 3.9 or newer | TacoRank CLI and control plane |
+| Python | 3.12.x | Isolated pinned Trae runtime created by setup |
+| Docker | Running Docker-compatible daemon | Hardened Trae tools and CPU candidate execution |
+| DeepSeek | `DEEPSEEK_API_KEY` with model access | Research planning and Trae coding |
+| KuaiRand-Pure | Local official data, or network access for setup download | Training, evaluation, and submission generation |
 
-### Coding and Git guarantees
+The live workflow is CPU-only. On macOS, Docker Desktop or a Docker-compatible daemon such as Colima is sufficient.
 
-- Trae is pinned to source revision `e839e559ac61bdd0e057c375dd1dee391fee797d`; the executable, installation metadata, runtime package tree, YAML configuration and Docker image digest are verified before production use.
-- Production Trae is edit-only: only `str_replace_based_edit_tool` and `task_done` are enabled. The unrestricted Bash tool is disabled.
-- Credentials are accepted only from explicitly approved process-environment names. They are excluded from prompts, trajectories, artifacts and Git.
-- Every initial patch and repair is committed on `experiment/<run_id>/<experiment_id>` with verified ancestry and exact diff bytes.
-- Coding and execution acquire the same bounded OS-backed worktree lease, preventing concurrent modify-and-restore races.
-- Gitlinks are allowed only through an explicit submodule allowlist and already-present local objects; candidate patches cannot advance submodule references.
+## Installation
 
-### Gate A
+Clone the repository with its official starter-kit submodule, create a virtual environment, and install the reviewed dependencies:
 
-Gate A is deterministic and does not ask an LLM whether code is safe. It checks:
-
-1. diff parsing and reported-file equality;
-2. editable and protected path boundaries;
-3. traversal, symlink and submodule escape;
-4. frozen contract and protected-manifest hashes;
-5. syntax/import and required interfaces;
-6. command, data, future-information and network policies;
-7. secrets and dependency changes; and
-8. an isolated tiny legal-data check when the controller supplies that capability.
-
-An accepted patch receives a canonical receipt bound to the run, experiment, patch attempt, commit, immediate and cumulative diffs, contract, protected manifest and data manifest. Any repair commit requires a new receipt.
-
-### Sealed execution
-
-The runner accepts symbolic IDs only—never raw LLM shell strings:
-
-- `baseline_full`
-- `candidate_smoke`
-- `candidate_proxy`
-- `candidate_full`
-- `candidate_final_infer`
-- `submission_check`
-- `clean_reproduce`
-
-The registry resolves immutable argv, environment, work directory, expected artifacts and resource profiles. Commands run with `shell=False`.
-
-Production Docker execution uses a read-only root filesystem, dropped capabilities, `no-new-privileges`, disabled network by default, bounded CPU/RAM/PIDs/tmpfs, a sanitized environment and an exact mount policy. Candidate workspaces are read-only during score-bearing execution. The attempt output directory is the only writable bind mount and must have a production-capable hard quota proof; `/tmp` is a bounded ephemeral tmpfs.
-
-`submission_check` receives one controller-verified prior prediction through a read-only mount. Hidden input is permitted only for `candidate_final_infer`; evaluator labels are never mounted into candidate execution.
-
-The runner always attempts to reap the full process group or container and normalizes expected failures into a typed `RunResult`. Person 4 receives live `TelemetrySample` values and can request termination, but only the runner sends termination signals.
-
-### Gate B
-
-Gate B verifies the prediction artifact before Person 5 can evaluate it. It requires a controller-owned `ExecutionSealExpectation` covering the exact run, attempt, command, commit, data manifest and Gate A receipt. It then checks the frozen output contract, including official row order, repeated user-item rows, finite numeric scores and artifact hashes. It does not calculate official ranking metrics.
-
-## Integration with the shared harness
-
-Person 2 can adapt the canonical artifact service directly:
-
-```python
-from pathlib import Path
-
-from tacorank.artifacts import ArtifactStore
-from tacorank.execution import CanonicalArtifactStoreAdapter
-
-repository_root = Path(".").resolve()
-artifacts = CanonicalArtifactStoreAdapter(ArtifactStore(repository_root))
+```bash
+git clone --recurse-submodules https://github.com/JellyPenguinnn/tacorank.git
+cd tacorank
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pip install --no-deps -e .
+.venv/bin/tacorank --help
 ```
 
-Public fake adapters are also available for orchestration tests:
-
-- `FakeCodingWorker`
-- `FakePatchGate`
-- `FakeExecutionRunner`
-- `FakeOutputGate`
-
-They return caller-supplied canonical models and do not create alternate production schemas.
-
-## Setup
-
-The TacoRank controller supports Python 3.9+:
+Both the superproject and starter-kit submodule require repository access. Use authenticated HTTPS or your approved SSH configuration; never place a token in a remote URL. If the repository was cloned without submodules, initialize them with:
 
 ```bash
 git submodule update --init --recursive
-python3 -m venv .venv
+```
+
+## Configuration and end-to-end run
+
+Setup must run from a clean tracked checkout so the Git baseline, protected manifest, data views, Docker image, and generated configurations all describe the same commit. Give every independent run a unique identifier.
+
+1. Export the credential in the shell. Never store it in a repository file.
+
+   ```bash
+   export DEEPSEEK_API_KEY='your-key'
+   ```
+
+2. Prepare the official data, baseline, pinned Trae runtime, Docker image, protected views, and hash-bound configuration.
+
+   ```bash
+   .venv/bin/tacorank setup-live \
+     --run-id run_001 \
+     --download-data
+   ```
+
+   If the official data already exists, omit `--download-data` and pass an absolute, non-symlinked path inside this checkout, such as `--data-dir /absolute/path/to/tacorank/KuaiRand-Pure/data`. If Python 3.12 or Docker is not on `PATH`, pass their canonical executables with `--python312` and `--docker`.
+
+3. Run the non-mutating production preflight.
+
+   ```bash
+   .venv/bin/tacorank preflight \
+     --config .tacorank/deployment/run-config.json \
+     --live-config .tacorank/deployment/live-adapters.json
+   ```
+
+   Preflight verifies the clean Git baseline and submodule, frozen contracts, data manifest, official evaluator and FM baseline, Trae installation and model access, Docker runtime, read-only edit-tool mount, execution environment, and hard output quota. Success reports `"ledger_created": false`.
+
+4. Start the complete autonomous loop.
+
+   ```bash
+   .venv/bin/tacorank run \
+     --config .tacorank/deployment/run-config.json \
+     --live-config .tacorank/deployment/live-adapters.json
+   ```
+
+`setup-live` writes credential-free generated files under ignored `.tacorank/`. The API key is passed only through the environment to the research provider and the isolated Trae child process; it is not written to configuration, prompts, logs, trajectories, fixtures, or artifacts.
+
+## Trae-only coding validation
+
+The production coding path can be validated before downloading data or running ML training. Docker is still required because Trae edit tools run inside the same hardened boundary used by the complete workflow.
+
+```bash
+.venv/bin/tacorank setup-trae
+.venv/bin/tacorank trae-preflight \
+  --config .tacorank/trae/trae-deployment.json \
+  --local-only
+
+export DEEPSEEK_API_KEY='your-key'
+.venv/bin/tacorank trae-preflight \
+  --config .tacorank/trae/trae-deployment.json
+.venv/bin/tacorank trae-run-example \
+  --config .tacorank/trae/trae-deployment.json \
+  --input examples/trae/experiment-spec.json
+```
+
+The local-only preflight checks the pinned Trae runtime and Docker tool boundary without reading a credential. The live preflight authenticates to DeepSeek and verifies `deepseek-v4-flash` access with high reasoning. The example creates a real patch in a disposable worktree and applies Gate A, then deliberately stops before dataset access, training, evaluation, or ledger creation.
+
+## Run operations
+
+Use the same frozen deployment configurations for lifecycle operations:
+
+```bash
+# Continue only from a durable planning checkpoint.
+.venv/bin/tacorank resume \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
+
+# Inspect and verify durable state.
+.venv/bin/tacorank status --run-id run_001 --repository-root .
+.venv/bin/tacorank validate-ledger --run-id run_001 --repository-root .
+.venv/bin/tacorank rebuild-views --run-id run_001 --repository-root .
+
+# Finalize a stopped run if automatic finalization did not complete.
+.venv/bin/tacorank finalize \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
+```
+
+`resume` repairs only an incomplete final JSONL fragment, validates the frozen run identity, and continues from an unambiguous `planning` or `planner_context` checkpoint. It fails closed during an ambiguous mid-adapter phase. `finalize` is idempotent for an already finalized run.
+
+Each run writes the following ignored evidence tree:
+
+```text
+runs/<run_id>/
+  events.jsonl                 authoritative append-only evidence
+  state.json                   replayable state projection
+  STATUS.md                    human-readable status
+  contexts/                    immutable role contexts
+  lessons/                     lesson and index projections
+  experiment-graph/            graph and direction views
+  artifacts/                   immutable attempt evidence
+  reports/                     summary and resource projections
+```
+
+## Dataset and evaluation contract
+
+Starter resources are tracked in `KuaiRand-Pure/` and in the pinned `kuairand-starter-kit` submodule. Downloaded data is intentionally excluded from Git.
+
+Evaluation is within-user ranking over logged KuaiRand-Pure impressions using the native binary `long_view` target. The primary score is the mean of GAUC and nDCG@5. Candidate code cannot modify or read the protected evaluator, split identities, final labels, submission ordering, or official baseline evidence. Test inference is label-free and cannot feed back into search.
+
+See [`docs/KUAIRAND_STARTER_KIT.md`](docs/KUAIRAND_STARTER_KIT.md) for data preparation, official splits, baseline reproduction, evaluation semantics, and submission checks.
+
+## Repository layout
+
+```text
+src/tacorank/
+  agents/            research planner adapter
+  providers/         production model clients and provider contracts
+  research/          search policy, experiment graph, and method portfolio
+  memory/            append-only event store and replay
+  context/           bounded role-specific context construction
+  orchestrator/      deterministic state machine and adapter routing
+  coding/            pinned Trae adapter, prompts, and redaction
+  git/               experiment refs, patches, and disposable worktrees
+  safety/            protected manifests, Gate A, and Gate B
+  execution/         symbolic commands, Docker runner, and telemetry
+  sre/               live health observation
+  recovery/          classification and bounded recovery policy
+  evaluation/        protected metrics, trust, and decisions
+  reflection/        evidence-linked research lessons
+  reporting/         reproducible derived views
+benchmarks/           KuaiRand-specific adapters
+solution/             only candidate area intended for coding-agent edits
+research/methods/     reviewed experiment method cards
+tests/                unit, integration, and failure-injection coverage
+contract/             human-frozen competition contract
+runs/                 ignored per-run evidence and reports
+artifacts/            ignored shared artifact root
+kuairand-starter-kit/ official starter-kit Git submodule
+```
+
+## Team ownership
+
+| Role | Responsibility | Main paths |
+| --- | --- | --- |
+| Person 1 | Evidence-grounded planning and deterministic search policy | `agents/`, `providers/`, `research/` |
+| Person 2 | Schemas, ledger, contexts, orchestration, budgets, replay, and CLI | `schemas.py`, `memory/`, `context/`, `orchestrator/`, `cli.py` |
+| Person 3 | Trae, Git worktrees, Gate A, execution, telemetry, artifacts, and Gate B | `coding/`, `git/`, `safety/`, `execution/` |
+| Person 4 | Health monitoring, failure classification, and bounded recovery | `sre/`, `recovery/` |
+| Person 5 | Protected evaluation, trust, final selection, and reflection | `evaluation/`, `reflection/`, `reporting/`, `benchmarks/` |
+
+Only Person 2's controller appends events. Other components own their domain logic and communicate through canonical models in `src/tacorank/schemas.py`.
+
+## Testing
+
+Run the complete deterministic suite before integration:
+
+```bash
+PYTHONPATH=src:. PYTHONPYCACHEPREFIX=/tmp/tacorank-pycache \
+  .venv/bin/python -m pytest -q
+```
+
+Useful component-level checks:
+
+```bash
+# Research, schemas, memory, contexts, and orchestration
+PYTHONPATH=src:. .venv/bin/python -m pytest \
+  tests/research tests/schemas tests/memory tests/context tests/orchestrator
+
+# Coding, Git, gates, execution, and failure injection
+PYTHONPATH=src:. .venv/bin/python -m pytest \
+  tests/coding tests/git tests/safety tests/execution tests/failure_injection
+
+# Health and recovery
+PYTHONPATH=src:. .venv/bin/python -m pytest \
+  tests/sre tests/recovery tests/integration/test_recovery_lifecycle.py
+
+# Evaluation, reflection, and reporting
+PYTHONPATH=src:. .venv/bin/python -m pytest \
+  tests/evaluation tests/reflection tests/reporting
+```
+
+Deterministic tests do not substitute for a live provider, Docker, data, or elapsed multi-iteration acceptance run. Keep those evidence classes separate when reporting results.
+
+## Validation status
+
+As of 2026-08-30:
+
+- The complete automated suite passed: 470 tests at source commit `bdeed2f`.
+- A bounded live CPU run used the production DeepSeek researcher, pinned Trae worker, hardened Docker runner, and official KuaiRand-Pure data.
+- Trae produced a pairwise BPR candidate that changed only `solution/candidate.py`; all 14 Gate A checks and all 11 Gate B checks passed for both smoke and proxy execution.
+- Protected proxy evaluation scored GAUC `0.62112551`, nDCG@5 `0.51277198`, and primary `0.56694875`, so the controller correctly pruned the candidate.
+- The one-experiment budget selected the still-best official FM baseline and produced a manifest-attested 170,588-row test submission accepted by both TacoRank and the official checker. The 20-event ledger replayed successfully.
+- A separate live iterative regression run completed its first real coding, Gate A, CPU smoke/proxy, Gate B, protected evaluation, and prune cycle, then durably created and proposed `exp_002` and entered its new Trae coding context. It was intentionally stopped during that second coding pass after the continuation behavior was observed.
+
+This proves a real integrated baseline path and live cross-iteration continuation, not elapsed live convergence or a winning candidate. The bounded acceptance could not exercise three non-improving full iterations, and the candidate-best clean-reproduction path was not entered because the candidate failed proxy. Deterministic integration tests cover those control paths. Full evidence and scope are recorded in [`docs/person3-handoff.md`](docs/person3-handoff.md).
+
+## Safety and reproducibility
+
+- Gate A binds an accepted patch to its commit, diff, contract, protected manifest, and data identities before execution.
+- The runner resolves reviewed symbolic commands and never accepts raw LLM shell commands.
+- Candidate code runs in disposable worktrees and CPU Docker containers with bounded resources and output quotas.
+- Gate B validates prediction structure, row identity, finiteness, and producer lineage before evaluation.
+- Expected failures produce typed, redacted, hash-addressed evidence; repair and same-commit retries are bounded.
+- Deliberate integrity violations terminate the run and remain in the ledger.
+- Convergence counts terminal trusted full-fidelity research iterations, not confirmation-seed executions.
+- Finalization selects only the validation best, requires clean reproduction for a candidate, and keeps test identities out of planning and evaluation feedback.
+- Datasets, credentials, `.tacorank/`, submissions, environments, run ledgers, and generated artifacts are ignored and must never be committed.
+
+## Contributing
+
+Read [`AGENTS.md`](AGENTS.md) before making changes. In particular:
+
+1. Keep behavior in its owning subsystem and use shared models from `src/tacorank/schemas.py`.
+2. Preserve evaluator, split, prompt, seed, metric, protected-path, and ledger-history boundaries.
+3. Update fixtures and cross-component tests whenever a shared schema or handoff changes.
+4. Run the narrowest relevant tests, then the complete suite before integration review.
+5. Keep data, secrets, submissions, generated evidence, and unrelated local changes out of commits.
+6. In pull requests, document affected subsystems, commands run, data and split assumptions, seeds, metric changes, and residual limitations.
+
+## Troubleshooting
+
+If Python 3.12 or Docker is not on `PATH`, pass canonical executables with `--python312` and `--docker`. If the data is already present, omit `--download-data` and use `--data-dir` when needed. Setup requires a clean tracked checkout because the generated Docker image, Git baseline, contract, and protected manifest must all describe the same commit. The generated files are hash-bound to that exact `HEAD`; after committing source changes, generate a new deployment (or remove only the old generated deployment/runtime directories) before running preflight again.
+
+### Windows PowerShell
+
+Run PowerShell from the repository root. Docker Desktop must be running with
+Linux containers enabled (the WSL2 backend is recommended). WSL integration is
+needed only when running these commands from a WSL shell. The explicit
+executable paths avoid PowerShell/PATH ambiguity:
+
+```powershell
+cd C:\nus\techjam\tacorank
+
+git submodule update --init --recursive
+
+if (-not (Test-Path .venv\Scripts\python.exe)) {
+    py -3.12 -m venv .venv
+}
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
+
+$env:DEEPSEEK_API_KEY = "your-key"
+$python312 = (py -3.12 -c "import sys; print(sys.executable)").Trim()
+$docker = (Get-Command docker.exe -ErrorAction Stop).Path
+
+# Keep --download-data for the first setup (or when KuaiRand-Pure/data is incomplete).
+.\.venv\Scripts\tacorank.exe setup-live `
+    --download-data `
+    --python312 $python312 `
+    --docker $docker
+
+.\.venv\Scripts\tacorank.exe preflight `
+    --config .tacorank\deployment\run-config.json `
+    --live-config .tacorank\deployment\live-adapters.json
+
+.\.venv\Scripts\tacorank.exe run `
+    --config .tacorank\deployment\run-config.json `
+    --live-config .tacorank\deployment\live-adapters.json
+```
+
+The backtick is PowerShell's line-continuation character. Do not type the
+backslash before it. Omit `--download-data` when the data is already complete.
+Run `setup-live` only once for a deployment directory; if one already exists,
+choose new `--deployment-dir` and `--runtime-dir` values. Each setup creates a
+new hash-bound deployment. Native Windows uses Docker
+Desktop's local `npipe://` endpoint; keep Docker Desktop in Linux-container
+mode (the WSL2 backend is recommended).
+
+### macOS
+
+Run from a clean checkout with Docker Desktop running:
+
+```bash
+cd /path/to/tacorank
+git submodule update --init --recursive
+
+python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
 .venv/bin/python -m pip install --no-deps -e .
+
+export DEEPSEEK_API_KEY='your-key'
+PYTHON312="$(command -v python3.12)"
+DOCKER="$(command -v docker)"
+
+# Include --download-data only when KuaiRand-Pure/data is not already complete.
+.venv/bin/tacorank setup-live --download-data \
+  --python312 "$PYTHON312" \
+  --docker "$DOCKER"
+
+.venv/bin/tacorank preflight \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
+
+.venv/bin/tacorank run \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
 ```
 
-Run the complete repository suite:
+On Apple Silicon, Docker Desktop should use its default Linux/ARM64 engine;
+the pinned runtime image must be available for the selected Docker
+architecture. If the data directory is already complete, omit
+`--download-data`. Do not run `setup-live` twice against the same deployment
+directory. macOS uses Docker Desktop's local Unix socket.
+
+Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, pinned Trae install/config/runtime, credential presence and DeepSeek model access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
+
+After a run starts, inspect or rebuild its state with:
 
 ```bash
-.venv/bin/python -m pytest -q
+tacorank resume --run-id run_001 --repository-root .
+tacorank status --run-id run_001 --repository-root .
+tacorank validate-ledger --run-id run_001 --repository-root .
+tacorank rebuild-views --run-id run_001 --repository-root .
+tacorank finalize --run-id run_001 --repository-root .
 ```
 
-Run only the Person 3 and integration suites:
+Production never falls back to fake adapters. Deterministic fakes remain behind the explicit test-only flag. The production command is intentionally quiet while work is running and prints a final JSON status; inspect `runs/<run-id>/STATUS.md`, `SUMMARY.md`, and `events.jsonl` for the recorded outcome. `resume` currently validates/repairs the ledger tail and reports the recovery phase without restarting adapter execution. `finalize` still refuses to fabricate success because standalone clean reproduction/final selection is not implemented yet.
 
-```bash
-.venv/bin/python -m pytest \
-  tests/coding tests/git tests/safety tests/execution \
-  tests/failure_injection tests/integration
-```
+## Core guarantees
 
-The real Trae worker uses a separate Python 3.12+ environment:
+- All role boundaries use the canonical models in `src/tacorank/schemas.py`.
+- Only the deterministic harness writes the event ledger or owns budgets, routing, convergence and final selection.
+- Candidate execution requires an exact Gate A receipt bound to the commit, diff, contract and data identities.
+- The runner resolves reviewed symbolic commands; it does not accept raw LLM shell commands.
+- Candidate code cannot access protected evaluator labels or iterative hidden-final feedback.
+- Person 3 owns termination mechanics; Person 4 returns typed health and recovery decisions.
+- Gate B validates prediction structure and producer identity before Person 5 evaluation.
+- Expected failures return typed results with redacted, hash-addressed evidence.
+- Repair attempts and same-commit retries are bounded to prevent recovery loops.
 
-```bash
-python3.12 -m venv .venv-trae
-.venv-trae/bin/python -m pip install -r requirements-trae.txt
-```
+## Collaboration rules
 
-Start from `config/trae-agent.yaml.example`, but keep the final credential-free configuration outside Git and pass its exact hash through `TraeConfig`. Never place provider credentials in that YAML file.
+1. Import shared models from `src/tacorank/schemas.py`; do not create component-local replacements.
+2. Preserve role ownership and communicate through typed adapter interfaces.
+3. Never modify frozen contracts, protected paths, evaluator logic, data splits, or event history from candidate code.
+4. Update affected fixtures and cross-component tests with every shared-schema change.
+5. Keep datasets, credentials, submissions, model artifacts, sensitive run ledgers and local environments out of Git.
+6. Run the complete test suite before requesting integration review.
 
-## Current verification evidence
+| Symptom | Resolution |
+| --- | --- |
+| `setup-live` reports a dirty checkout | Preserve or commit intended tracked changes, then rerun setup from the exact clean commit that should anchor the experiment. |
+| Python 3.12 or Docker cannot be found | Pass absolute executable paths with `setup-live --python312 ... --docker ...`. |
+| Docker preflight cannot reach the daemon | Start Docker Desktop or the configured compatible daemon, then rerun `preflight`. |
+| DeepSeek authentication or model preflight fails | Export a valid `DEEPSEEK_API_KEY` in the current shell; never place it in a tracked file. |
+| The run identifier already has a ledger | Choose a new `--run-id` in `setup-live`; completed ledgers are immutable and are not reused for new runs. |
+| `resume` rejects the current phase | The last durable state is mid-adapter and ambiguous. Preserve the ledger and evidence for operator review instead of fabricating a result. |
 
-The branch was checked after rebasing onto the shared `main` implementation:
+## Current limitations
 
-- 289 tests passed on Python 3.13;
-- 289 tests passed on Python 3.12;
-- the 29 Person 3 source files passed Python 3.9-targeted mypy;
-- pyflakes, bytecode compilation, YAML parsing and Git diff checks passed; and
-- canonical integration tests cover Person 2's schemas and `ArtifactStore`, coding output, Gate A, execution telemetry/results and Gate B rejection output.
+- Candidate execution is CPU-only; GPU commands fail closed until a hard per-container GPU-memory limit is available.
+- Automatic resume is supported only at durable planning checkpoints. A crash during a provider, coding, execution, or protected-evaluation call requires operator review at the last unambiguous boundary.
+- Live success depends on the current machine, credential, provider, Docker daemon, network, and official data. Passing deterministic tests alone does not prove those external dependencies are available.
+- The finalized live acceptance was intentionally bounded to one experiment. A later live run proved transition into a second iteration but was intentionally stopped there; neither is evidence of elapsed three-iteration convergence.
 
-CI repeats the Person 3 suites on Python 3.9 and 3.13 through `.github/workflows/person3.yml`.
+## Documentation
 
-## Required deployment inputs and limitations
+- [`docs/HARNESS.md`](docs/HARNESS.md) — control plane, event flow, finalization, and schema-change procedure
+- [`docs/person3-handoff.md`](docs/person3-handoff.md) — Trae, Git, gate, execution, and live acceptance evidence
+- [`docs/research/planning-and-search.md`](docs/research/planning-and-search.md) — planning and search boundary
+- [`docs/KUAIRAND_STARTER_KIT.md`](docs/KUAIRAND_STARTER_KIT.md) — dataset, baseline, evaluation, and submission details
+- [`TacoRank-Memory-Schema-v1.md`](TacoRank-Memory-Schema-v1.md) — event and memory schema reference
+- [`research/CURRENT_RUN_IMPROVEMENT_PLAN.md`](research/CURRENT_RUN_IMPROVEMENT_PLAN.md) — reviewed initial research directions
 
-The checked-in `contract/COMPETITION.md` and `PROTECTED_PATHS.md` remain intentionally empty human-owned scaffolds. Live execution must not start until the team freezes them and supplies their verified hashes. The controller must also provide legal data views, a data-manifest hash, reviewed entrypoints, symbolic-command configuration and Person 4's `HealthObserver`.
+## License
 
-Live Trae, production Docker, GPU and full-data runs were not performed in the local verification environment. This branch therefore claims implementation and automated integration coverage—not live training or benchmark evidence.
-
-GPU commands currently fail closed because the Docker backend cannot prove a hard per-container GPU-memory limit. They should be enabled only after an enforcement backend supplies that guarantee.
-
-The KuaiRand starter source is included through the `kuairand-starter-kit` submodule. Dataset archives and extracted data are intentionally excluded from Git; reviewers must obtain them separately under the competition's data terms.
-
-## Suggested review order
-
-1. Read [`docs/person3-handoff.md`](docs/person3-handoff.md) for integration requirements.
-2. Review `src/tacorank/coding/trae_adapter.py` and `src/tacorank/git/worktrees.py` for the coding boundary and lineage invariants.
-3. Review `src/tacorank/safety/patch_gate.py` and `src/tacorank/safety/receipts.py` for Gate A authorization.
-4. Review `src/tacorank/execution/runner.py`, `sandbox.py` and `seals.py` for launch, cleanup and evidence binding.
-5. Review `src/tacorank/safety/output_gate.py` for the evaluator handoff.
-6. Run `tests/failure_injection/` and `tests/integration/test_person3_vertical_slice.py` before approving integration changes.
+A repository-wide license has not yet been declared. Do not assume permission to redistribute TacoRank code. The bundled KuaiRand-Pure resources retain their upstream terms; see [`KuaiRand-Pure/LICENSE`](KuaiRand-Pure/LICENSE) and the pinned starter-kit submodule.

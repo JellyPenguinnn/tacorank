@@ -2,6 +2,12 @@
 # The upstream project has no immutable package release, so pin the reviewed
 # source revision instead of following its mutable main branch.
 trae-agent @ git+https://github.com/bytedance/trae-agent.git@e839e559ac61bdd0e057c375dd1dee391fee797d
+# The DeepSeek Responses compatibility patch is reviewed against this exact
+# SDK surface; do not accept a mutable transitive OpenAI dependency.
+openai==3.6.0
+# Docker mode imports these optional upstream dependencies unconditionally.
+docker==7.1.0
+pexpect==4.9.0
 # Keep load_dotenv search semantics reviewed; production also preflights every
 # .env candidate and never relies on PYTHON_DOTENV_DISABLED alone.
 python-dotenv==1.2.2

@@ -24,6 +24,7 @@ from tacorank.coding.trae_adapter import (
 )
 from tacorank.git.patches import capture_commit_patch
 from tacorank.git.worktrees import WorktreeManager
+from tacorank.run_layout import experiment_artifact_prefix
 
 
 _FAKE_TRAE = r'''from __future__ import annotations
@@ -81,6 +82,13 @@ if behavior == "over_tokens":
 response = {"content": "credential=" + os.environ.get("FAKE_TRAE_SECRET", "none")}
 if behavior != "missing_usage":
     response["usage"] = usage
+success = behavior != "reported_failure"
+final_result = (
+    "provider rejected continuation for secret="
+    + os.environ.get("FAKE_TRAE_SECRET", "none")
+    if behavior == "reported_failure"
+    else "patched"
+)
 trajectory = {
     "task": prompt,
     "start_time": "2026-01-01T00:00:00",
@@ -90,12 +98,13 @@ trajectory = {
     "max_steps": max_steps,
     "llm_interactions": [{"provider": provider, "model": model, "response": response}],
     "agent_steps": [{"step_number": 1, "state": "completed"}],
-    "success": True,
-    "final_result": "patched",
+    "success": success,
+    "final_result": final_result,
     "execution_time": 1.0,
     "fake_cli_arguments": sys.argv[1:],
     "fake_environment": {
         "PYTHON_DOTENV_DISABLED": os.environ.get("PYTHON_DOTENV_DISABLED"),
+        "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
         "PATH": os.environ.get("PATH"),
         "DOCKER_CONFIG": os.environ.get("DOCKER_CONFIG"),
         "HOME": os.environ.get("HOME"),
@@ -114,6 +123,7 @@ _FAKE_DOCKER = r'''from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 root = Path(__file__).resolve().parent
@@ -129,7 +139,9 @@ with log_path.open("a", encoding="utf-8") as handle:
 
 command = sys.argv[1] if len(sys.argv) > 1 else ""
 container_id = "d" * 64
-if command == "create":
+if command == "image":
+    print("sha256:" + "a" * 64)
+elif command == "create":
     if behavior == "fail_create":
         print("create rejected", file=sys.stderr)
         raise SystemExit(2)
@@ -145,9 +157,6 @@ elif command == "start":
         raise SystemExit(2)
 elif command == "stop":
     pass
-elif command == "cp":
-    if behavior == "sleep_cp":
-        time.sleep(30)
 elif command == "rm":
     if behavior == "fail_remove":
         print("remove rejected", file=sys.stderr)
@@ -336,7 +345,7 @@ def _production_worker(parts: SimpleNamespace) -> tuple[TraeCodingWorker, Path]:
     )
     dotenv_identity_directory.mkdir(parents=True)
     trae_cli = bin_directory / "trae-cli"
-    trae_cli.write_text(f"#!{sys.executable}\n" + _FAKE_TRAE, encoding="utf-8")
+    trae_cli.write_text("#!/usr/bin/env python3\n" + _FAKE_TRAE, encoding="utf-8")
     trae_cli.chmod(0o755)
     direct_url = identity_directory / "direct_url.json"
     direct_url.write_text(
@@ -379,7 +388,7 @@ def _production_worker(parts: SimpleNamespace) -> tuple[TraeCodingWorker, Path]:
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text("# reviewed pinned source fixture\n", encoding="utf-8")
     docker = root / "docker"
-    docker.write_text(f"#!{sys.executable}\n" + _FAKE_DOCKER, encoding="utf-8")
+    docker.write_text("#!/usr/bin/env python3\n" + _FAKE_DOCKER, encoding="utf-8")
     docker.chmod(0o755)
     parts.config = replace(
         parts.config,
@@ -439,6 +448,7 @@ def test_real_adapter_seals_patch_and_redacted_evidence(
     assert trajectory["tacorank_adapter"]["redacted"] is True
     assert trajectory["tacorank_adapter"]["isolation_mode"] == "trusted_test"
     assert trajectory["fake_environment"]["PYTHON_DOTENV_DISABLED"] == "1"
+    assert trajectory["fake_environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert trajectory["fake_environment"]["HOME"] != "/sensitive-real-home"
     assert trajectory["fake_environment"]["HOME"].endswith("/home")
     assert trajectory["fake_environment"]["TMPDIR"].endswith("/tmp")
@@ -484,7 +494,7 @@ def test_repair_is_a_direct_commit_on_the_same_branch(
         context_id="context-repair",
         run_id="run1",
         experiment_id="exp1",
-        repair_attempt=2,
+        repair_attempt=1,
         original_experiment_spec=parts.spec,
         current_patch_commit_sha=initial.patch_commit_sha,
         accepted_patch_receipt_id="receipt-1",
@@ -541,6 +551,48 @@ def test_adapter_fails_closed_for_invalid_coding_results(
     assert failure.value.code == expected_code
     assert parts.secret not in str(failure.value)
     assert parts.secret not in (failure.value.output_tail or "")
+
+
+def test_adapter_allows_all_reported_tokens_when_limit_is_null(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    parts.config = replace(
+        parts.config,
+        max_token_cap=None,
+        repair_token_limit=None,
+    )
+    parts.context.token_limit = None
+    parts.environment["FAKE_TRAE_BEHAVIOR"] = "over_tokens"
+
+    candidate = asyncio.run(_worker(parts).create_patch(parts.context, parts.spec))
+
+    assert candidate.resource_delta.llm_input_tokens == 70
+    assert candidate.resource_delta.llm_output_tokens == 40
+    trajectory = json.loads(
+        (parts.repository / candidate.trajectory_artifact.path).read_bytes()
+    )
+    assert trajectory["tacorank_adapter"]["max_provider_tokens"] is None
+
+
+def test_reported_failure_retains_only_redacted_bounded_diagnostic(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    parts.environment["FAKE_TRAE_BEHAVIOR"] = "reported_failure"
+
+    with pytest.raises(CodingWorkerError) as failure:
+        asyncio.run(_worker(parts).create_patch(parts.context, parts.spec))
+
+    assert failure.value.code == "TRAE_REPORTED_FAILURE"
+    assert parts.secret not in (failure.value.output_tail or "")
+    assert "[REDACTED]" in (failure.value.output_tail or "")
+    assert "diagnostic_artifact=" in (failure.value.output_tail or "")
+    failure_artifact = parts.repository / experiment_artifact_prefix(
+        "run1", "exp1", attempt=1
+    ) / "trae_failure_trajectory.json"
+    assert failure_artifact.is_file()
+    assert parts.secret.encode("utf-8") not in failure_artifact.read_bytes()
 
 
 def test_candidate_identity_is_required_before_worktree_or_trae(
@@ -666,8 +718,11 @@ def test_production_docker_boundary_has_exact_lifecycle_and_cli(
         "128",
         "--tmpfs",
         "/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777",
-        "--tmpfs",
-        "/agent_tools:rw,exec,nosuid,nodev,size=64m,mode=0755",
+        "--mount",
+        (
+            f"type=bind,src={parts.config.trae_runtime_root / 'trae_agent' / 'dist'},"
+            "dst=/agent_tools,readonly,bind-propagation=rprivate"
+        ),
         "--mount",
         f"type=bind,src={worktree},dst=/workspace,bind-propagation=rprivate",
         "--mount",
@@ -693,11 +748,6 @@ def test_production_docker_boundary_has_exact_lifecycle_and_cli(
     assert [call["argv"] for call in calls] == [
         expected_create,
         ["start", container_id],
-        [
-            "cp",
-            str(parts.config.trae_runtime_root / "trae_agent" / "dist") + "/.",
-            container_id + ":/agent_tools",
-        ],
         ["stop", "--time", "1", container_id],
         ["rm", "--force", "--volumes", container_id],
         ["inspect", "--type", "container", container_id],
@@ -733,6 +783,67 @@ def test_production_docker_boundary_has_exact_lifecycle_and_cli(
     assert trajectory["fake_environment"]["PATH"] == f"{docker.parent}:/usr/bin:/bin"
 
 
+def test_production_preflight_executes_read_only_mounted_tool(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    worker, docker = _production_worker(parts)
+
+    worker.preflight()
+
+    calls = [
+        json.loads(line)["argv"]
+        for line in docker.with_name("docker.log").read_text().splitlines()
+    ]
+    container_id = "d" * 64
+    assert [call[0] for call in calls] == [
+        "image",
+        "create",
+        "start",
+        "stop",
+        "rm",
+        "inspect",
+    ]
+    assert (
+        "type=bind,src=%s,dst=/agent_tools,readonly,bind-propagation=rprivate"
+        % (parts.config.trae_runtime_root / "trae_agent" / "dist")
+    ) in calls[1]
+    assert calls[2] == ["start", "--attach", container_id]
+
+
+def test_local_preflight_does_not_require_provider_credential(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    parts.environment.pop("FAKE_TRAE_SECRET")
+    worker, _ = _production_worker(parts)
+
+    worker.preflight_local()
+
+    with pytest.raises(CodingWorkerError) as failure:
+        worker.preflight()
+    assert failure.value.code == "TRAE_CREDENTIAL_MISSING"
+
+
+def test_production_preflight_mount_failure_removes_probe(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    worker, docker = _production_worker(parts)
+    docker.with_name("docker.behavior").write_text("fail_start", encoding="utf-8")
+
+    with pytest.raises(CodingWorkerError) as failure:
+        worker.preflight()
+
+    assert failure.value.code == "TRAE_ISOLATION_SETUP_FAILED"
+    assert not docker.with_name("docker.state").exists()
+    calls = [
+        json.loads(line)["argv"][0]
+        for line in docker.with_name("docker.log").read_text().splitlines()
+    ]
+    assert calls == ["image", "create", "start", "stop", "rm", "inspect"]
+
+
 def test_isolation_setup_failure_prevents_host_trae_launch(
     adapter_parts: SimpleNamespace,
 ) -> None:
@@ -749,15 +860,15 @@ def test_isolation_setup_failure_prevents_host_trae_launch(
     assert calls[0][0] == "create"
 
 
-@pytest.mark.parametrize("behavior", ("create_then_sleep", "sleep_cp"))
 def test_isolation_setup_timeout_removes_any_created_container(
     adapter_parts: SimpleNamespace,
-    behavior: str,
 ) -> None:
     parts = adapter_parts
     _, docker = _production_worker(parts)
     parts.config = replace(parts.config, docker_cli_timeout_seconds=1)
-    docker.with_name("docker.behavior").write_text(behavior, encoding="utf-8")
+    docker.with_name("docker.behavior").write_text(
+        "create_then_sleep", encoding="utf-8"
+    )
     marker = Path(parts.environment["FAKE_TRAE_RUN_MARKER"])
     with pytest.raises(CodingWorkerError) as failure:
         asyncio.run(_worker(parts).create_patch(parts.context, parts.spec))
@@ -768,10 +879,7 @@ def test_isolation_setup_timeout_removes_any_created_container(
         json.loads(line)["argv"][0]
         for line in docker.with_name("docker.log").read_text().splitlines()
     ]
-    if behavior == "create_then_sleep":
-        assert calls == ["create", "stop", "rm", "inspect"]
-    else:
-        assert calls == ["create", "start", "cp", "stop", "rm", "inspect"]
+    assert calls == ["create", "stop", "rm", "inspect"]
 
 
 def test_isolation_is_removed_after_trae_timeout(adapter_parts: SimpleNamespace) -> None:
@@ -783,7 +891,7 @@ def test_isolation_is_removed_after_trae_timeout(adapter_parts: SimpleNamespace)
         asyncio.run(worker.create_patch(parts.context, parts.spec))
     assert failure.value.code == "TRAE_TIMEOUT"
     calls = [json.loads(line)["argv"][0] for line in docker.with_name("docker.log").read_text().splitlines()]
-    assert calls == ["create", "start", "cp", "stop", "rm", "inspect"]
+    assert calls == ["create", "start", "stop", "rm", "inspect"]
 
 
 def test_config_execution_surface_and_patch_size_fail_closed(
@@ -960,3 +1068,35 @@ def test_production_rejects_docker_path_through_symlinked_parent(
         _worker(parts)
     assert failure.value.code == "TRAE_CONFIG_INVALID"
     assert not docker.with_name("docker.log").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Docker Desktop uses docker.exe on Windows")
+def test_production_accepts_windows_docker_executable_name(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    _, docker = _production_worker(parts)
+    docker_exe = docker.with_name("docker.exe")
+    docker_exe.write_bytes(docker.read_bytes())
+    docker_exe.chmod(0o755)
+    parts.config = replace(parts.config, docker_executable=docker_exe)
+
+    # Construction performs the complete production configuration validation;
+    # no Docker daemon is needed for this boundary test.
+    _worker(parts)
+
+
+def test_production_sanitized_path_uses_host_separator(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    _production_worker(parts)
+    worker = _worker(parts)
+
+    path_entries = worker._sanitized_environment()["PATH"].split(os.pathsep)
+    assert path_entries[0] == str(parts.config.docker_executable.parent)
+    if os.name == "nt":
+        assert os.pathsep == ";"
+        assert path_entries[1:] == os.environ.get("PATH", "").split(os.pathsep)
+    else:
+        assert path_entries[1:] == ["/usr/bin", "/bin"]
