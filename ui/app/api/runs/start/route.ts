@@ -49,7 +49,8 @@ export async function POST(request: Request) {
     if (await hasActiveDashboardLaunch()) {
       return NextResponse.json({ error: 'A dashboard-launched run is already active. Open the latest run to monitor it.' }, { status: 409 });
     }
-    const script = path.join(root, 'run-new-live.sh');
+    const windows = process.platform === 'win32';
+    const script = path.join(root, windows ? 'run-new-live.ps1' : 'run-new-live.sh');
     try {
       await fs.access(script);
       const logDirectory = path.join(root, '.tacorank', 'dashboard-launches');
@@ -70,9 +71,25 @@ export async function POST(request: Request) {
       const log = openSync(logPath, 'a');
       let child: ChildProcess;
       try {
-        child = spawn(script, [], {
+        const command = windows ? 'powershell.exe' : script;
+        const args = windows
+          ? [
+              '-NoLogo',
+              '-NoProfile',
+              '-NonInteractive',
+              '-ExecutionPolicy',
+              'Bypass',
+              '-File',
+              script,
+              '-RunId',
+              runId,
+              '-DownloadData',
+            ]
+          : [];
+        child = spawn(command, args, {
           cwd: root,
           detached: true,
+          windowsHide: true,
           env: {
             ...process.env,
             DEEPSEEK_API_KEY: apiKey,

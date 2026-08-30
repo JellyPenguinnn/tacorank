@@ -30,7 +30,9 @@ the child `PATH` so `docker-credential-desktop` remains available during image
 builds. Docker Desktop itself must be running before a production launch.
 
 The start action asks for confirmation and launches the repository's reviewed
-`run-new-live.sh` workflow. That is a paid production workflow and includes
+platform-specific workflow: `run-new-live.ps1` through non-interactive Windows
+PowerShell on Windows, or `run-new-live.sh` on macOS/Linux. Both receive the
+same dashboard-reserved run ID and perform the paid production workflow:
 setup, preflight, autonomous execution, finalization, and validation. Launcher
 logs are written under ignored `.tacorank/dashboard-launches/`.
 
