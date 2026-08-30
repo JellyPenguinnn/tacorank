@@ -1197,6 +1197,31 @@ class PlannerDataProfile(StrictModel):
     score_entity_overlap: Dict[NonEmptyStr, PlannerEdaOverlapSummary]
     train_long_view_by_tab: List[PlannerEdaRateSlice]
     train_long_view_by_date: List[PlannerEdaRateSlice]
+    # Within-user structure. GAUC and nDCG@5 are computed inside each user's
+    # impression list, so a feature that does not vary within a list cannot
+    # move either metric. The marginal statistics above cannot express that,
+    # which leaves the planner reasoning about population-level effects when
+    # the metric only responds to within-list ones. These fields are optional
+    # so profiles recorded before this section remain loadable.
+    score_user_list_size: Optional[PlannerEdaNumericSummary] = None
+    score_single_row_user_fraction: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    score_repeat_exposure_fraction: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    score_within_user_duration_dispersion: Optional[float] = Field(
+        default=None, ge=0.0
+    )
+    train_discriminative_user_fraction: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    train_all_negative_user_fraction: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    train_all_positive_user_fraction: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
 
     @field_validator("profile_sha256", "train_file_sha256", "score_file_sha256")
     @classmethod
@@ -1220,8 +1245,13 @@ class PlannerDataProfile(StrictModel):
             raise ValueError("planner EDA training date range is invalid")
         if self.score_date_min > self.score_date_max:
             raise ValueError("planner EDA score date range is invalid")
+        # Absent sections are excluded rather than hashed as nulls, so a
+        # profile recorded before a section existed still hashes to the value
+        # stored in its ledger and historical schema-v1 runs keep replaying.
         canonical = json.dumps(
-            self.model_dump(mode="json", exclude={"profile_sha256"}),
+            self.model_dump(
+                mode="json", exclude={"profile_sha256"}, exclude_none=True
+            ),
             ensure_ascii=False,
             allow_nan=False,
             sort_keys=True,

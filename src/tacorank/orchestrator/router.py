@@ -740,6 +740,45 @@ class Harness:
         )
         return self.state()
 
+    def _abandon_experiment(
+        self,
+        spec: object,
+        attempt: int,
+        fidelity: object,
+        causation_event_id: str,
+        reason_code: str,
+    ) -> object:
+        """Close an abandoned experiment with a terminal decision.
+
+        Recovery can abandon an experiment mid-fidelity, but abandonment is
+        not by itself visible to the planner: the experiment's most recent
+        decision is still the promotion that queued this stage. The search
+        policy then reports FIDELITY_PROMOTION_REQUIRED forever, the run
+        deterministically stops on no_legal_proposal, and every remaining
+        iteration is lost. Record the terminal decision so the planner can
+        branch past it.
+        """
+
+        decision = ExperimentDecision(
+            run_id=self.config.run_id,
+            experiment_id=spec.experiment_id,
+            evaluation_event_id=None,
+            decision=ExperimentDecisionKind.INVALID,
+            reason_code=reason_code,
+            fidelity_completed=fidelity,
+            parent_eligible=False,
+            best_eligible=False,
+            next_fidelity=None,
+        )
+        self._append(
+            ExperimentDecidedPayload(decision=decision),
+            stage="decision_abandoned",
+            experiment_id=spec.experiment_id,
+            attempt=attempt,
+            causation_event_id=causation_event_id,
+        )
+        return self.state()
+
     async def run_one_experiment(self) -> object:
         try:
             return await self._run_one_experiment()
@@ -1337,7 +1376,13 @@ class Harness:
                                 next_execution_cause = patch_check_event.event_id
                                 stage_queue.appendleft(fidelity)
                                 continue
-                        return self.state()
+                        return self._abandon_experiment(
+                            spec,
+                            attempt,
+                            fidelity,
+                            retry_failure.event_id,
+                            "EVALUATION_ABANDONED",
+                        )
                 elif action == RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING:
                     self._validate_runtime_adjustments(decision.runtime_adjustments)
                     runtime_settings.update(decision.runtime_adjustments)
@@ -1364,9 +1409,21 @@ class Harness:
                         next_execution_cause = patch_check_event.event_id
                         stage_queue.appendleft(fidelity)
                         continue
-                    return self.state()
+                    return self._abandon_experiment(
+                        spec,
+                        attempt,
+                        fidelity,
+                        failure_event.event_id,
+                        "EVALUATION_REPAIR_REJECTED",
+                    )
                 elif action != RecoveryAction.RETRY_SAME_COMMIT:
-                    return self.state()
+                    return self._abandon_experiment(
+                        spec,
+                        attempt,
+                        fidelity,
+                        failure_event.event_id,
+                        "EVALUATION_ABANDONED",
+                    )
             self.config.validate_metric_set(evaluation.metric_set)
             evaluation_event = self._append(
                 EvaluationCompletedPayload(result=evaluation),

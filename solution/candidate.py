@@ -5,6 +5,15 @@ ordered score population. The baseline implementation validates and copies
 those scores. Research patches should keep them as the strong parent and add
 one bounded, train-only residual unless an approved experiment explicitly
 tests replacing the parent.
+
+Bound that residual relative to the spread of the parent scores, not to an
+absolute constant. The parent scores span several units, so a cap chosen far
+below one of their standard deviations leaves the ranking indistinguishable
+from this baseline: the evaluation gate measures the fraction of within-user
+item pairs a candidate reorders, and one that reorders essentially nothing is
+recorded as a no-op rather than as a result. Only within-user ordering is
+scored, so a term that is constant inside a single user's list cannot move
+GAUC or nDCG@5 however large it is.
 """
 
 from __future__ import annotations

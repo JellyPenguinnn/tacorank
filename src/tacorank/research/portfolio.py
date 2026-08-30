@@ -80,7 +80,11 @@ def default_portfolio() -> ExperimentPortfolio:
                 tags=("ranking", "bpr", "loss"),
                 cost_tier="medium",
                 mechanism="Optimize relative positive-versus-negative ordering within users.",
-                prerequisites=("baseline_parity", "within_user_positive_negative_pairs"),
+                prerequisites=(
+                    "baseline_parity",
+                    "within_user_positive_negative_pairs",
+                    "objective_refit_justified",
+                ),
                 allowed_data=("train_interactions", "user_id", "long_view"),
                 expected_effect="Improve GAUC and nDCG-aligned ordering.",
                 falsifier="No stable primary-score improvement over the pointwise parent.",

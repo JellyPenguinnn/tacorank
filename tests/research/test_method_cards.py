@@ -15,6 +15,10 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
     assert card.prerequisites == (
         "baseline_parity",
         "within_user_positive_negative_pairs",
+        # A loss re-fit over the parent's own features cannot add information
+        # as an opening move; it is gated until a full result exists or the
+        # profile shows no within-list feature axis to try first.
+        "objective_refit_justified",
     )
     assert set(card.allowed_data) == {
         "train_interactions",
