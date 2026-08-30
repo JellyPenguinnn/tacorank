@@ -75,6 +75,13 @@ class RecoveryManager:
                 "Abandon: the failure crosses a protected integrity boundary.",
                 {},
             )
+        if failure.disk_quota_failure:
+            return (
+                "abandon",
+                "DISK_QUOTA_EXHAUSTED",
+                "Abandon: storage or the reviewed output quota is exhausted; free space or use a new runtime.",
+                {},
+            )
         if same_count >= 2:
             return (
                 "abandon",

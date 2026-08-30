@@ -28,7 +28,13 @@ def build_operational_lesson(
     repeated = list(prior or ()).count(
         classification.fingerprint
     ) >= 1
-    if failure == "oom" and repeated:
+    if classification.disk_quota_failure:
+        category, tags = "resource_constraint", ["storage", "quota"]
+        summary = "The execution exhausted its reviewed output quota or available storage."
+        applicability = "The current runtime, artifact filesystem, and output quota."
+        avoid_when = "Do not retry until storage is reclaimed or a fresh runtime with sufficient quota is selected."
+        confidence = 0.98
+    elif failure == "oom" and repeated:
         category, tags = "resource_constraint", ["memory", "oom"]
         summary = "The configured execution profile exhausted memory on two attempts."
         applicability = "The current data, patch, and resource profile."

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import math
 import re
@@ -24,6 +25,8 @@ from tacorank.execution.interfaces import (
 )
 from tacorank.execution.commands import CommandContext, CommandPolicyError, CommandRegistry
 from tacorank.execution.process import (
+    DiskSpaceExhausted,
+    OutputQuotaExceeded,
     ProcessLaunchError,
     ProcessLauncher,
     redact_runtime_output,
@@ -429,6 +432,20 @@ class ExecutionRunner:
                     if outputs_ready:
                         try:
                             process.extract_ready_runtime_outputs()
+                        except OutputQuotaExceeded:
+                            termination = (
+                                "infrastructure_error",
+                                "DISK_QUOTA_EXHAUSTED",
+                                "allowlisted runtime output exceeded its hard disk quota",
+                            )
+                            break
+                        except DiskSpaceExhausted:
+                            termination = (
+                                "infrastructure_error",
+                                "DISK_SPACE_EXHAUSTED",
+                                "runtime output could not be written because storage is full",
+                            )
+                            break
                         except ProcessLaunchError:
                             termination = (
                                 "infrastructure_error",
@@ -462,10 +479,19 @@ class ExecutionRunner:
             exit_code = process.return_code
             process.close_after_termination()
             telemetry_error = error
+            if isinstance(error, OutputQuotaExceeded):
+                reason_code = "DISK_QUOTA_EXHAUSTED"
+                summary = "allowlisted runtime output exceeded its hard disk quota"
+            elif isinstance(error, DiskSpaceExhausted):
+                reason_code = "DISK_SPACE_EXHAUSTED"
+                summary = "runtime output could not be written because storage is full"
+            else:
+                reason_code = "RUNTIME_CLEANUP_FAILURE"
+                summary = str(error)
             termination = (
                 "infrastructure_error",
-                "RUNTIME_CLEANUP_FAILURE",
-                str(error),
+                reason_code,
+                summary,
             )
 
         if process.reader_error is not None and termination is None:
@@ -496,10 +522,20 @@ class ExecutionRunner:
             outputs = CapturedOutputs(None, None, ("artifact_capture",))
             if termination is None:
                 telemetry_error = error
+                quota_error = (
+                    isinstance(error, OSError)
+                    and getattr(error, "errno", None) == errno.ENOSPC
+                )
                 termination = (
                     "infrastructure_error",
-                    "ARTIFACT_CAPTURE_FAILURE",
-                    "expected artifact capture failed",
+                    (
+                        "DISK_SPACE_EXHAUSTED"
+                        if quota_error
+                        else "ARTIFACT_CAPTURE_FAILURE"
+                    ),
+                    "artifact capture ran out of disk space"
+                    if quota_error
+                    else "expected artifact capture failed",
                 )
 
         result_prediction_artifact = outputs.prediction_artifact
@@ -811,6 +847,20 @@ def _normalize_exit(
     if any(
         marker in lower
         for marker in (
+            "no space left",
+            "enospc",
+            "disk quota exceeded",
+            "storage is full",
+        )
+    ):
+        return (
+            "infrastructure_error",
+            "DISK_QUOTA_EXHAUSTED",
+            _tail_summary(log_tail, "runtime storage quota was exhausted"),
+        )
+    if any(
+        marker in lower
+        for marker in (
             "out of memory",
             "memoryerror",
             "cuda error: out of memory",
@@ -863,6 +913,8 @@ def _observer_outcome(reason_code: str) -> str:
         return "numerical_error"
     if "OOM" in upper or "MEMORY_LIMIT" in upper:
         return "oom"
+    if "DISK" in upper or "QUOTA" in upper or "STORAGE" in upper:
+        return "infrastructure_error"
     if "CONTRACT" in upper or "POLICY" in upper:
         return "contract_error"
     if "CANCEL" in upper or "EMERGENCY" in upper:
