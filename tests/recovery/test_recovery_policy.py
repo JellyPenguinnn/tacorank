@@ -4,9 +4,11 @@ from types import SimpleNamespace
 import pytest
 
 from tacorank.recovery.classifier import classify_failure
+from tacorank.recovery.classifier import TRANSIENT_CODING_ERROR_CODES
 from tacorank.recovery.fingerprints import fingerprint_failure
 from tacorank.recovery.policy import RecoveryManager
 from tacorank.orchestrator.router import Harness
+from tacorank.safety.path_policy import DELIBERATE_INTEGRITY_CODES, ViolationCode
 from tacorank.schemas import RecoveryAction
 
 
@@ -84,6 +86,40 @@ def test_distinct_same_type_exception_messages_have_distinct_fingerprints():
     shape = fingerprint_failure("ValueError", "ValueError: shape mismatch")
     column = fingerprint_failure("ValueError", "ValueError: missing column")
     assert shape != column
+
+
+def test_transient_initial_coding_failure_gets_one_bounded_retry():
+    result = run_failure("code_error", "Trae could not start")
+    result.failure_stage = "coding"
+    result.error_class = "TRAE_LAUNCH_FAILED"
+    ctx = context()
+    ctx.failure_stage = "coding"
+    first = decide(result, ctx)
+    assert first.action == RecoveryAction.RETRY_SAME_COMMIT
+    assert first.reason_code == "TRANSIENT_CODING_RETRY"
+
+    second_ctx = context(
+        previous=[classify_failure(result).fingerprint], retries=1
+    )
+    second_ctx.failure_stage = "coding"
+    second = decide(result, second_ctx)
+    assert second.action == RecoveryAction.ABANDON
+
+
+def test_integrity_registry_covers_path_data_and_output_boundaries():
+    expected = {
+        ViolationCode.PROTECTED_PATH_MODIFIED.value,
+        ViolationCode.PATH_TRAVERSAL.value,
+        ViolationCode.SYMLINK_ESCAPE.value,
+        ViolationCode.SUBMODULE_ESCAPE.value,
+        ViolationCode.HIDDEN_LABEL_ACCESS.value,
+        ViolationCode.FUTURE_INFORMATION_LEAKAGE.value,
+        ViolationCode.UNAPPROVED_NETWORK.value,
+        ViolationCode.SECRET_DETECTED.value,
+        ViolationCode.OUTPUT_PROTECTED_DATA.value,
+    }
+    assert expected.issubset(DELIBERATE_INTEGRITY_CODES)
+    assert "TRAE_LAUNCH_FAILED" in TRANSIENT_CODING_ERROR_CODES
 
 
 @pytest.mark.parametrize("dimension", ["wall_time_seconds", "token", "gpu_seconds"])

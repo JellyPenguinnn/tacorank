@@ -10,7 +10,7 @@ from tacorank.orchestrator.fakes import (
     FakeExecutionRunner,
     FakeResearchPlanner,
 )
-from tacorank.orchestrator.router import OrchestrationError
+from tacorank.orchestrator.router import ResumablePlanningError
 from tacorank.recovery import RecoveryManager
 from tacorank.schemas import (
     ArtifactKind,
@@ -184,7 +184,7 @@ def test_invalid_provider_plan_is_resumable_and_not_a_false_convergence(
     harness.planner = InvalidProviderPlanner()
     harness.bootstrap(baseline_evaluation)
 
-    with pytest.raises(OrchestrationError, match="bounded plan validation"):
+    with pytest.raises(ResumablePlanningError, match="bounded plan validation"):
         asyncio.run(harness.run_until_stopped())
 
     assert harness.state().status.value == "ready"

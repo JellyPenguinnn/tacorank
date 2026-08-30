@@ -39,6 +39,7 @@ from ..schemas import (
     RecoveryContext,
     RecoveryDecision,
     RecoveryPolicyContext,
+    ResearchProposal,
     ResourceDelta,
     RunOutcome,
     RunRequest,
@@ -61,7 +62,7 @@ class FakeResearchPlanner:
         self.experiment_id = experiment_id
 
     async def propose(self, context: PlannerContext) -> PlannerOutput:
-        spec = ExperimentSpec(
+        spec = ResearchProposal(
             run_id=context.run_id,
             experiment_id=self.experiment_id,
             parent_experiment_id="baseline",
@@ -70,9 +71,6 @@ class FakeResearchPlanner:
             hypothesis="Adding a deterministic user-item cross improves ranking.",
             family="feature_cross",
             change_summary="Add one bounded categorical feature cross.",
-            target_stage="feature_engineering",
-            target_files=["solution/model.py"],
-            fidelity_plan=[Fidelity.SMOKE, Fidelity.PROXY, Fidelity.FULL],
             expected_mechanism="The cross captures a missing interaction.",
             success_criteria="Trusted full primary score exceeds the baseline.",
             falsification_condition="Proxy and full scores do not improve.",
@@ -104,7 +102,10 @@ class FakeCodingWorker:
         self.artifacts = artifacts
 
     async def create_patch(self, context: CoderContext, spec: ExperimentSpec) -> PatchCandidate:
-        diff = b"diff --git a/solution/model.py b/solution/model.py\n+feature_cross = True\n"
+        diff = (
+            b"diff --git a/solution/candidate.py b/solution/candidate.py\n"
+            b"+feature_cross = True\n"
+        )
         trajectory = b"fake coding trajectory\n"
         prefix = experiment_artifact_prefix(
             spec.run_id, spec.experiment_id, attempt=1
@@ -307,6 +308,10 @@ class FakeEvaluator:
                 spearman_vs_parent=0.9,
                 changed_row_fraction=0.1,
             ),
+            diagnostic_metrics={
+                "spearman_vs_fm_baseline": 0.8,
+                "user_rankable_fraction": 1.0,
+            },
             trust=TrustAssessment(
                 verdict=TrustVerdict.ACCEPTED,
                 stability=Stability.SINGLE_SEED,

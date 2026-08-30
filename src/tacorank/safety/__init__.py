@@ -28,6 +28,7 @@ from .patch_gate import (
 )
 from .path_policy import (
     ChangedPath,
+    DELIBERATE_INTEGRITY_CODES,
     PathPolicy,
     PolicyViolation,
     ViolationCode,
@@ -55,6 +56,7 @@ __all__ = [
     "MINIMUM_PROTECTED_PATHS",
     "REQUIRED_COMMAND_IDS",
     "ChangedPath",
+    "DELIBERATE_INTEGRITY_CODES",
     "CommandCapability",
     "CommandPolicy",
     "DataAccessPolicy",

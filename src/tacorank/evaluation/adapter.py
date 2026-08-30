@@ -153,6 +153,7 @@ class EvaluationInputs:
     parent: MetricSet
     previous_best: MetricSet
     parent_scores: Optional[Sequence[float]] = None
+    baseline_scores: Optional[Sequence[float]] = None
     seed_evaluation_event_ids: Tuple[str, ...] = ()
     internal_proxy_delta: Optional[float] = None
     unbiased_audit_delta: Optional[float] = None
@@ -450,9 +451,12 @@ class EvaluationService:
             ),
             self.trust_config,
         )
-        diagnostics = {
-            "score_unique_fraction": change.unique_score_fraction,
-        }
+        diagnostics = _prediction_quality_diagnostics(
+            predictions,
+            parent_scores=request.parent_scores,
+            baseline_scores=request.baseline_scores,
+            tolerance=self.trust_config.no_op.score_tolerance,
+        )
         return EvaluationResult(
             run_id=request.run_id,
             experiment_id=request.experiment_id,
@@ -588,6 +592,100 @@ class EvaluationService:
                 raise EvaluationIntegrityError(
                     "hidden final requires verified run.stopped evidence"
                 )
+
+
+def _prediction_quality_diagnostics(
+    predictions: PredictionBatch,
+    *,
+    parent_scores: Optional[Sequence[float]],
+    baseline_scores: Optional[Sequence[float]],
+    tolerance: float,
+) -> Mapping[str, float]:
+    """Return label-free diagnostics that make weak candidates actionable."""
+
+    scores = tuple(float(value) for value in predictions.scores)
+    diagnostics = {
+        "score_unique_fraction": len(set(scores)) / len(scores),
+        "score_std": _population_std(scores),
+    }
+    user_fraction, user_count = _group_variation_fraction(
+        predictions.user_ids, scores, tolerance=tolerance
+    )
+    item_fraction, item_count = _group_variation_fraction(
+        predictions.item_ids,
+        scores,
+        tolerance=tolerance,
+        distinct_members=predictions.user_ids,
+    )
+    diagnostics.update(
+        {
+            "user_rankable_fraction": user_fraction,
+            "multirow_user_count": float(user_count),
+            "item_personalized_fraction": item_fraction,
+            "multiuser_item_count": float(item_count),
+        }
+    )
+    if parent_scores is not None:
+        parent = tuple(float(value) for value in parent_scores)
+        if len(parent) != len(scores):
+            raise ValueError("candidate and parent diagnostics must align")
+        residuals = tuple(left - right for left, right in zip(scores, parent))
+        diagnostics.update(
+            {
+                "mean_abs_parent_residual": sum(map(abs, residuals)) / len(residuals),
+                "parent_residual_std": _population_std(residuals),
+            }
+        )
+    if baseline_scores is not None:
+        baseline_change = analyze_prediction_change(
+            scores, baseline_scores, tolerance
+        )
+        correlation = baseline_change.spearman_vs_parent
+        diagnostics["spearman_vs_fm_baseline"] = (
+            float(correlation) if correlation is not None else 0.0
+        )
+    return diagnostics
+
+
+def _population_std(values: Sequence[float]) -> float:
+    mean = sum(values) / len(values)
+    return math.sqrt(sum((value - mean) ** 2 for value in values) / len(values))
+
+
+def _group_variation_fraction(
+    keys: Sequence[object],
+    scores: Sequence[float],
+    *,
+    tolerance: float,
+    distinct_members: Optional[Sequence[object]] = None,
+) -> Tuple[float, int]:
+    groups: dict[str, list[Tuple[float, Optional[str]]]] = {}
+    members = (
+        distinct_members
+        if distinct_members is not None
+        else (None,) * len(scores)
+    )
+    if not (len(keys) == len(scores) == len(members)):
+        raise ValueError("diagnostic grouping inputs must align")
+    for key, score, member in zip(keys, scores, members):
+        groups.setdefault(str(key), []).append(
+            (float(score), None if member is None else str(member))
+        )
+    eligible = []
+    for values in groups.values():
+        if len(values) < 2:
+            continue
+        if distinct_members is not None and len({member for _, member in values}) < 2:
+            continue
+        eligible.append(values)
+    if not eligible:
+        return 0.0, 0
+    varied = sum(
+        max(score for score, _ in values) - min(score for score, _ in values)
+        > tolerance
+        for values in eligible
+    )
+    return varied / len(eligible), len(eligible)
 
 
 def sha256_file(path: Path) -> str:

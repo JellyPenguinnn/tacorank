@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.research.plan_validation import PlanValidator
-from tacorank.schemas import CostTier, Fidelity
+from tacorank.schemas import CostTier
 
 
 def make_spec(planner_context, **overrides):
@@ -17,9 +17,6 @@ def make_spec(planner_context, **overrides):
         hypothesis="Pairwise loss aligns training with ranking metrics.",
         family="objective",
         change_summary="Replace pointwise loss with bounded pairwise loss.",
-        target_stage="objective",
-        target_files=["solution/candidate.py"],
-        fidelity_plan=["smoke", "proxy", "full"],
         expected_mechanism="Optimize within-user relative ordering.",
         success_criteria=SimpleNamespace(full_parent_delta_min=0.002),
         falsification_condition="No stable improvement over the parent.",
@@ -86,7 +83,6 @@ def test_validator_allows_policy_authorized_soft_refinement(planner_context):
         parent_commit_sha="b" * 40,
         family="objective",
         change_summary="Add one listwise refinement.",
-        target_stage="objective",
         method_card_ids=["objective_listwise_user_softmax"],
     )
 
@@ -133,7 +129,6 @@ def test_validator_accepts_soft_component_for_bounded_ensemble(planner_context):
         experiment_id="exp_0002",
         family="ensemble",
         change_summary="Blend the trusted parent with exp_0001 at one fixed weight.",
-        target_stage="scoring",
         method_card_ids=["ensemble_diverse_residual_candidate"],
         component_experiment_ids=["exp_0001"],
         estimated_cost=SimpleNamespace(
@@ -236,7 +231,9 @@ def test_validator_requires_ensemble_component_in_plan_narrative(planner_context
     assert "ENSEMBLE_COMPONENT_NOT_DESCRIBED" in result.errors
 
 
-def test_validator_rejects_protected_path_and_unknown_evidence(planner_context):
+def test_validator_rejects_implementation_details_and_unknown_evidence(
+    planner_context,
+):
     spec = make_spec(
         planner_context,
         target_files=["evaluate.py"],
@@ -246,60 +243,32 @@ def test_validator_rejects_protected_path_and_unknown_evidence(planner_context):
     result = PlanValidator().validate(spec, planner_context)
 
     assert not result.accepted
-    assert "PROTECTED_TARGET_PATH" in result.errors
+    assert "PLANNER_IMPLEMENTATION_DETAIL_FORBIDDEN" in result.errors
     assert "EVIDENCE_OUTSIDE_CONTEXT" in result.errors
 
 
-def test_validator_rejects_target_outside_editable_paths(planner_context):
-    spec = make_spec(planner_context, target_files=["src/tacorank/train.py"])
+def test_validator_accepts_without_code_policy_in_context(planner_context):
+    planner_context.target_interface_excerpts = {}
+    planner_context.contract_summary.editable_paths = []
+    planner_context.contract_summary.protected_paths = []
 
-    result = PlanValidator().validate(spec, planner_context)
+    result = PlanValidator().validate(make_spec(planner_context), planner_context)
 
-    assert not result.accepted
-    assert "TARGET_OUTSIDE_EDITABLE_PATHS" in result.errors
+    assert result.accepted, result.errors
 
 
-def test_validator_rejects_plan_that_does_not_touch_real_entrypoint(
+def test_validator_rejects_code_specific_narrative(
     planner_context,
 ):
-    spec = make_spec(planner_context, target_files=["solution/train.py"])
-
-    result = PlanValidator().validate(spec, planner_context)
-
-    assert not result.accepted
-    assert "TARGET_INTERFACE_NOT_TOUCHED" in result.errors
-    assert "METHOD_IMPLEMENTATION_TARGET_NOT_TOUCHED" in result.errors
-
-
-def test_validator_allows_helper_only_alongside_real_entrypoint(planner_context):
     spec = make_spec(
         planner_context,
-        target_files=["solution/candidate.py", "solution/train.py"],
+        change_summary="Edit solution/candidate.py to change the objective.",
     )
 
     result = PlanValidator().validate(spec, planner_context)
 
-    assert result.accepted
-
-
-def test_validator_fails_closed_without_target_interfaces(planner_context):
-    planner_context.target_interface_excerpts = {}
-
-    result = PlanValidator().validate(make_spec(planner_context), planner_context)
-
     assert not result.accepted
-    assert "TARGET_INTERFACES_MISSING" in result.errors
-    assert "METHOD_IMPLEMENTATION_TARGET_UNAUTHORIZED" in result.errors
-
-
-def test_validator_fails_closed_without_editable_paths(planner_context):
-    planner_context.contract_summary.editable_paths = []
-
-    result = PlanValidator().validate(make_spec(planner_context), planner_context)
-
-    assert not result.accepted
-    assert "CONTRACT_EDITABLE_PATHS_MISSING" in result.errors
-    assert "TARGET_OUTSIDE_EDITABLE_PATHS" in result.errors
+    assert "CODE_SPECIFIC_PLAN_FORBIDDEN" in result.errors
 
 
 def test_validator_rejects_unresolved_contract(planner_context):
@@ -338,7 +307,6 @@ def test_validator_enforces_memory_schema_identifiers(planner_context):
 def test_validator_normalizes_shared_schema_enums(planner_context):
     spec = make_spec(
         planner_context,
-        fidelity_plan=[Fidelity.SMOKE, Fidelity.PROXY, Fidelity.FULL],
         estimated_cost=SimpleNamespace(
             llm_tokens_upper_bound=1000,
             wall_time_seconds_upper_bound=60,
@@ -352,25 +320,24 @@ def test_validator_normalizes_shared_schema_enums(planner_context):
     assert result.accepted
 
 
-def test_validator_rejects_unknown_fidelity_without_crashing(planner_context):
+def test_validator_rejects_planner_owned_fidelity_plan(planner_context):
     result = PlanValidator().validate(
         make_spec(planner_context, fidelity_plan=["smoke", "bogus"]),
         planner_context,
     )
 
     assert not result.accepted
-    assert "INVALID_FIDELITY_PLAN" in result.errors
+    assert "PLANNER_IMPLEMENTATION_DETAIL_FORBIDDEN" in result.errors
 
 
-def test_validator_rejects_duplicate_fidelity(planner_context):
+def test_validator_rejects_even_valid_planner_owned_fidelity_plan(planner_context):
     result = PlanValidator().validate(
         make_spec(planner_context, fidelity_plan=["smoke", "smoke", "full"]),
         planner_context,
     )
 
     assert not result.accepted
-    assert "DUPLICATE_FIDELITY" in result.errors
-    assert "NON_MONOTONIC_FIDELITY_PLAN" in result.errors
+    assert "PLANNER_IMPLEMENTATION_DETAIL_FORBIDDEN" in result.errors
 
 
 def test_validator_requires_one_policy_selected_method_card(planner_context):
