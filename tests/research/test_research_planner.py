@@ -89,7 +89,6 @@ def test_planner_returns_blocked_when_no_parent(planner_context):
             {"trust_verdict": "suspicious", "integrity": "compromised"},
             "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
         ),
-        ({"prediction_change": 0.0}, "NO_OP_REQUIRES_RECOVERY"),
         ({"stability": "unstable"}, "UNSTABLE_RESULT_REQUIRES_CONFIRMATION"),
         (
             {"fidelity": "proxy", "population": "internal_proxy"},

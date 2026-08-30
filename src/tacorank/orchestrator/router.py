@@ -1252,29 +1252,37 @@ class Harness:
             if self._stop_if_runtime_budget_exhausted():
                 return self.state()
             if evaluation.trust.verdict == TrustVerdict.NO_OP:
-                action, recovery = await self._recover(
-                    evaluation_event, evaluation, spec.experiment_id
-                )
-                repair_accepted = False
-                while action == RecoveryAction.TRAE_REPAIR:
-                    patch, patch_check, patch_check_event = (
-                        await self._execute_code_repair(
-                            recovery, proposal_event.event_id
+                # A verified no-op is a valid terminal experiment result, not
+                # an adapter failure.  Record it as a prune decision so the
+                # next planner context can see the no-op evidence and propose
+                # a different experiment.  Trae repair is reserved for
+                # explicit coding, interface, Gate A, or execution failures.
+                decision = ExperimentDecision(
+                    run_id=self.config.run_id,
+                    experiment_id=spec.experiment_id,
+                    evaluation_event_id=evaluation_event.event_id,
+                    decision=ExperimentDecisionKind.PRUNE,
+                    reason_code="NO_OP_PREDICTION_CHANGE",
+                    fidelity_completed=evaluation.fidelity,
+                    parent_eligible=False,
+                    best_eligible=False,
+                    supporting_event_ids=[
+                        event_id
+                        for event_id in (
+                            evaluation_event.causation_event_id,
+                            evaluation_event.event_id,
                         )
-                    )
-                    if self._stop_if_runtime_budget_exhausted():
-                        return self.state()
-                    if patch_check.accepted:
-                        repair_accepted = True
-                        next_request_template = request
-                        next_execution_cause = patch_check_event.event_id
-                        stage_queue.appendleft(fidelity)
-                        break
-                    action, recovery = await self._recover(
-                        patch_check_event, patch_check, spec.experiment_id
-                    )
-                if repair_accepted:
-                    continue
+                        if event_id
+                    ],
+                )
+                self._append(
+                    ExperimentDecidedPayload(decision=decision),
+                    stage="decision_%s" % fidelity.value,
+                    experiment_id=spec.experiment_id,
+                    attempt=attempt,
+                    causation_event_id=evaluation_event.event_id,
+                    resource_delta=decision.resource_delta,
+                )
                 return self.state()
             decision_context = EvaluationDecisionContext(
                 run_id=self.config.run_id,

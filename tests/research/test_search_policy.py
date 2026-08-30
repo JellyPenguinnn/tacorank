@@ -158,7 +158,6 @@ def test_playbook_cannot_reintroduce_contract_disallowed_family(planner_context)
             {"trust_verdict": "suspicious", "integrity": "compromised"},
             "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
         ),
-        ({"prediction_change": 0.0001}, "NO_OP_REQUIRES_RECOVERY"),
         ({"output_accepted": None}, "RESULT_NOT_BRANCHABLE"),
         ({"integrity": None}, "RESULT_NOT_BRANCHABLE"),
         ({"stability": None}, "RESULT_NOT_BRANCHABLE"),
@@ -188,6 +187,104 @@ def test_playbook_blocks_unbranchable_results(
 
     assert choice.action == "blocked"
     assert choice.reason_code == reason_code
+
+
+def test_playbook_continues_after_no_op_with_independent_choice(planner_context):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="no_op",
+        stability="not_applicable",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
+    assert choice.family == "temporal_history"
+    assert choice.method_card_id == "temporal_history_compact"
+
+
+def test_no_op_tree_ranker_can_choose_one_same_mechanism_reimplementation(
+    planner_context,
+):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="no_op",
+        stability="not_applicable",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    seen = []
+
+    def choose_reimplementation(choices, context):
+        seen.extend(choices)
+        return next(
+            choice
+            for choice in choices
+            if choice.reason_code == "NO_OP_REIMPLEMENT_MECHANISM"
+        )
+
+    choice = SearchPolicy(
+        legal_choice_ranker=choose_reimplementation
+    ).choose(context_with_latest(planner_context, latest))
+
+    assert {
+        candidate.reason_code for candidate in seen
+    } >= {
+        "NO_OP_REIMPLEMENT_MECHANISM",
+        "NO_OP_INDEPENDENT_MECHANISM",
+    }
+    assert choice.phase == "no_op_reimplementation"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.family == "objective"
+    assert choice.method_card_id == "objective_pairwise_bpr"
+
+
+def test_second_same_mechanism_no_op_retires_reimplementation(planner_context):
+    first = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="no_op",
+        stability="not_applicable",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    latest = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="no_op",
+        stability="not_applicable",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    context = context_with_latest(planner_context, latest)
+    context.family_history = [first, latest]
+    seen = []
+
+    def capture(choices, context):
+        seen.extend(choices)
+        return choices[0]
+
+    choice = SearchPolicy(legal_choice_ranker=capture).choose(context)
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
+    assert not any(
+        candidate.reason_code == "NO_OP_REIMPLEMENT_MECHANISM"
+        for candidate in seen
+    )
 
 
 def test_playbook_branches_after_terminal_proxy_prune(planner_context):

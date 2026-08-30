@@ -509,8 +509,16 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             _require(node.status == ExperimentStatus.OUTPUT_VERIFIED, "smoke decision requires Gate B")
             _require(decision.evaluation_event_id is None, "smoke decision cannot cite evaluation")
         else:
-            _require(node.status == ExperimentStatus.EVALUATED, "decision requires evaluation")
             evaluation = _last_for_experiment(events, EventType.EVALUATION_COMPLETED, decision.experiment_id)
+            no_op_prune = bool(
+                evaluation is not None
+                and evaluation.payload.result.trust.verdict == TrustVerdict.NO_OP
+                and decision.decision == ExperimentDecisionKind.PRUNE
+            )
+            _require(
+                node.status == ExperimentStatus.EVALUATED or no_op_prune,
+                "decision requires evaluation",
+            )
             _require(
                 evaluation is not None and evaluation.event_id == decision.evaluation_event_id,
                 "decision cites the wrong evaluation",

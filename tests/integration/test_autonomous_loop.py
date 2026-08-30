@@ -17,10 +17,12 @@ from tacorank.schemas import (
     CheckResult,
     CheckStatus,
     EventType,
+    Stability,
     PlannerAction,
     PlannerOutput,
     PatchCheckResult,
     SubmissionCheckedPayload,
+    TrustVerdict,
     Violation,
 )
 
@@ -72,6 +74,36 @@ class NonImprovingEvaluator(FakeEvaluator):
                 }
             )
         return result
+
+
+class NoOpEvaluator(FakeEvaluator):
+    """Return a structurally valid evaluation with unchanged predictions."""
+
+    async def evaluate(self, request):
+        result = await super().evaluate(request)
+        return result.__class__.model_validate(
+            {
+                **result.model_dump(mode="json"),
+                "prediction_change": {
+                    "spearman_vs_parent": 1.0,
+                    "changed_row_fraction": 0.0,
+                },
+                "seed_evidence_event_ids": [],
+                "trust": {
+                    **result.trust.model_dump(mode="json"),
+                    "verdict": TrustVerdict.NO_OP,
+                    "stability": Stability.NOT_APPLICABLE,
+                    "seed_mean": None,
+                    "seed_stderr": None,
+                    "seed_count": 1,
+                },
+            }
+        )
+
+
+class FailingRecoveryManager:
+    async def decide(self, *args, **kwargs):
+        raise AssertionError("verified no-op must not invoke Trae recovery")
 
 
 class BlockedPlanner:
@@ -173,6 +205,43 @@ def test_outer_loop_uses_memory_and_counts_distinct_terminal_iterations(
     assert state.consecutive_non_improving_full_evaluations == 3
     assert [len(context.family_history) for context in planner.contexts] == [0, 1, 2]
     assert harness.events()[-1].event_type == EventType.RUN_STOPPED
+
+
+def test_no_op_is_pruned_and_planner_continues(harness, baseline_evaluation):
+    planner = SequentialPlanner(harness.config.baseline_commit_sha)
+    harness.config.max_experiments = 2
+    harness.planner = planner
+    harness.evaluator = NoOpEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.recovery_manager = FailingRecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_until_stopped())
+
+    assert state.stop_reason_code == "experiment_budget"
+    assert state.experiments_proposed == 2
+    decisions = [
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.EXPERIMENT_DECIDED
+        and event.payload.decision.fidelity_completed.value != "smoke"
+    ]
+    assert len(decisions) == 2
+    assert all(decision.decision.value == "prune" for decision in decisions)
+    assert all(
+        decision.reason_code == "NO_OP_PREDICTION_CHANGE"
+        for decision in decisions
+    )
+    assert not any(
+        event.event_type == EventType.RECOVERY_DECIDED
+        for event in harness.events()
+    )
+    assert len(planner.contexts) == 2
+    assert planner.contexts[1].family_history[0].trust_verdict == TrustVerdict.NO_OP
+    assert planner.contexts[1].family_history[0].decision.value == "prune"
 
 
 def test_blocked_planner_stops_without_spinning(harness, baseline_evaluation):

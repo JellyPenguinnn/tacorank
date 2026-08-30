@@ -89,7 +89,7 @@ Apply these rules from top to bottom. The first matching rule wins.
 | --- | --- | --- | --- |
 | 0 | `output.checked.accepted = false` | Fix or abandon the output/contract failure through recovery. | No |
 | 1 | Trust integrity is `compromised`, or verdict is `suspicious` | Quarantine the result; investigate data, evaluator, or leakage. | No |
-| 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Verify that the patch affected logits, gradients, and intended rows. | No |
+| 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Record a terminal null result. Let the legal-choice ranker select either one same-mechanism reimplementation from the trusted parent or an independent mechanism. | Trusted parent only |
 | 3 | Stability is `unstable` | Confirm seeds or simplify/regularize the same mechanism. | No new family |
 | 4 | Fidelity is `smoke` or `proxy` | Promote only if deterministic promotion rules pass. | No parent promotion |
 | 5 | Full public result is trusted and improves the parent by more than `epsilon` | Accept; confirm once if stability is only `single_seed`, then deepen the same family. | Yes |
@@ -107,7 +107,9 @@ derive two narrower, non-checkpoint permissions from verified evidence:
 
 - **hard prune:** rejected output, suspicious/compromised integrity, no-op,
   unstable result, invalid/retracted lineage, or primary regression worse than
-  `max(5 * epsilon, 0.01)`. Never branch, refine, or ensemble this result;
+  `max(5 * epsilon, 0.01)`. Never branch, refine, or ensemble the result node.
+  After the first no-op only, the tree planner may select one reimplementation
+  of the same mechanism from its last trusted parent; a second no-op retires it;
 - **soft prune:** clean accepted output at proxy/full fidelity, meaningful
   prediction change, and either primary delta above that regression floor or a
   component-metric trade-off. Retain the node as evidence, not as a checkpoint;
@@ -132,7 +134,7 @@ the parent, using the contract's seed/noise tolerance.
 | positive | negative | Broad within-user separation improved but top ranks worsened. | Try top-weighted/listwise or hybrid ranking loss; inspect top-5 errors. |
 | negative | positive | Top-5 placement improved while general positive-negative ordering degraded. | Blend listwise/top-k emphasis with pairwise loss; avoid a pure top-k overfit. |
 | near zero | near zero, predictions changed | Mechanism has little signal at current fidelity. | Move to the next independent family. |
-| any | any, predictions barely changed | Implementation/no-op, not research evidence. | Diagnose score path, feature coverage, and gradients. |
+| any | any, predictions barely changed | Terminal null result; it does not establish that the implementation is broken. | Let the tree planner rank one bounded same-mechanism reimplementation against independent mechanisms. |
 | inconsistent across seeds | inconsistent across seeds | Variance dominates estimated gain. | Confirm or simplify; do not promote. |
 
 Metric-specific interpretation is diagnostic, not proof. GAUC excludes users

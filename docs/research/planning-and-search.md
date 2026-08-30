@@ -49,7 +49,12 @@ The core policy is deterministic AIDE-style portfolio search:
 - a clean soft result whose prediction Spearman magnitude is below `0.98` may
   enter one fixed residual-ensemble test from the trusted parent;
 - severe regressions, rejected outputs, suspicious/compromised results, no-ops,
-  unstable results, and invalid/retracted nodes are hard-pruned;
+  unstable results, and invalid/retracted nodes are hard-pruned as parents and
+  checkpoints;
+- after the first no-op, the legal-choice ranker receives both one bounded
+  same-mechanism reimplementation from the last trusted parent and the available
+  independent mechanisms; a second no-op for the same parent/family/method
+  retires the reimplementation option;
 - a stateless LinUCB ranker is reconstructed from verified ledger history and
   reorders only the legal choices emitted by these deterministic gates. It
   cannot invent a family, method, parent, refinement, or ensemble component.
@@ -61,9 +66,11 @@ Person 1 does not resurrect candidates from generic history. Canonical
 checkpoint selection.
 
 Semantic duplicate identity is `parent + family + method cards + ensemble
-components`. Rephrasing the same method does not authorize another trial from
-the same parent. A genuine refinement receives a new parent commit and therefore
-a distinct identity.
+components`. Rephrasing the same method does not normally authorize another
+trial from the same parent. The only exception is the policy-selected, single
+reimplementation after a verified no-op; the planner cannot repeat it after a
+second no-op. A genuine refinement receives a new parent commit and therefore a
+distinct identity.
 
 ## Interfaces owned by Person 1
 

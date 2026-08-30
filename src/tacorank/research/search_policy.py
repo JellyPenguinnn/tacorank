@@ -279,6 +279,28 @@ def _next_independent_choice(
     reason_code: str,
     reason: str,
 ) -> PolicyChoice | None:
+    choices = _independent_choices(
+        context,
+        eligible,
+        allowed,
+        latest_family,
+        reason_code=reason_code,
+        reason=reason,
+    )
+    return choices[0] if choices else None
+
+
+def _independent_choices(
+    context: Any,
+    eligible: Sequence[ExperimentNodeView],
+    allowed: tuple[str, ...],
+    latest_family: str,
+    *,
+    reason_code: str,
+    reason: str,
+) -> tuple[PolicyChoice, ...]:
+    """Return every legal independent-family action in deterministic order."""
+
     tried = set(_family_history(context))
     parent = _best_parent(eligible)
     ordered = [
@@ -287,6 +309,7 @@ def _next_independent_choice(
         if family in allowed and family != latest_family
     ]
     ordered.sort(key=lambda family: (family in tried, _family_order(context).index(family)))
+    choices = []
     for family in ordered:
         card = _method_for_family(
             context,
@@ -294,15 +317,122 @@ def _next_independent_choice(
             parent_experiment_id=parent.experiment_id,
         )
         if card is not None:
-            return _proposal(
-                parent=parent,
-                family=family,
-                card=card,
-                phase="playbook",
-                reason_code=reason_code,
-                reason=reason,
+            choices.append(
+                _proposal(
+                    parent=parent,
+                    family=family,
+                    card=card,
+                    phase="playbook",
+                    reason_code=reason_code,
+                    reason=reason,
+                )
             )
-    return None
+    return tuple(choices)
+
+
+def _no_op_choices(
+    context: Any,
+    eligible: Sequence[ExperimentNodeView],
+    allowed: tuple[str, ...],
+) -> tuple[PolicyChoice, ...] | None:
+    """Expose bounded next actions after a terminal prediction no-op.
+
+    ``None`` means the latest result is not a no-op. An empty tuple means it is
+    a no-op but no legal next action remains. The no-op node itself is never a
+    parent: a reimplementation branches from its last trusted parent.
+    """
+
+    history = as_list(get_value(context, "family_history", None))
+    if not history:
+        return None
+    latest = history[-1]
+    verdict = _normalized(get_value(latest, "trust_verdict", None))
+    contract = get_value(context, "contract_summary", None)
+    no_op_threshold = _number(
+        get_value(contract, "prediction_change_no_op_threshold", 0.001)
+    )
+    no_op_threshold = 0.001 if no_op_threshold is None else no_op_threshold
+    prediction_change = _number(get_value(latest, "prediction_change", None))
+    if verdict != "no_op" and not (
+        prediction_change is not None and prediction_change <= no_op_threshold
+    ):
+        return None
+
+    family = str(get_value(latest, "family", ""))
+    choices = list(
+        _independent_choices(
+            context,
+            eligible,
+            allowed,
+            family,
+            reason_code="NO_OP_INDEPENDENT_MECHANISM",
+            reason=(
+                "The terminal no-op is research evidence rather than an adapter "
+                "failure; test an independent mechanism from the trusted frontier."
+            ),
+        )
+    )
+
+    parent_id = str(get_value(latest, "parent_experiment_id", ""))
+    parent = next(
+        (node for node in eligible if node.experiment_id == parent_id),
+        None,
+    )
+    latest_methods = tuple(
+        str(item)
+        for item in as_list(get_value(latest, "method_card_ids", None))
+        if str(item)
+    )
+    same_mechanism_no_ops = 0
+    for summary in history:
+        summary_methods = {
+            str(item)
+            for item in as_list(get_value(summary, "method_card_ids", None))
+        }
+        summary_change = _number(get_value(summary, "prediction_change", None))
+        summary_is_no_op = _normalized(
+            get_value(summary, "trust_verdict", None)
+        ) == "no_op" or (
+            summary_change is not None and summary_change <= no_op_threshold
+        )
+        if (
+            summary_is_no_op
+            and str(get_value(summary, "parent_experiment_id", "")) == parent_id
+            and str(get_value(summary, "family", "")) == family
+            and bool(summary_methods.intersection(latest_methods))
+        ):
+            same_mechanism_no_ops += 1
+
+    # Permit one planner-selected reimplementation after the first no-op. A
+    # second no-op for the same parent/family/method retires that mechanism.
+    if (
+        parent is not None
+        and family in allowed
+        and len(latest_methods) == 1
+        and same_mechanism_no_ops == 1
+    ):
+        eligible_cards = {
+            str(get_value(card, "method_id", "")): card
+            for card in eligible_method_cards(context, family)
+        }
+        card = eligible_cards.get(latest_methods[0])
+        if card is not None:
+            choices.append(
+                _proposal(
+                    parent=parent,
+                    family=family,
+                    card=card,
+                    phase="no_op_reimplementation",
+                    reason_code="NO_OP_REIMPLEMENT_MECHANISM",
+                    reason=(
+                        "The previous implementation produced identical predictions. "
+                        "Reimplement or materially refine the same approved mechanism "
+                        "once from its trusted parent; the duplicate-plan gate remains "
+                        "binding."
+                    ),
+                )
+            )
+    return tuple(choices)
 
 
 def _required_method_choice(
@@ -496,17 +626,6 @@ def _playbook_choice(
             return _blocked(
                 "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
                 "The latest evaluation is suspicious or integrity-compromised.",
-            )
-        if rule == "no_op" and (
-            verdict == "no_op"
-            or (
-                prediction_change is not None
-                and prediction_change <= no_op_threshold
-            )
-        ):
-            return _blocked(
-                "NO_OP_REQUIRES_RECOVERY",
-                "The latest candidate did not change predictions meaningfully.",
             )
         if rule == "unstable" and stability == "unstable":
             return _blocked(
@@ -769,6 +888,16 @@ class SearchPolicy:
                 "PLAYBOOK_INVALID",
                 "The planner context contains an invalid improvement playbook.",
                 phase="none",
+            )
+
+        no_op_candidates = _no_op_choices(context, eligible, allowed)
+        if no_op_candidates is not None:
+            if no_op_candidates:
+                return self._rank(no_op_candidates, context)
+            return _blocked(
+                "NO_ELIGIBLE_METHOD",
+                "The latest candidate was a no-op and no legal reimplementation "
+                "or independent method remains.",
             )
 
         routed = _playbook_choice(context, eligible, allowed)
