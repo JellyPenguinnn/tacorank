@@ -224,7 +224,13 @@ def test_controller_binds_codeblind_proposal_to_coder_contract(
     spec = harness.context_builder.bind_implementation(ResearchProposal(**values))
 
     assert spec.target_stage == "objective"
-    assert spec.target_files == ["solution/candidate.py"]
+    assert spec.target_files == [
+        "solution/candidate.py",
+        "solution/features.py",
+        "solution/model.py",
+        "solution/train.py",
+        "solution/inference.py",
+    ]
     assert [fidelity.value for fidelity in spec.fidelity_plan] == [
         "smoke",
         "proxy",
@@ -274,6 +280,12 @@ def test_coder_context_contains_the_real_worker_contract(harness, baseline_evalu
     assert context.step_limit == harness.config.coding_step_limit
     assert context.token_limit == harness.config.coding_token_limit
     assert context.estimated_tokens <= harness.config.context_token_limit
+    assert context.target_interface_excerpts == {
+        "solution/candidate.py": (
+            harness.config.target_interface_excerpts["solution/candidate.py"]
+        )
+    }
+    assert "solution/model.py" not in context.content
     assert "unconstrained real-valued ranking" in " ".join(
         context.coding_invariants
     )

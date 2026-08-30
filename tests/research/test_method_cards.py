@@ -23,7 +23,13 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
         "verified_predictions",
     }
     assert card.prohibition_conditions == ("evaluator_or_split_change_required",)
-    assert card.implementation_targets == ("solution/candidate.py",)
+    assert card.implementation_targets == (
+        "solution/candidate.py",
+        "solution/features.py",
+        "solution/model.py",
+        "solution/train.py",
+        "solution/inference.py",
+    )
 
     residual = next(
         card
@@ -36,4 +42,19 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
         "verified_best_prediction",
         "diverse_clean_proxy_member",
     )
-    assert residual.implementation_targets == ("solution/candidate.py",)
+    assert residual.implementation_targets == (
+        "solution/candidate.py",
+        "solution/features.py",
+        "solution/inference.py",
+    )
+
+    history = next(
+        card
+        for card in portfolio.cards
+        if card.method_id == "temporal_history_compact"
+    )
+    assert history.implementation_targets == (
+        "solution/candidate.py",
+        "solution/features.py",
+        "solution/inference.py",
+    )

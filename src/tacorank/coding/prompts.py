@@ -162,7 +162,7 @@ def build_coding_prompt(
         "Begin by viewing the authoritative target files directly; do not list the repository root or survey unrelated directories.",
         "Modify only authoritative_target_files. Do not add ad-hoc smoke, test, helper, or alternate entrypoint files unless each path is explicitly present in authoritative_target_files.",
         "The interface excerpts and method cards below are the supplied integration context. Inspect one non-target file only when a concrete missing symbol or schema blocks the edit.",
-        "The production entrypoint is loaded as solution.candidate:run. Prefer one self-contained candidate.py; use sibling imports only when the approved target files and interface explicitly authorize them.",
+        "The production entrypoint is loaded as solution.candidate:run. Keep it wired to every approved helper used by the experiment; sibling imports are allowed only when both files are authoritative_target_files.",
         "When the interface supplies setup-verified FM scores, preserve them as the parent and implement the approved mechanism as a bounded residual unless the ExperimentSpec explicitly requires replacement.",
         "The supplied FM scores are unconstrained real-valued ranking scores, not probabilities. Never sigmoid, clip to [0,1], normalize, or rescale the FM parent or a parent-plus-residual result. Bound only the residual on the parent's original scale.",
         "Prior-result summaries are mandatory implementation constraints. Use them to avoid repeating score collapse, excessive parent divergence, missing personalization, or loss of within-user rankability.",

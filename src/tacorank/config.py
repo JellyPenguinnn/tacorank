@@ -28,7 +28,8 @@ class ContractError(RuntimeError):
 DEFAULT_TARGET_INTERFACE_EXCERPTS = {
     "solution/candidate.py": (
         "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
-        "-> None; include this file in target_files; read only "
+        "-> None; this is the stable production entrypoint and must remain wired "
+        "to every approved helper edited by the experiment. Read only "
         "invocation.input_root and write exactly invocation.output_path as "
         "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
         "invocation.seed; return None. fm_baseline_predictions.csv contains "
@@ -37,7 +38,31 @@ DEFAULT_TARGET_INTERFACE_EXCERPTS = {
         "parent-plus-residual result. Bound only the residual on the parent's "
         "original score scale and preserve the exact parent score when no "
         "supported residual is available."
-    )
+    ),
+    "solution/features.py": (
+        "Candidate-owned feature boundary. Preserve the strict train.csv and "
+        "score.csv schemas and the fitted-on-training-only FeatureEncoder API. "
+        "Scoring rows never contain long_view. Any new aggregate must be "
+        "deterministic and use only interactions earlier than the row it scores."
+    ),
+    "solution/model.py": (
+        "Candidate-owned model components. FactorizationMachine is the compact "
+        "pointwise starting implementation. Approved experiments may add or "
+        "replace trainable components here, but must preserve deterministic seeds, "
+        "finite unconstrained ranking scores, and non-zero trainable gradients."
+    ),
+    "solution/train.py": (
+        "Candidate-owned training orchestration. fit_pointwise is a helper, not an "
+        "entrypoint. Training may read train.csv only, must respect the supplied "
+        "fidelity and seed, and must not evaluate, select, or early-stop on public "
+        "validation or score-population labels."
+    ),
+    "solution/inference.py": (
+        "Candidate-owned scoring and output helpers. Preserve authenticated, "
+        "row-aligned FM parent scores, add only the approved bounded residual on "
+        "the original score scale, retain exact parent fallback, and create exactly "
+        "one ordered finite output CSV exclusively."
+    ),
 }
 
 

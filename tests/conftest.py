@@ -61,9 +61,16 @@ def repository(tmp_path: Path) -> Path:
     )
     shutil.copytree(source_research / "methods", tmp_path / "research/methods")
     (tmp_path / "solution").mkdir()
-    (tmp_path / "solution/candidate.py").write_text(
-        "def run(invocation):\n    return None\n", encoding="utf-8"
-    )
+    source_solution = Path(__file__).parents[1] / "solution"
+    for name in (
+        "__init__.py",
+        "candidate.py",
+        "features.py",
+        "model.py",
+        "train.py",
+        "inference.py",
+    ):
+        shutil.copy2(source_solution / name, tmp_path / "solution" / name)
     (tmp_path / "artifacts").mkdir()
     (tmp_path / "runs").mkdir()
     return tmp_path

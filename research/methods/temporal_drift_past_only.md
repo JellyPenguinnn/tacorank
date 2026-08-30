@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"temporal_drift_past_only","family":"features","status":"candidate","tags":["temporal","drift","recency"],"cost_tier":"low","prerequisites":["strict_temporal_cutoff","drift_diagnostics_material"],"allowed_data":["train_interactions","date","user_id","video_id","author_id","duration_ms","long_view"],"prohibition_conditions":["future_aggregate_required"],"sources":["https://arxiv.org/abs/2208.08696"]}
+{"schema_version":"1.0","method_id":"temporal_drift_past_only","family":"features","status":"candidate","tags":["temporal","drift","recency"],"cost_tier":"low","prerequisites":["strict_temporal_cutoff","drift_diagnostics_material"],"allowed_data":["train_interactions","date","user_id","video_id","author_id","duration_ms","long_view"],"prohibition_conditions":["future_aggregate_required"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/inference.py"],"sources":["https://arxiv.org/abs/2208.08696"]}
 ```
 
 ## Mechanism

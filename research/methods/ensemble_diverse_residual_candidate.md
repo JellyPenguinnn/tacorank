@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"ensemble_diverse_residual_candidate","family":"ensemble","status":"candidate","tags":["ensemble","residual","rank_average","soft_prune"],"cost_tier":"low","prerequisites":["verified_best_prediction","diverse_clean_proxy_member"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["untrusted_or_severely_regressed_member","adaptive_weight_sweep"],"implementation_targets":["solution/candidate.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"ensemble_diverse_residual_candidate","family":"ensemble","status":"candidate","tags":["ensemble","residual","rank_average","soft_prune"],"cost_tier":"low","prerequisites":["verified_best_prediction","diverse_clean_proxy_member"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["untrusted_or_severely_regressed_member","adaptive_weight_sweep"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/inference.py"],"sources":[]}
 ```
 
 ## Mechanism

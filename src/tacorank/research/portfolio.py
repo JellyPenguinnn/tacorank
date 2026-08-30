@@ -85,7 +85,13 @@ def default_portfolio() -> ExperimentPortfolio:
                 expected_effect="Improve GAUC and nDCG-aligned ordering.",
                 falsifier="No stable primary-score improvement over the pointwise parent.",
                 prohibition_conditions=("evaluator_or_split_change_required",),
-                implementation_targets=("solution/candidate.py",),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/model.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
             ),
             MethodCard(
                 method_id="temporal_history_compact",
@@ -104,6 +110,11 @@ def default_portfolio() -> ExperimentPortfolio:
                 ),
                 expected_effect="Improve preference modeling for users with useful history.",
                 falsifier="No gain over a no-history control or evidence of temporal leakage.",
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/inference.py",
+                ),
             ),
             MethodCard(
                 method_id="model_compact_ranker",
@@ -125,6 +136,13 @@ def default_portfolio() -> ExperimentPortfolio:
                 ),
                 expected_effect="Improve ranking through additional interactions.",
                 falsifier="No improvement after a bounded, mechanism-driven trial.",
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/model.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
             ),
             MethodCard(
                 method_id="multitask_single_auxiliary",
@@ -141,6 +159,13 @@ def default_portfolio() -> ExperimentPortfolio:
                 ),
                 expected_effect="Improve generalization of the primary ranking head.",
                 falsifier="Auxiliary task degrades primary validation or violates the contract.",
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/model.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
             ),
             MethodCard(
                 method_id="duration_bias_censored_watch_time",
@@ -153,6 +178,12 @@ def default_portfolio() -> ExperimentPortfolio:
                 allowed_data=("train_interactions", "duration_ms", "long_view"),
                 expected_effect="Improve long-view ranking through duration bias correction.",
                 falsifier="No primary improvement or mismatch with the competition definition.",
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
             ),
             MethodCard(
                 method_id="ensemble_diverse_residual_candidate",
@@ -187,7 +218,11 @@ def default_portfolio() -> ExperimentPortfolio:
                     "contributes complementary within-user ordering."
                 ),
                 falsifier="No fixed blend improves over the trusted parent.",
-                implementation_targets=("solution/candidate.py",),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/inference.py",
+                ),
             ),
             MethodCard(
                 method_id="ensemble_confirmed_members",
@@ -200,6 +235,10 @@ def default_portfolio() -> ExperimentPortfolio:
                 allowed_data=("verified_predictions",),
                 expected_effect="Improve stability or small residual headroom.",
                 falsifier="No gain over the best member or incompatible score behavior.",
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/inference.py",
+                ),
             ),
         ]
     )

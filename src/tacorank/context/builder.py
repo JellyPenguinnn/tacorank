@@ -378,10 +378,10 @@ class ContextBuilder:
             )
 
         interfaces = self._target_interface_excerpts()
-        targets = list(interfaces)
+        configured_targets = set(interfaces)
         protected = self._protected_paths()
         editable = [root.rstrip("/") for root in self.config.editable_roots]
-        for target in targets:
+        for target in interfaces:
             if not any(_path_is_within(target, root) for root in editable):
                 raise ContextBuildError(
                     "implementation target is outside editable roots: %s" % target
@@ -404,12 +404,32 @@ class ContextBuilder:
                     "implementation binding cannot resolve method card: %s"
                     % method_id
                 )
-            unauthorized = sorted(set(card.implementation_targets) - set(targets))
+            unauthorized = sorted(
+                set(card.implementation_targets) - configured_targets
+            )
             if unauthorized:
                 raise ContextBuildError(
                     "method implementation target is not an authorized interface: %s"
                     % unauthorized[0]
                 )
+
+        requested_targets = {
+            target
+            for method_id in proposal.method_card_ids
+            for target in cards[method_id].implementation_targets
+        }
+        # Older/custom method cards without an assignment retain the narrow
+        # stable-entrypoint behavior. Shipped cards name every helper needed by
+        # their mechanism, so unrelated editable files are not exposed to Trae.
+        if not requested_targets:
+            requested_targets = {"solution/candidate.py"}
+        if "solution/candidate.py" not in requested_targets:
+            raise ContextBuildError(
+                "method implementation targets must include the production entrypoint"
+            )
+        targets = [
+            target for target in interfaces if target in requested_targets
+        ]
 
         return ExperimentSpec(
             **proposal.model_dump(mode="python"),
@@ -1075,6 +1095,19 @@ class ContextBuilder:
                 % ", ".join(missing_method_ids)
             )
         prior_result_summaries = self._coder_prior_result_summaries(visible, spec)
+        target_interfaces = {
+            target: self.config.target_interface_excerpts[target]
+            for target in spec.target_files
+            if target in self.config.target_interface_excerpts
+        }
+        missing_target_interfaces = sorted(
+            set(spec.target_files) - set(target_interfaces)
+        )
+        if missing_target_interfaces:
+            raise ContextBuildError(
+                "coder target interface is unavailable: %s"
+                % missing_target_interfaces[0]
+            )
         mandatory = [
             (
                 "Coding assignment",
@@ -1082,9 +1115,7 @@ class ContextBuilder:
                     {
                         "spec": spec.model_dump(mode="json"),
                         "protected_paths": self._protected_digest(),
-                        "target_interface_excerpts": (
-                            self.config.target_interface_excerpts
-                        ),
+                        "target_interface_excerpts": target_interfaces,
                         "allowed_output": "PatchCandidate",
                         "hypothesis_drift": "forbidden",
                     }
@@ -1168,7 +1199,7 @@ class ContextBuilder:
                 "contract_sha256": self.verified_contract.contract_sha256,
                 "experiment_spec": spec,
                 "parent_commit_sha": spec.parent_commit_sha,
-                "target_interface_excerpts": self.config.target_interface_excerpts,
+                "target_interface_excerpts": target_interfaces,
                 "editable_roots": self.config.editable_roots,
                 "protected_paths": self._protected_paths(),
                 "allowed_command_ids": self.config.command_ids,
