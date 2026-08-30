@@ -6,6 +6,7 @@ from collections import deque
 from typing import Deque, Optional, Sequence, Tuple
 
 from ..config import RunConfig, VerifiedContract
+from ..coding import CodingWorkerError
 from ..coding.redaction import SecretRedactor
 from ..context.builder import ContextBuilder
 from ..memory.canonical_json import canonical_sha256
@@ -1252,37 +1253,55 @@ class Harness:
             if self._stop_if_runtime_budget_exhausted():
                 return self.state()
             if evaluation.trust.verdict == TrustVerdict.NO_OP:
-                # A verified no-op is a valid terminal experiment result, not
-                # an adapter failure.  Record it as a prune decision so the
-                # next planner context can see the no-op evidence and propose
-                # a different experiment.  Trae repair is reserved for
-                # explicit coding, interface, Gate A, or execution failures.
-                decision = ExperimentDecision(
-                    run_id=self.config.run_id,
-                    experiment_id=spec.experiment_id,
-                    evaluation_event_id=evaluation_event.event_id,
-                    decision=ExperimentDecisionKind.PRUNE,
-                    reason_code="NO_OP_PREDICTION_CHANGE",
-                    fidelity_completed=evaluation.fidelity,
-                    parent_eligible=False,
-                    best_eligible=False,
-                    supporting_event_ids=[
-                        event_id
-                        for event_id in (
-                            evaluation_event.causation_event_id,
-                            evaluation_event.event_id,
+                # The first verified no-op receives one bounded Trae wiring
+                # repair. If the repaired candidate remains a no-op, recovery
+                # returns the evidence to planning without creating a
+                # controller-owned prune decision.
+                action, recovery = await self._recover(
+                    evaluation_event, evaluation, spec.experiment_id
+                )
+                repair_accepted = False
+                while action == RecoveryAction.TRAE_REPAIR:
+                    try:
+                        patch, patch_check, patch_check_event = (
+                            await self._execute_code_repair(
+                                recovery, proposal_event.event_id
+                            )
                         )
-                        if event_id
-                    ],
-                )
-                self._append(
-                    ExperimentDecidedPayload(decision=decision),
-                    stage="decision_%s" % fidelity.value,
-                    experiment_id=spec.experiment_id,
-                    attempt=attempt,
-                    causation_event_id=evaluation_event.event_id,
-                    resource_delta=decision.resource_delta,
-                )
+                    except CodingWorkerError as error:
+                        # The no-op evidence remains a valid research result
+                        # even when the bounded repair worker exhausts its 20
+                        # internal steps. Preserve the worker failure, then
+                        # return ownership to planning instead of stopping the
+                        # autonomous loop.
+                        failure_event = self._record_adapter_failure(
+                            experiment_id=spec.experiment_id,
+                            attempt=attempt,
+                            stage="coding",
+                            error=error,
+                            causation_event_id=self.events()[-1].event_id,
+                        )
+                        action, recovery = await self._recover(
+                            failure_event,
+                            failure_event.payload.result,
+                            spec.experiment_id,
+                        )
+                        if action == RecoveryAction.RETURN_TO_PLANNER:
+                            return self.state()
+                        raise
+                    if self._stop_if_runtime_budget_exhausted():
+                        return self.state()
+                    if patch_check.accepted:
+                        repair_accepted = True
+                        next_request_template = request
+                        next_execution_cause = patch_check_event.event_id
+                        stage_queue.appendleft(fidelity)
+                        break
+                    action, recovery = await self._recover(
+                        patch_check_event, patch_check, spec.experiment_id
+                    )
+                if repair_accepted:
+                    continue
                 return self.state()
             decision_context = EvaluationDecisionContext(
                 run_id=self.config.run_id,

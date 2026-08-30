@@ -89,7 +89,7 @@ Apply these rules from top to bottom. The first matching rule wins.
 | --- | --- | --- | --- |
 | 0 | `output.checked.accepted = false` | Fix or abandon the output/contract failure through recovery. | No |
 | 1 | Trust integrity is `compromised`, or verdict is `suspicious` | Quarantine the result; investigate data, evaluator, or leakage. | No |
-| 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Record a terminal null result. Let the legal-choice ranker select either one same-mechanism reimplementation from the trusted parent or an independent mechanism. | Trusted parent only |
+| 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Give Trae one scoped 20-step wiring-repair action and rerun the same fidelity after Gate A. If predictions remain identical, record a neutral terminal `no_op` and return the evidence to the legal-choice ranker; do not emit a controller prune decision. The ranker selects either one modified same-mechanism plan from the trusted parent or an independent mechanism. | Trusted parent only |
 | 3 | Stability is `unstable` | Confirm seeds or simplify/regularize the same mechanism. | No new family |
 | 4 | Fidelity is `smoke` or `proxy` | Promote only if deterministic promotion rules pass. | No parent promotion |
 | 5 | Full public result is trusted and improves the parent by more than `epsilon` | Accept; confirm once if stability is only `single_seed`, then deepen the same family. | Yes |
@@ -105,11 +105,14 @@ can justify more evaluation, but never a new trusted branch.
 Canonical `parent_eligible` and `best_eligible` remain unchanged. Person 1 may
 derive two narrower, non-checkpoint permissions from verified evidence:
 
-- **hard prune:** rejected output, suspicious/compromised integrity, no-op,
-  unstable result, invalid/retracted lineage, or primary regression worse than
+- **hard prune:** rejected output, suspicious/compromised integrity, unstable
+  result, invalid/retracted lineage, or primary regression worse than
   `max(5 * epsilon, 0.01)`. Never branch, refine, or ensemble the result node.
-  After the first no-op only, the tree planner may select one reimplementation
-  of the same mechanism from its last trusted parent; a second no-op retires it;
+  A no-op is first checked by one bounded Trae wiring repair. If it remains a
+  no-op, the controller records neutral evidence without pruning; the tree
+  planner may select one reimplementation of the same mechanism from its last
+  trusted parent or an independent mechanism. A second no-op retires the
+  same-mechanism option;
 - **soft prune:** clean accepted output at proxy/full fidelity, meaningful
   prediction change, and either primary delta above that regression floor or a
   component-metric trade-off. Retain the node as evidence, not as a checkpoint;

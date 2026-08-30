@@ -569,7 +569,12 @@ class ContextBuilder:
             elif event.event_type == EventType.EVALUATION_COMPLETED:
                 evaluation_by_experiment[event.payload.result.experiment_id] = event
             elif event.event_type == EventType.EXPERIMENT_DECIDED:
-                decision_by_experiment[event.payload.decision.experiment_id] = event
+                # Smoke promotion is an execution-routing decision, not the
+                # terminal research outcome. In particular, a candidate that
+                # later remains a verified no-op must reach Person 1 as a
+                # neutral no-op, not as a misleading promoted experiment.
+                if event.payload.decision.fidelity_completed != Fidelity.SMOKE:
+                    decision_by_experiment[event.payload.decision.experiment_id] = event
 
         children = Counter(
             event.payload.spec.parent_experiment_id

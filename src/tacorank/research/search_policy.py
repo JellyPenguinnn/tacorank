@@ -346,6 +346,8 @@ def _no_op_choices(
     if not history:
         return None
     latest = history[-1]
+    if _normalized(get_value(latest, "status", None)) != "no_op":
+        return None
     verdict = _normalized(get_value(latest, "trust_verdict", None))
     contract = get_value(context, "contract_summary", None)
     no_op_threshold = _number(

@@ -48,13 +48,17 @@ The core policy is deterministic AIDE-style portfolio search:
   and never becomes validation-best eligible through that permission;
 - a clean soft result whose prediction Spearman magnitude is below `0.98` may
   enter one fixed residual-ensemble test from the trusted parent;
-- severe regressions, rejected outputs, suspicious/compromised results, no-ops,
+- severe regressions, rejected outputs, suspicious/compromised results,
   unstable results, and invalid/retracted nodes are hard-pruned as parents and
   checkpoints;
-- after the first no-op, the legal-choice ranker receives both one bounded
-  same-mechanism reimplementation from the last trusted parent and the available
-  independent mechanisms; a second no-op for the same parent/family/method
-  retires the reimplementation option;
+- after Person 4's single bounded Trae wiring-repair action still produces a
+  no-op, recovery returns a neutral `no_op` node and its unchanged-prediction
+  evidence to the planner without emitting a prune decision;
+- the legal-choice ranker then receives both one bounded same-mechanism
+  reimplementation from the last trusted parent and the available independent
+  mechanisms; choosing an independent mechanism retires that branch, while a
+  second no-op for the same parent/family/method retires the reimplementation
+  option;
 - a stateless LinUCB ranker is reconstructed from verified ledger history and
   reorders only the legal choices emitted by these deterministic gates. It
   cannot invent a family, method, parent, refinement, or ensemble component.

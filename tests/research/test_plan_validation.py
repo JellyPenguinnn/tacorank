@@ -325,6 +325,7 @@ def test_validator_allows_one_policy_selected_no_op_reimplementation(
         stability="not_applicable",
         prediction_change=0.0,
         method_card_ids=["objective_pairwise_bpr"],
+        status="no_op",
     )
     latest.duplicate_key = prior.duplicate_key
     planner_context.family_history = [latest]

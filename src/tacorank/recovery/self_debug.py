@@ -36,7 +36,6 @@ def build_self_debug_instructions(
     """Build diagnostic instructions that constrain repair scope and objective drift."""
     spec = _get(context, "original_experiment_spec")
     commit = _get(context, "current_patch_commit_sha", default="unknown accepted commit")
-    contract = _get(context, "contract_summary", default="protected evaluator, data and command boundaries")
     history = _get(context, "attempt_history", default=()) or ()
     if not target_files:
         target_files = _get(spec, "target_files", default=()) or ()
@@ -47,12 +46,30 @@ def build_self_debug_instructions(
         "contract_error": "Gate A",
     }.get(classification.failure_class, "the previously failing smoke or execution check")
     previous = f" Previous failed outcomes: {len(history)}." if history else ""
+    if classification.failure_class == "no_op":
+        return (
+            f"The original hypothesis remains: {_spec_summary(spec)}. Do not change "
+            f"that hypothesis or its expected mechanism. The accepted candidate is "
+            f"commit {commit}, and verified evaluation found unchanged predictions "
+            f"({classification.evidence or 'NO_PREDICTION_CHANGE'}). Treat this as a "
+            f"bounded implementation/wiring check, not proof that the research "
+            f"hypothesis is false.{previous} Inspect only {targets}, starting with the "
+            f"current diff and the path from the intended mechanism to the emitted "
+            f"score. Do not survey setup files, packaging, documentation, or unrelated "
+            f"modules. Before editing, emit `DIAGNOSIS:`, `REPAIR_PLAN:`, and "
+            f"`VERIFICATION:` lines. Make the smallest justified edit, run only "
+            f"{check}, and call task_done immediately after the check shows non-identical "
+            f"predictions. Preserve the supplied contract and protected paths. This is "
+            f"repair attempt {repair_attempt} of "
+            f"{_get(context, 'max_repair_attempts', default=2)}; {remaining_budget} "
+            f"repair attempt(s) remain after this decision."
+        )
     return (
         f"The original hypothesis remains: {_spec_summary(spec)}. Do not change that hypothesis or its "
         f"expected mechanism. The exact accepted patch is commit {commit}. Failure class "
         f"{classification.failure_class} has fingerprint {classification.fingerprint}; evidence: "
         f"{classification.evidence or 'no additional safe trace text'}.{previous} First explain the fault "
-        f"briefly. Before invoking any edit tool, emit `DIAGNOSIS:`, `REPAIR_PLAN:`, and `VERIFICATION:` lines in the trajectory, then patch {targets}. Preserve {contract}; do not edit protected evaluators, data "
+        f"briefly. Before invoking any edit tool, emit `DIAGNOSIS:`, `REPAIR_PLAN:`, and `VERIFICATION:` lines in the trajectory, then patch {targets}. Preserve the supplied contract and protected paths; do not edit protected evaluators, data "
         f"loaders, contracts, or command configuration. Make {check} pass. This is repair attempt "
         f"{repair_attempt} of {_get(context, 'max_repair_attempts', default=2)}; "
         f"{remaining_budget} repair attempt(s) remain after this decision."

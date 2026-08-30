@@ -411,7 +411,7 @@ def _trae_payload(
         "max_steps_cap": 64,
         "max_token_cap": None,
         "max_wall_time_seconds_cap": 1800,
-        "repair_step_limit": 48,
+        "repair_step_limit": 20,
         "repair_token_limit": None,
         "repair_wall_time_limit_seconds": 1200,
         "repair_allowed_command_ids": ["candidate_smoke"],

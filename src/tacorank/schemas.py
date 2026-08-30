@@ -203,6 +203,7 @@ class RecoveryAction(str, Enum):
     TRAE_REPAIR = "trae_repair"
     RETRY_SAME_COMMIT = "retry_same_commit"
     ADJUST_APPROVED_RUNTIME_SETTING = "adjust_approved_runtime_setting"
+    RETURN_TO_PLANNER = "return_to_planner"
     ROLLBACK = "rollback"
     ABANDON = "abandon"
 

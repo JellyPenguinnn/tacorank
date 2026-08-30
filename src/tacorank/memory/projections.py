@@ -145,6 +145,10 @@ def project(events: Iterable[Event]) -> RunState:
             ):
                 node.status = ExperimentStatus.READY_TO_RUN
                 state.phase = "execution"
+            elif decision.action == RecoveryAction.RETURN_TO_PLANNER:
+                node.status = ExperimentStatus.NO_OP
+                node.terminal_event_id = event.event_id
+                state.phase = "planning"
             else:
                 node.status = ExperimentStatus.RECOVERING
                 state.phase = "recovery"

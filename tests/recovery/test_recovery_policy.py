@@ -263,8 +263,65 @@ def test_first_noop_does_not_claim_a_focused_repair_occurred():
     )
     decision = decide(result, context(remaining=0))
 
-    assert decision.action == RecoveryAction.ABANDON
+    assert decision.action == RecoveryAction.RETURN_TO_PLANNER
+    assert decision.reason_code == "NO_OP_RECOVERY_EXHAUSTED"
     assert decision.lesson_candidate is None
+
+
+def test_first_noop_gets_one_scoped_trae_wiring_repair():
+    result = SimpleNamespace(
+        trust=SimpleNamespace(
+            verdict="no_op", flags=["NO_PREDICTION_CHANGE"]
+        )
+    )
+
+    decision = decide(result)
+
+    assert decision.action == RecoveryAction.TRAE_REPAIR
+    assert decision.reason_code == "REPAIRABLE_NO_OP_WIRING"
+    assert "solution/train.py" in decision.instructions
+    assert "starting with the current diff" in decision.instructions
+    assert "Do not survey setup files" in decision.instructions
+    assert "task_done immediately" in decision.instructions
+    assert "Frozen contract; protected evaluator and data" not in decision.instructions
+
+
+def test_repeated_noop_returns_evidence_to_planner_without_second_repair():
+    result = SimpleNamespace(
+        trust=SimpleNamespace(
+            verdict="no_op", flags=["NO_PREDICTION_CHANGE"]
+        )
+    )
+    fingerprint = classify_failure(result).fingerprint
+
+    decision = decide(result, context(remaining=1, previous=[fingerprint]))
+
+    assert decision.action == RecoveryAction.RETURN_TO_PLANNER
+    assert decision.reason_code == "NO_OP_RECOVERY_EXHAUSTED"
+    assert decision.remaining_repair_budget == 1
+
+
+def test_exhausted_noop_repair_worker_returns_evidence_to_planner():
+    ctx = context(remaining=1)
+    ctx.failure_stage = "coding"
+    ctx.attempt_history = [
+        {
+            "action": "trae_repair",
+            "reason_code": "REPAIRABLE_NO_OP_WIRING",
+        }
+    ]
+
+    decision = decide(
+        run_failure(
+            "code_error",
+            "TRAE_STEP_LIMIT_EXCEEDED after bounded no-op repair",
+        ),
+        ctx,
+    )
+
+    assert decision.action == RecoveryAction.RETURN_TO_PLANNER
+    assert decision.reason_code == "NO_OP_REPAIR_WORKER_EXHAUSTED"
+    assert decision.remaining_repair_budget == 1
 
 
 def test_repeated_hang_emits_evidence_linked_lesson():

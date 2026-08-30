@@ -199,6 +199,7 @@ def test_playbook_continues_after_no_op_with_independent_choice(planner_context)
         stability="not_applicable",
         prediction_change=0.0,
         method_card_ids=["objective_pairwise_bpr"],
+        status="no_op",
     )
 
     choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
@@ -221,6 +222,7 @@ def test_no_op_tree_ranker_can_choose_one_same_mechanism_reimplementation(
         stability="not_applicable",
         prediction_change=0.0,
         method_card_ids=["objective_pairwise_bpr"],
+        status="no_op",
     )
     seen = []
 
@@ -258,6 +260,7 @@ def test_second_same_mechanism_no_op_retires_reimplementation(planner_context):
         stability="not_applicable",
         prediction_change=0.0,
         method_card_ids=["objective_pairwise_bpr"],
+        status="no_op",
     )
     latest = make_summary(
         "exp_0002",
@@ -268,6 +271,7 @@ def test_second_same_mechanism_no_op_retires_reimplementation(planner_context):
         stability="not_applicable",
         prediction_change=0.0,
         method_card_ids=["objective_pairwise_bpr"],
+        status="no_op",
     )
     context = context_with_latest(planner_context, latest)
     context.family_history = [first, latest]

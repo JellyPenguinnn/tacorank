@@ -73,6 +73,7 @@ def _authorized_no_op_reimplementation(
     }
     if (
         not _is_no_op_summary(latest, context)
+        or str(get_value(latest, "status", "")).lower() != "no_op"
         or str(get_value(parent, "experiment_id", "")) != parent_id
         or str(get_value(spec, "parent_experiment_id", "")) != parent_id
         or str(get_value(spec, "family", ""))

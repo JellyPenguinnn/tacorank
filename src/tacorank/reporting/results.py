@@ -124,6 +124,7 @@ def _state_payload(events: Sequence[Event]) -> dict:
         ExperimentStatus.REJECTED,
         ExperimentStatus.PRUNED,
         ExperimentStatus.INVALID,
+        ExperimentStatus.NO_OP,
     }
     if (
         node is not None

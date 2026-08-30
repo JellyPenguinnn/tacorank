@@ -82,13 +82,6 @@ class RecoveryManager:
                 "Abandon: storage or the reviewed output quota is exhausted; free space or use a new runtime.",
                 {},
             )
-        if same_count >= 2:
-            return (
-                "abandon",
-                "REPEATED_ERROR_FINGERPRINT",
-                "Abandon: the same locally normalized failure occurred twice.",
-                {},
-            )
         for dimension, value in context.remaining_run_budget.items():
             if value <= 0:
                 return (
@@ -97,6 +90,51 @@ class RecoveryManager:
                     "Abandon: the frozen %s run budget is exhausted." % dimension,
                     {},
                 )
+
+        if failure.failure_class == "no_op":
+            if same_count >= 2 or remaining <= 0:
+                return (
+                    "return_to_planner",
+                    "NO_OP_RECOVERY_EXHAUSTED",
+                    "The bounded no-op repair did not change predictions; return "
+                    "the recorded evidence to the research planner.",
+                    {},
+                )
+            attempt = int(context.repair_attempts_used) + 1
+            return (
+                "trae_repair",
+                "REPAIRABLE_NO_OP_WIRING",
+                build_self_debug_instructions(
+                    failure, context, attempt, remaining - 1
+                ),
+                {},
+            )
+
+        no_op_repair_in_progress = any(
+            item.get("action") == "trae_repair"
+            and item.get("reason_code") == "REPAIRABLE_NO_OP_WIRING"
+            for item in context.attempt_history
+        )
+        if (
+            getattr(context, "failure_stage", None) == "coding"
+            and no_op_repair_in_progress
+        ):
+            return (
+                "return_to_planner",
+                "NO_OP_REPAIR_WORKER_EXHAUSTED",
+                "The bounded no-op repair worker did not produce a valid "
+                "replacement patch; preserve both records and return the "
+                "unchanged-prediction evidence to the research planner.",
+                {},
+            )
+
+        if same_count >= 2:
+            return (
+                "abandon",
+                "REPEATED_ERROR_FINGERPRINT",
+                "Abandon: the same locally normalized failure occurred twice.",
+                {},
+            )
 
         if getattr(context, "failure_stage", None) == "coding":
             if failure.transient_coding_failure and int(context.same_commit_retries_used) < 1:

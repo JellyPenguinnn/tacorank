@@ -466,6 +466,44 @@ def test_generated_trae_yaml_uses_v4_flash() -> None:
     assert "deepseek-v4-pro" not in document
 
 
+def test_generated_live_deployment_caps_repair_at_twenty_steps(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    site_packages = runtime / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    identity = {}
+    for key, name in (
+        ("executable", "trae.exe"),
+        ("direct_url", "direct_url.json"),
+        ("dotenv_metadata", "METADATA"),
+    ):
+        path = runtime / name
+        path.write_text(key, encoding="utf-8")
+        identity[key] = path
+    identity["site_packages"] = site_packages
+    trae_yaml = tmp_path / "trae.yaml"
+    trae_yaml.write_text("models: {}\n", encoding="utf-8")
+    docker = tmp_path / "docker.exe"
+    docker.write_text("docker", encoding="utf-8")
+    monkeypatch.setattr(
+        deployment_module,
+        "hash_trae_runtime_package",
+        lambda path: "a" * 64,
+    )
+
+    payload = deployment_module._trae_payload(
+        runtime=runtime,
+        runtime_identity=identity,
+        trae_yaml=trae_yaml,
+        docker=docker,
+        docker_host="npipe:////./pipe/dockerDesktopLinuxEngine",
+        image="sha256:" + "b" * 64,
+    )
+
+    assert payload["repair_step_limit"] == 20
+
+
 def test_trae_responses_sdk_is_exactly_pinned() -> None:
     requirements = (
         Path(__file__).parents[2] / "requirements-trae.txt"
