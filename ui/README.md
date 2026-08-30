@@ -1,23 +1,30 @@
-# TacoRank Run Monitor
+# TacoRank Run Dashboard
 
-Read-only web dashboard for TacoRank run evidence. It starts with clearly
-labelled preview data and can monitor a real run without uploading its files.
+Local repository-backed dashboard for starting and inspecting TacoRank runs.
+It lists every ledger under `runs/`, opens the latest run by default, refreshes
+every five seconds, and shows each iteration's plan, memory/context, patch,
+Gate A, execution, Gate B, evaluation, recovery, and raw ledger evidence.
 
 ## Run locally
 
 ```bash
-pnpm install
-pnpm dev
+cd ui
+npm run dev
 ```
 
-Open the printed local URL, select **Connect run folder**, and choose a
-`runs/<run_id>` directory. The page reads `state.json` and `events.jsonl` in
-the browser and refreshes them every five seconds. Browsers without directory
-access can import those two files as a point-in-time snapshot.
+Open the printed loopback URL. Set `TACORANK_REPOSITORY_ROOT` only when the UI
+directory is not directly inside the repository. To enable **Start new run**,
+export `DEEPSEEK_API_KEY` in the same shell before starting the dashboard. The
+key is checked for presence only and is never returned to the browser.
+
+The start action asks for confirmation and launches the repository's reviewed
+`run-new-live.sh` workflow. That is a paid production workflow and includes
+setup, preflight, autonomous execution, finalization, and validation. Launcher
+logs are written under ignored `.tacorank/dashboard-launches/`.
 
 ## Validate
 
 ```bash
-pnpm lint
-pnpm build
+npm run lint
+npm run build
 ```
