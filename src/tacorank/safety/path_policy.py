@@ -46,6 +46,31 @@ class ViolationCode(str, Enum):
     OUTPUT_PROTECTED_DATA = "OUTPUT_PROTECTED_DATA"
 
 
+# Terminal integrity/security findings shared by the recovery classifier.
+DELIBERATE_INTEGRITY_CODES = frozenset(
+    {
+        code.value
+        for code in (
+            ViolationCode.PROTECTED_PATH_MODIFIED,
+            ViolationCode.PATH_TRAVERSAL,
+            ViolationCode.SYMLINK_ESCAPE,
+            ViolationCode.SUBMODULE_ESCAPE,
+            ViolationCode.HIDDEN_LABEL_ACCESS,
+            ViolationCode.FUTURE_INFORMATION_LEAKAGE,
+            ViolationCode.UNAPPROVED_NETWORK,
+            ViolationCode.SECRET_DETECTED,
+            ViolationCode.OUTPUT_PROTECTED_DATA,
+        )
+    }
+    | {
+        "FORBIDDEN_INPUT_DETECTED",
+        "NETWORK_ACCESS",
+        "TARGET_LABEL_ACCESS",
+        "UNAUTHORIZED_NETWORK_ACCESS",
+    }
+)
+
+
 @dataclass(frozen=True)
 class PolicyViolation:
     """Internal finding converted to Person 2's shared ``Violation`` model."""

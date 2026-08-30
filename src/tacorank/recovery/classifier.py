@@ -6,17 +6,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from .fingerprints import fingerprint_result, normalize_text
+from ..safety.path_policy import DELIBERATE_INTEGRITY_CODES
 
 
-DELIBERATE_INTEGRITY_CODES = frozenset(
+TRANSIENT_CODING_ERROR_CODES = frozenset(
     {
-        "FORBIDDEN_INPUT_DETECTED",
-        "HIDDEN_LABEL_ACCESS",
-        "NETWORK_ACCESS",
-        "SECRET_DETECTED",
-        "TARGET_LABEL_ACCESS",
-        "UNAPPROVED_NETWORK",
-        "UNAUTHORIZED_NETWORK_ACCESS",
+        "TRAE_LAUNCH_FAILED",
+        "TRAE_TIMEOUT",
+        "TRAE_DOCKER_UNAVAILABLE",
+        "TRAE_PROVIDER_TIMEOUT",
+        "TRAE_PROVIDER_UNAVAILABLE",
     }
 )
 
@@ -29,6 +28,7 @@ class FailureClassification:
     evidence: str
     deliberate_integrity_violation: bool = False
     made_progress: bool = False
+    transient_coding_failure: bool = False
 
 
 def _value(value: Any) -> Any:
@@ -117,23 +117,25 @@ def classify_failure(result: Any) -> FailureClassification:
 
     lower_evidence = str(evidence).lower()
     violation_codes = _violation_codes(result)
-    deliberate = failure_class == "contract_error" and (
-        bool(violation_codes & DELIBERATE_INTEGRITY_CODES)
-        or any(
-            token in lower_evidence
-            for token in (
-                "hidden label",
-                "target label",
-                "secret",
-                "credential",
-                "exfiltrat",
-                "unauthorized network",
-                "unapproved network",
-            )
+    deliberate = bool(violation_codes & DELIBERATE_INTEGRITY_CODES) or any(
+        token in lower_evidence
+        for token in (
+            "hidden label",
+            "target label",
+            "secret",
+            "credential",
+            "exfiltrat",
+            "unauthorized network",
+            "unapproved network",
         )
     )
     made_progress = any(
         token in lower_evidence for token in ("progress", "checkpoint", "epoch", "step ")
+    )
+    transient_coding = (
+        getattr(result, "failure_stage", None) == "coding"
+        and str(getattr(result, "error_class", "")).strip().upper()
+        in TRANSIENT_CODING_ERROR_CODES
     )
     return FailureClassification(
         failure_class=failure_class,
@@ -142,4 +144,5 @@ def classify_failure(result: Any) -> FailureClassification:
         evidence=normalize_text(str(evidence))[:800],
         deliberate_integrity_violation=deliberate,
         made_progress=made_progress,
+        transient_coding_failure=transient_coding,
     )
