@@ -791,7 +791,10 @@ class Harness:
                         "research provider failed bounded plan validation; "
                         "resume from the persisted planner checkpoint"
                     )
-                decision = self.deterministic_stop(no_legal_proposal=True)
+                if planner_output.reason_code.upper() == "PORTFOLIO_EXHAUSTED":
+                    decision = self.deterministic_stop(portfolio_exhausted=True)
+                else:
+                    decision = self.deterministic_stop(no_legal_proposal=True)
             else:
                 decision = self.deterministic_stop()
                 if not decision.stop:

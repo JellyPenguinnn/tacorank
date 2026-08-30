@@ -25,3 +25,15 @@ def test_unmeasured_tokens_still_exhaust_the_frozen_limit(config):
     assert state.resource_totals.total_reported_tokens == 10
     assert decision.stop
     assert decision.reason_code == "token_budget"
+
+
+def test_exhausted_global_portfolio_has_distinct_stop_reason(config):
+    decision = stop_decision(
+        RunState(),
+        [],
+        config,
+        portfolio_exhausted=True,
+    )
+
+    assert decision.stop
+    assert decision.reason_code == "portfolio_exhausted"

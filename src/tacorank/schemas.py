@@ -1267,6 +1267,9 @@ class PlannerConvergenceSummary(StrictModel):
     patience: int = Field(gt=0)
     consecutive_non_improving_full_evaluations: int = Field(default=0, ge=0)
     full_evaluations_completed: int = Field(default=0, ge=0)
+    priority_families_required: List[NonEmptyStr] = Field(default_factory=list)
+    priority_families_tested: List[NonEmptyStr] = Field(default_factory=list)
+    priority_coverage_complete: bool = False
 
 
 class PlannerMethodCardSummary(StrictModel):
@@ -1298,6 +1301,7 @@ class PlannerPlaybookSummary(StrictModel):
     schema_version: Literal["1.0"] = SCHEMA_VERSION
     source_path: NonEmptyStr
     source_sha256: str
+    max_trials_per_method: int = Field(default=1, ge=1, le=5)
     rule_order: List[NonEmptyStr]
     family_order: List[NonEmptyStr]
     method_order: Dict[NonEmptyStr, List[NonEmptyStr]]

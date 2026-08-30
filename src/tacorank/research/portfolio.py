@@ -14,14 +14,14 @@ HIGH_VALUE_FAMILIES: tuple[str, ...] = (
     "temporal_history",
     "multitask",
     "duration_bias",
-    "features",
     "model",
+    "features",
 )
 
 ALL_FAMILIES: tuple[str, ...] = HIGH_VALUE_FAMILIES + (
+    "evaluation",
     "sampling",
     "ensemble",
-    "evaluation",
     "other",
 )
 METHOD_STATUSES = {"candidate", "blocked", "known_negative", "forbidden"}

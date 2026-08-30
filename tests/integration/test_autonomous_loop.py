@@ -251,6 +251,9 @@ def test_outer_loop_uses_memory_and_counts_distinct_terminal_iterations(
 ):
     planner = SequentialPlanner(harness.config.baseline_commit_sha)
     harness.config.max_experiments = 10
+    # This synthetic planner emits ``feature_cross`` rather than a starter-kit
+    # direction, so the fixture has no eligible priority family to cover.
+    harness.config.allowed_research_families = ["feature_cross"]
     harness.planner = planner
     harness.evaluator = NonImprovingEvaluator(
         harness.config.metric_names,
@@ -364,7 +367,7 @@ def test_blocked_planner_stops_without_spinning(harness, baseline_evaluation):
 
     state = asyncio.run(harness.run_until_stopped())
 
-    assert state.stop_reason_code == "no_legal_proposal"
+    assert state.stop_reason_code == "portfolio_exhausted"
     assert state.experiments_proposed == 0
     assert [event.event_type for event in harness.events()][-2:] == [
         EventType.PLANNER_RECOMMENDED,
@@ -387,7 +390,7 @@ def test_invalid_provider_plan_is_resumable_and_not_a_false_convergence(
 
     harness.planner = BlockedPlanner()
     state = asyncio.run(harness.run_until_stopped())
-    assert state.stop_reason_code == "no_legal_proposal"
+    assert state.stop_reason_code == "portfolio_exhausted"
 
 
 def test_integrity_violation_is_recorded_and_stops_the_run(

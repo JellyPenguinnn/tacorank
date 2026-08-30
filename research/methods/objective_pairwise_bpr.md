@@ -4,7 +4,8 @@
 
 ## Mechanism
 
-Optimize relative positive-versus-negative ordering within users.
+Optimize positive-versus-negative ordering within users as a calibrated parent
+correction.
 
 ## Preconditions
 
@@ -17,27 +18,29 @@ Only contract-permitted training rows and features.
 
 ## Expected effect
 
-Improve GAUC and nDCG-aligned ordering.
+Improve ranking without replacing the parent order.
 
 ## Falsification condition
 
-No stable primary-score improvement over the pointwise parent.
+No stable gain after scale checks; regression beyond `eta` or parent Spearman
+below `0.995` retires this recipe across parents.
 
 ## Do not use when
 
-The evaluator or split definitions would need to change.
+The evaluator/splits must change, or this scale-correct recipe already severely
+regressed in the run.
 
 ## Minimal implementation
 
-Keep the supplied official-FM score as the parent and train a bounded additive
-pairwise residual from observed positive/negative impressions of the same user.
-Use deterministic small non-zero factor initialization (zero-initializing both
-factor sides produces zero latent gradients), multiple representative passes,
-and capped per-user pairs. Verify that the residual has non-zero variance and
-that repeated items can receive different user-conditioned scores. Implement
-and wire the mechanism through `solution/candidate.py`; helper modules may be
-added only when that entrypoint imports and uses them. Do not invent
-`solution/train.py` as a replacement entrypoint.
+Keep the official FM score exact. Train only an additive residual on observed
+same-user pairs with deterministic capped sampling and non-zero initialization.
+On training rows, center within user and freeze a multiplier satisfying
+`residual_std <= 0.01 * parent_score_std` and `max_abs_residual <= 0.02 *
+parent_score_std`. Output `exact_parent + calibrated_residual`; never add raw
+BPR scores or use a fixed absolute clip. Before full promotion verify both
+bounds, proxy Spearman at least `0.995`, finite variance, and repeated-item
+personalization. Permit one wiring/scale repair; otherwise retire. Wire through
+`solution/candidate.py`.
 
 ## Sources
 

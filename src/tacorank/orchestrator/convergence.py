@@ -24,6 +24,80 @@ class StopDecision:
     reason: str = "No deterministic stop condition matched."
 
 
+STARTER_KIT_PRIORITY = (
+    "objective",
+    "temporal_history",
+    "multitask",
+    "duration_bias",
+    "model",
+    "features",
+)
+
+
+def required_priority_families(config: RunConfig) -> tuple[str, ...]:
+    """Return starter-kit directions whose frozen prerequisites are available."""
+
+    allowed = set(config.allowed_research_families)
+    data = set(config.allowed_research_data)
+    capabilities = set(config.research_capabilities)
+    baseline = "baseline_parity" in capabilities
+    eligible = {
+        "objective": baseline
+        and {"train_interactions", "user_id", "long_view"}.issubset(data),
+        "temporal_history": baseline
+        and {
+            "train_interactions",
+            "date",
+            "user_id",
+            "video_id",
+            "author_id",
+            "long_view",
+            "verified_predictions",
+        }.issubset(data),
+        "multitask": "auxiliary_engagement_labels" in data,
+        "duration_bias": baseline
+        and {
+            "train_interactions",
+            "duration_ms",
+            "long_view",
+            "verified_predictions",
+        }.issubset(data),
+        "model": baseline
+        and "objective_data_frame_verified" in capabilities,
+        "features": "drift_diagnostics_material" in capabilities
+        and {"train_interactions", "date", "long_view"}.issubset(data),
+    }
+    return tuple(
+        family
+        for family in STARTER_KIT_PRIORITY
+        if family in allowed and eligible.get(family, False)
+    )
+
+
+def priority_family_coverage(
+    events: Sequence[Event], config: RunConfig
+) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+    """Measure terminal coverage before convergence may end global exploration."""
+
+    required = required_priority_families(config)
+    proposed: dict[str, str] = {}
+    terminal_ids: set[str] = set()
+    for event in events:
+        if event.event_type == EventType.EXPERIMENT_PROPOSED:
+            spec = event.payload.spec
+            raw_family = spec.family
+            proposed[spec.experiment_id] = str(
+                getattr(raw_family, "value", raw_family)
+            )
+        elif event.event_type == EventType.EXPERIMENT_DECIDED:
+            decision = event.payload.decision
+            if decision.decision != ExperimentDecisionKind.PROMOTE:
+                terminal_ids.add(decision.experiment_id)
+    tested_set = {proposed[item] for item in terminal_ids if item in proposed}
+    tested = tuple(family for family in required if family in tested_set)
+    return required, tested, set(required).issubset(tested_set)
+
+
 def convergence_pressure(events: Sequence[Event], config: RunConfig) -> int:
     """Count terminal research iterations without epsilon improvement.
 
@@ -72,6 +146,7 @@ def stop_decision(
     *,
     fatal_integrity: bool = False,
     no_legal_proposal: bool = False,
+    portfolio_exhausted: bool = False,
 ) -> StopDecision:
     if fatal_integrity:
         return StopDecision(True, "fatal_integrity", "A fatal integrity condition was recorded.")
@@ -80,13 +155,21 @@ def stop_decision(
     runtime_stop = runtime_budget_decision(state, config)
     if runtime_stop.stop:
         return runtime_stop
+    if portfolio_exhausted:
+        return StopDecision(
+            True,
+            "portfolio_exhausted",
+            "Every eligible research method reached its frozen global trial cap.",
+        )
     pressure = convergence_pressure(events, config)
-    if pressure >= config.convergence_patience:
+    required, tested, coverage_complete = priority_family_coverage(events, config)
+    if pressure >= config.convergence_patience and coverage_complete:
         return StopDecision(
             True,
             "converged",
             "No trusted terminal full-fidelity iteration improved the incumbent by "
-            "more than epsilon for %d consecutive iterations." % pressure,
+            "more than epsilon for %d consecutive iterations after priority-family "
+            "coverage (%s)." % (pressure, ", ".join(tested or required)),
         )
     if no_legal_proposal:
         return StopDecision(True, "no_legal_proposal", "No legal non-duplicate proposal remains.")
