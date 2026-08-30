@@ -1613,6 +1613,15 @@ def _run(
     label: str,
     capture_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    # Force UTF-8 for child I/O. Python defaults its streams to the console
+    # codepage on Windows (cp1252), so a child that prints non-ASCII dies with
+    # UnicodeEncodeError through no fault of its own: the starter kit's
+    # submit.py prints a Chinese status line, which aborted official FM
+    # baseline generation and failed the whole deployment. Setting this here
+    # keeps the fix inside TacoRank rather than in the protected submodule.
+    environment = dict(os.environ)
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment["PYTHONUTF8"] = "1"
     try:
         completed = subprocess.run(
             list(args),
@@ -1621,6 +1630,9 @@ def _run(
             stdout=subprocess.PIPE if capture_output else None,
             stderr=subprocess.PIPE if capture_output else None,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
             shell=False,
             check=False,
         )
