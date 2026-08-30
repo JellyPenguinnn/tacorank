@@ -262,7 +262,17 @@ class ContextBuilder:
 
         artifact = getattr(failed_value, "log_artifact", None)
         if artifact is None:
-            artifact = getattr(failed_value, "diagnostic_artifact", None)
+            diagnostics = list(
+                getattr(failed_value, "diagnostic_artifacts", ()) or ()
+            )
+            artifact = next(
+                (
+                    candidate
+                    for candidate in diagnostics
+                    if candidate.kind == ArtifactKind.LOG
+                ),
+                diagnostics[0] if diagnostics else None,
+            )
         if artifact is None:
             return fallback[-4_000:]
         try:
@@ -317,6 +327,7 @@ class ContextBuilder:
             prediction_spearman_vs_parent=_prediction_change_spearman(
                 baseline_evaluation.prediction_change
             ),
+            diagnostic_metrics=dict(baseline_evaluation.diagnostic_metrics),
             child_count=0,
             actual_cost=CostTier.LOW,
             parent_eligible=True,
@@ -410,6 +421,9 @@ class ContextBuilder:
                         _prediction_change_spearman(evaluation.prediction_change)
                         if evaluation
                         else None
+                    ),
+                    diagnostic_metrics=(
+                        dict(evaluation.diagnostic_metrics) if evaluation else {}
                     ),
                     child_count=children[spec.experiment_id],
                     actual_cost=spec.estimated_cost.cost_tier,
@@ -728,6 +742,21 @@ class ContextBuilder:
         )
         for event in lesson_events:
             optional.append((event.event_id, "Applicable lesson", self._event_card(event)))
+        evidence_ids = set(spec.evidence_event_ids)
+        for event in visible:
+            if event.event_id in evidence_ids and event.event_type in {
+                EventType.ADAPTER_FAILED,
+                EventType.EVALUATION_COMPLETED,
+                EventType.EXPERIMENT_DECIDED,
+                EventType.OUTPUT_CHECKED,
+            }:
+                optional.append(
+                    (
+                        event.event_id,
+                        "Approved prior-result evidence",
+                        self._event_card(event),
+                    )
+                )
         context_id = self._identity(
             "coder",
             visible,

@@ -59,6 +59,10 @@ def test_planner_history_preserves_complete_evaluation_evidence(
     assert latest.highest_completed_fidelity.value == "full"
     assert latest.prediction_change == 0.1
     assert latest.prediction_spearman_vs_parent == 0.9
+    assert latest.diagnostic_metrics == {
+        "spearman_vs_fm_baseline": 0.8,
+        "user_rankable_fraction": 1.0,
+    }
     assert latest.trust_flags == []
     assert latest.parent_eligible is True
     assert latest.best_eligible is True

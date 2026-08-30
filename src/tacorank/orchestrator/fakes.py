@@ -307,6 +307,10 @@ class FakeEvaluator:
                 spearman_vs_parent=0.9,
                 changed_row_fraction=0.1,
             ),
+            diagnostic_metrics={
+                "spearman_vs_fm_baseline": 0.8,
+                "user_rankable_fraction": 1.0,
+            },
             trust=TrustAssessment(
                 verdict=TrustVerdict.ACCEPTED,
                 stability=Stability.SINGLE_SEED,

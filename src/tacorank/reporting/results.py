@@ -292,6 +292,15 @@ def _render_lesson(lesson_id: str, record: dict) -> str:
 
 def render_summary(events: Sequence[Event]) -> str:
     state = project(events)
+    adapter_failures = [
+        event.payload.result
+        for event in events
+        if event.payload.type == "adapter.failed"
+    ]
+    failure_stages = Counter(result.failure_stage for result in adapter_failures)
+    failure_text = ", ".join(
+        "%s %d" % item for item in sorted(failure_stages.items())
+    ) or "none"
     lines = [
         _GENERATED_MARKER,
         "",
@@ -330,6 +339,7 @@ def render_summary(events: Sequence[Event]) -> str:
             "- Action CPU time: %.3f seconds" % (totals.cpu_time_ms / 1000.0),
             "- GPU-hours: %.6f" % totals.gpu_hours,
             "- Manual interventions: %d" % state.manual_intervention_count,
+            "- Adapter failures: %d (%s)" % (len(adapter_failures), failure_text),
             "",
             "Ledger head: `%s` / `%s`" % (state.last_event_id, state.last_event_hash),
         )
@@ -413,6 +423,9 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                 "highest_fidelity": payload.evaluation.fidelity.value,
                 "metric_set": payload.metric_set.model_dump(mode="json"),
                 "trust": payload.evaluation.trust.model_dump(mode="json"),
+                "diagnostic_metrics": dict(payload.evaluation.diagnostic_metrics),
+                "adapter_failures": [],
+                "recovery_decisions": [],
                 "estimated_cost": None,
                 "best_eligible": state.best_experiment_id == payload.experiment_id,
                 "event_ids": [
@@ -424,6 +437,45 @@ def _graph_payload(events: Sequence[Event]) -> dict:
     for experiment_id in sorted(specifications):
         spec = specifications[experiment_id]
         node = state.experiments[experiment_id]
+        experiment_evaluations = [
+            event.payload.result
+            for event in events
+            if event.payload.type == "evaluation.completed"
+            and event.payload.result.experiment_id == experiment_id
+        ]
+        latest_evaluation = (
+            experiment_evaluations[-1] if experiment_evaluations else None
+        )
+        adapter_failures = [
+            {
+                "event_id": event.event_id,
+                "attempt": event.payload.result.attempt,
+                "failure_stage": event.payload.result.failure_stage,
+                "error_class": event.payload.result.error_class,
+                "error_fingerprint": event.payload.result.error_fingerprint,
+                "error_summary": event.payload.result.error_summary,
+                "diagnostic_artifacts": [
+                    artifact.model_dump(mode="json")
+                    for artifact in event.payload.result.diagnostic_artifacts
+                ],
+                "resource_delta": event.resource_delta.model_dump(mode="json"),
+            }
+            for event in events
+            if event.payload.type == "adapter.failed"
+            and event.payload.result.experiment_id == experiment_id
+        ]
+        recovery_decisions = [
+            {
+                "event_id": event.event_id,
+                "failure_event_id": event.payload.decision.failure_event_id,
+                "action": event.payload.decision.action.value,
+                "reason_code": event.payload.decision.reason_code,
+                "instructions": event.payload.decision.instructions,
+            }
+            for event in events
+            if event.payload.type == "recovery.decided"
+            and event.payload.decision.experiment_id == experiment_id
+        ]
         nodes.append(
             {
                 "experiment_id": experiment_id,
@@ -454,6 +506,13 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                     if node.trust is not None
                     else None
                 ),
+                "diagnostic_metrics": (
+                    dict(latest_evaluation.diagnostic_metrics)
+                    if latest_evaluation is not None
+                    else {}
+                ),
+                "adapter_failures": adapter_failures,
+                "recovery_decisions": recovery_decisions,
                 "estimated_cost": spec.estimated_cost.model_dump(mode="json"),
                 "best_eligible": node.best_eligible,
                 "event_ids": [
@@ -561,6 +620,41 @@ def _render_experiment(node: dict, events: Sequence[Event]) -> str:
                 "",
                 "```json",
                 json.dumps(metric_set, ensure_ascii=False, sort_keys=True, indent=2),
+                "```",
+            )
+        )
+    if node["diagnostic_metrics"]:
+        lines.extend(
+            (
+                "",
+                "## Label-free candidate diagnostics",
+                "",
+                "```json",
+                json.dumps(
+                    node["diagnostic_metrics"],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                ),
+                "```",
+            )
+        )
+    if node["adapter_failures"] or node["recovery_decisions"]:
+        lines.extend(
+            (
+                "",
+                "## Adapter failures and recovery",
+                "",
+                "```json",
+                json.dumps(
+                    {
+                        "adapter_failures": node["adapter_failures"],
+                        "recovery_decisions": node["recovery_decisions"],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                ),
                 "```",
             )
         )

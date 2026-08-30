@@ -12,14 +12,17 @@ import ssl
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.request
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Mapping, Sequence, Tuple
 
 import certifi
 
 from .coding import (
     TRAE_DEEPSEEK_REASONING_MARKER,
+    TRAE_DEEPSEEK_TOOL_JSON_MARKER,
     TRAE_DOCKER_EDIT_TOOL_MARKER,
     hash_trae_runtime_package,
 )
@@ -100,9 +103,13 @@ def setup_trae_deployment(
                 "date,user_id,video_id,author_id,tab,duration_ms,long_view, where "
                 "date is an integer YYYYMMDD value; "
                 "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
-                "and never exposes long_view. Training dates strictly precede score "
-                "dates. Preserve contiguous score row_id order, duplicate rows, "
-                "finite deterministic scores, and exclusive output creation."
+                "and never exposes long_view. fm_baseline_predictions.csv is the "
+                "setup-verified official FM score for every score.csv row. Preserve "
+                "it as the strong parent and add only a bounded train-only residual "
+                "unless the approved hypothesis explicitly replaces the parent. "
+                "Training dates strictly precede score dates. Preserve contiguous "
+                "score row_id order, duplicate rows, finite deterministic scores, "
+                "and exclusive output creation."
             )
         },
         "coding_step_limit": 40,
@@ -222,6 +229,9 @@ def setup_live_deployment(
         "baseline_final_prediction_csv": str(
             generated_data["baseline_final_prediction_csv"]
         ),
+        "baseline_parity_receipt_path": str(
+            generated_data["baseline_parity_receipt_path"]
+        ),
         "candidate_allowed_columns": [
             "date",
             "user_id",
@@ -289,7 +299,11 @@ def setup_live_deployment(
             "long_view",
             "verified_predictions",
         ],
-        "research_capabilities": [],
+        "research_capabilities": [
+            "baseline_parity",
+            "objective_data_frame_verified",
+            "verified_best_prediction",
+        ],
         "active_research_prohibitions": [],
         "prediction_change_no_op_threshold": 0.001,
         "target_interface_excerpts": {
@@ -302,9 +316,17 @@ def setup_live_deployment(
                 "date,user_id,video_id,author_id,tab,duration_ms,long_view, where "
                 "date is an integer YYYYMMDD value; "
                 "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
-                "and never exposes long_view. Training dates strictly precede score "
-                "dates. Preserve contiguous score row_id order, duplicate rows, "
-                "finite deterministic scores, and exclusive output creation."
+                "and never exposes long_view. fm_baseline_predictions.csv contains "
+                "the setup-verified official FM score aligned one-to-one with "
+                "score.csv; fm_baseline_predictions.sha256 authenticates it. The "
+                "baseline candidate reproduces these bytes exactly. Keep this FM "
+                "score as the strong parent and learn one bounded train-only residual "
+                "unless the approved ExperimentSpec explicitly tests replacement. "
+                "Do not reinterpret duration_ms as watch time: it is video duration. "
+                "Training dates strictly precede score dates. Preserve contiguous "
+                "score row_id order, duplicate rows, finite deterministic scores, "
+                "and exclusive output creation. Use all training rows or report a "
+                "deterministic representative sampling fraction in the code."
             )
         },
         "coding_step_limit": 40,
@@ -463,6 +485,10 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
         "proxy": baselines / "proxy.csv",
         "full": baselines / "full.csv",
     }
+    smoke_baseline_prediction_csv = baselines / "smoke.csv"
+    _write_prediction_subset(
+        smoke_baseline_prediction_csv, baseline_rows, smoke_indices
+    )
     _write_prediction_subset(
         baseline_prediction_csvs["proxy"], baseline_rows, proxy_indices
     )
@@ -500,6 +526,12 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
         "candidate_full": (valid, None),
         "candidate_final_infer": (test, None),
     }
+    fm_prediction_sources = {
+        "candidate_smoke": smoke_baseline_prediction_csv,
+        "candidate_proxy": baseline_prediction_csvs["proxy"],
+        "candidate_full": baseline_prediction_csvs["full"],
+        "candidate_final_infer": baseline_final_prediction_csv,
+    }
     for command_id, directory in command_directories.items():
         directory.mkdir(mode=0o700)
         os.link(train_path, directory / "train.csv")
@@ -508,6 +540,18 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
         if indices is not None:
             selected = (rows[index] for index in indices)
         _write_score(directory / "score.csv", selected)
+        fm_view = directory / "fm_baseline_predictions.csv"
+        _copy_exclusive(fm_prediction_sources[command_id], fm_view)
+        _write_text_exclusive(
+            directory / "fm_baseline_predictions.sha256",
+            _sha256_file(fm_view) + "\n",
+        )
+
+    parity_receipt = deployment / "baseline-parity-receipt.json"
+    _write_json_exclusive(
+        parity_receipt,
+        _candidate_baseline_parity_receipt(root, command_directories),
+    )
 
     baseline_directory = views / "baseline-full"
     baseline_directory.mkdir(mode=0o700)
@@ -553,6 +597,71 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
         "population_csvs": population_csvs,
         "baseline_prediction_csvs": baseline_prediction_csvs,
         "baseline_final_prediction_csv": baseline_final_prediction_csv,
+        "baseline_parity_receipt_path": parity_receipt,
+    }
+
+
+def _candidate_baseline_parity_receipt(
+    root: Path,
+    input_roots: Mapping[str, Path],
+) -> Mapping[str, Any]:
+    """Execute the editable parent and prove exact FM bytes at every route."""
+
+    source = root / "solution" / "candidate.py"
+    specification = importlib.util.spec_from_file_location(
+        "tacorank_setup_verified_candidate", source
+    )
+    if specification is None or specification.loader is None:
+        raise DeploymentError("candidate baseline entrypoint could not be loaded")
+    module = importlib.util.module_from_spec(specification)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        specification.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    implementation = getattr(module, "run", None)
+    if not callable(implementation):
+        raise DeploymentError("candidate baseline does not define callable run")
+
+    routes: Dict[str, Mapping[str, Any]] = {}
+    with tempfile.TemporaryDirectory(prefix="tacorank-baseline-parity-") as temporary:
+        temporary_root = Path(temporary).resolve(strict=True)
+        for command_id in sorted(input_roots):
+            input_root = input_roots[command_id].resolve(strict=True)
+            expected = input_root / "fm_baseline_predictions.csv"
+            output = temporary_root / (command_id + ".csv")
+            try:
+                result = implementation(
+                    SimpleNamespace(input_root=input_root, output_path=output)
+                )
+            except Exception as error:
+                raise DeploymentError(
+                    "candidate baseline parity execution failed for %s" % command_id
+                ) from error
+            if result is not None or not output.is_file() or output.is_symlink():
+                raise DeploymentError(
+                    "candidate baseline parity produced an invalid output for %s"
+                    % command_id
+                )
+            expected_sha = _sha256_file(expected)
+            output_sha = _sha256_file(output)
+            if output_sha != expected_sha:
+                raise DeploymentError(
+                    "candidate baseline does not reproduce official FM for %s"
+                    % command_id
+                )
+            routes[command_id] = {
+                "fm_prediction_sha256": expected_sha,
+                "candidate_output_sha256": output_sha,
+                "exact_bytes_match": True,
+            }
+    return {
+        "schema_version": "1.0",
+        "candidate_entrypoint": "solution.candidate:run",
+        "candidate_source_path": "solution/candidate.py",
+        "candidate_source_sha256": _sha256_file(source),
+        "routes": routes,
     }
 
 
@@ -757,6 +866,24 @@ def _patch_trae_deepseek_reasoning(runtime: Path) -> None:
     response_anchor = """        for output_block in response.output:
             if output_block.type == "function_call":
 """
+    function_call_anchor = '''            if output_block.type == "function_call":
+                tool_calls.append(
+                    ToolCall(
+                        call_id=output_block.call_id,
+                        name=output_block.name,
+                        arguments=json.loads(output_block.arguments)
+                        if output_block.arguments
+                        else {},
+                        id=output_block.id,
+                    )
+                )
+                tool_call_param = ResponseFunctionToolCallParam(
+                    arguments=output_block.arguments,
+                    call_id=output_block.call_id,
+                    name=output_block.name,
+                    type="function_call",
+                )
+'''
     message_anchor = '''            elif output_block.type == "message":
                 content = "".join(
                     content_block.text
@@ -772,8 +899,10 @@ def _patch_trae_deepseek_reasoning(runtime: Path) -> None:
     if (
         original.count(request_anchor) != 1
         or original.count(response_anchor) != 1
+        or original.count(function_call_anchor) != 1
         or original.count(message_anchor) != 1
         or TRAE_DEEPSEEK_REASONING_MARKER in original
+        or TRAE_DEEPSEEK_TOOL_JSON_MARKER in original
     ):
         raise DeploymentError("pinned Trae DeepSeek patch does not apply cleanly")
 
@@ -793,6 +922,45 @@ def _patch_trae_deepseek_reasoning(runtime: Path) -> None:
                         )
                     )
 '''
+    safe_function_call = f'''            if output_block.type == "function_call":
+                # {TRAE_DEEPSEEK_TOOL_JSON_MARKER}.
+                try:
+                    tool_arguments = (
+                        json.loads(output_block.arguments)
+                        if output_block.arguments
+                        else {{}}
+                    )
+                except (json.JSONDecodeError, TypeError, RecursionError):
+                    tool_arguments = None
+                if not isinstance(tool_arguments, dict):
+                    diagnostic = (
+                        "TacoRank rejected malformed or truncated tool arguments. "
+                        "Retry the same operation with one smaller valid JSON tool call."
+                    )
+                    content += diagnostic
+                    self.message_history.append(
+                        EasyInputMessageParam(
+                            content=diagnostic,
+                            role="assistant",
+                            type="message",
+                        )
+                    )
+                    continue
+                tool_calls.append(
+                    ToolCall(
+                        call_id=output_block.call_id,
+                        name=output_block.name,
+                        arguments=tool_arguments,
+                        id=output_block.id,
+                    )
+                )
+                tool_call_param = ResponseFunctionToolCallParam(
+                    arguments=json.dumps(tool_arguments, separators=(",", ":")),
+                    call_id=output_block.call_id,
+                    name=output_block.name,
+                    type="function_call",
+                )
+'''
     patched = original.replace(
         request_anchor,
         request_anchor
@@ -800,7 +968,7 @@ def _patch_trae_deepseek_reasoning(runtime: Path) -> None:
             if model_config.model.startswith("deepseek-")
             else openai.NOT_GIVEN,
 """,
-    ).replace(
+    ).replace(function_call_anchor, safe_function_call).replace(
         response_anchor,
         f'''        for output_block in response.output:
             # {TRAE_DEEPSEEK_REASONING_MARKER}.

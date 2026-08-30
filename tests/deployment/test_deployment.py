@@ -16,7 +16,10 @@ from solution.candidate import run as run_candidate
 from benchmarks.kuairand_pure.pipeline import check_submission
 from tacorank import deployment as deployment_module
 from tacorank.config import ContractError
-from tacorank.orchestrator.live import _verify_data_manifest
+from tacorank.orchestrator.live import (
+    _verify_data_manifest,
+    _verify_executable_baseline_parity,
+)
 
 
 def _row(index: int, label: int):
@@ -110,6 +113,13 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
     (root / "contract" / "COMPETITION.md").write_text(
         "# Test contract\n", encoding="utf-8"
     )
+    (root / "solution").mkdir()
+    (root / "solution" / "candidate.py").write_text(
+        (Path(__file__).parents[2] / "solution" / "candidate.py").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
     deployment.mkdir(parents=True)
     data.mkdir(parents=True)
     for name in deployment_module.RAW_REQUIRED:
@@ -180,6 +190,7 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
         data_manifest_sha256=hashlib.sha256(
             result["manifest_path"].read_bytes()
         ).hexdigest(),
+        research_capabilities=["baseline_parity"],
     )
     live = SimpleNamespace(
         data_manifest_path=result["manifest_path"],
@@ -187,8 +198,11 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
         population_csvs=result["population_csvs"],
         baseline_prediction_csvs=result["baseline_prediction_csvs"],
         baseline_final_prediction_csv=result["baseline_final_prediction_csv"],
+        baseline_parity_receipt_path=result["baseline_parity_receipt_path"],
+        candidate_entrypoint="solution.candidate:run",
     )
     _verify_data_manifest(config, live)
+    _verify_executable_baseline_parity(config, live)
 
     with (result["input_roots"]["candidate_full"] / "score.csv").open(
         "a", encoding="utf-8"
@@ -216,6 +230,18 @@ def test_production_candidate_writes_ordered_finite_predictions(tmp_path: Path) 
         "1,20220422,u1,unknown,a3,t,1000\n",
         encoding="utf-8",
     )
+    baseline = (
+        "row_id,user_id,video_id,score\n"
+        "0,u1,v1,0.75\n"
+        "1,u1,unknown,0.25\n"
+    )
+    (input_root / "fm_baseline_predictions.csv").write_text(
+        baseline, encoding="utf-8"
+    )
+    (input_root / "fm_baseline_predictions.sha256").write_text(
+        hashlib.sha256(baseline.encode("utf-8")).hexdigest() + "\n",
+        encoding="ascii",
+    )
     output = output_root / "predictions.csv"
 
     run_candidate(SimpleNamespace(input_root=input_root, output_path=output))
@@ -228,6 +254,7 @@ def test_production_candidate_writes_ordered_finite_predictions(tmp_path: Path) 
         ("u1", "unknown"),
     ]
     assert all(float(row["score"]) == float(row["score"]) for row in rows)
+    assert output.read_text(encoding="utf-8") == baseline
 
 
 def test_validate_trae_tools_accepts_canonical_bundle(tmp_path: Path) -> None:
@@ -295,16 +322,41 @@ def test_patch_trae_deepseek_reasoning_is_explicit_and_continuous(
     client = site_packages / "trae_agent/utils/llm_clients/openai_client.py"
     client.parent.mkdir(parents=True)
     client.write_text(
-        '''class Client:
+        '''import json
+
+def EasyInputMessageParam(**values):
+    return values
+
+class Client:
+    def __init__(self):
+        self.message_history = []
+
     def request(self, model_config):
         return self.client.responses.create(
             max_output_tokens=model_config.max_tokens,
         )
 
     def record(self, response):
+        content = ""
+        tool_calls = []
         for output_block in response.output:
             if output_block.type == "function_call":
-                pass
+                tool_calls.append(
+                    ToolCall(
+                        call_id=output_block.call_id,
+                        name=output_block.name,
+                        arguments=json.loads(output_block.arguments)
+                        if output_block.arguments
+                        else {},
+                        id=output_block.id,
+                    )
+                )
+                tool_call_param = ResponseFunctionToolCallParam(
+                    arguments=output_block.arguments,
+                    call_id=output_block.call_id,
+                    name=output_block.name,
+                    type="function_call",
+                )
             elif output_block.type == "message":
                 content = "".join(
                     content_block.text
@@ -316,6 +368,8 @@ def test_patch_trae_deepseek_reasoning_is_explicit_and_continuous(
             self.message_history.append(
                 EasyInputMessageParam(content=content, role="assistant", type="message")
             )
+        self.last_content = content
+        self.last_tool_calls = tool_calls
 ''',
         encoding="utf-8",
     )
@@ -327,15 +381,39 @@ def test_patch_trae_deepseek_reasoning_is_explicit_and_continuous(
 
     patched = client.read_text(encoding="utf-8")
     assert deployment_module.TRAE_DEEPSEEK_REASONING_MARKER in patched
+    assert deployment_module.TRAE_DEEPSEEK_TOOL_JSON_MARKER in patched
     assert 'reasoning={"effort": "high"}' in patched
     assert 'output_block.type == "reasoning"' in patched
     assert "self.message_history.append(reasoning_item)" in patched
+    assert "except (json.JSONDecodeError, TypeError, RecursionError)" in patched
+    assert "if not isinstance(tool_arguments, dict)" in patched
+    assert "Retry the same operation with one smaller valid JSON tool call" in patched
+    assert "arguments=json.dumps(tool_arguments" in patched
     assert "content += message_content" in patched
     assert patched.index("content += message_content") > patched.index(
         'output_block.type == "function_call"'
     )
     assert 'if content != "":' not in patched
     compile(patched, str(client), "exec")
+    namespace = {}
+    exec(compile(patched, str(client), "exec"), namespace)
+    instance = namespace["Client"]()
+    instance.record(
+        SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    arguments='{"path":"unterminated',
+                    call_id="call_1",
+                    name="str_replace_based_edit_tool",
+                    id="fc_1",
+                )
+            ]
+        )
+    )
+    assert instance.last_tool_calls == []
+    assert "malformed or truncated" in instance.last_content
+    assert instance.message_history[-1]["role"] == "assistant"
 
 
 def test_patch_trae_docker_edit_tool_filters_and_quotes_arguments(

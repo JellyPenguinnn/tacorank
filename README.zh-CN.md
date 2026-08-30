@@ -149,7 +149,7 @@ git submodule update --init --recursive
      --live-config .tacorank/deployment/live-adapters.json
    ```
 
-   Preflight 会验证干净的 Git 基线和 submodule、冻结约定、数据清单、官方评测器和 FM 基线、Trae 安装与模型访问、Docker 运行时、只读编辑工具挂载、执行环境以及严格输出配额。成功结果会包含 `"ledger_created": false`。
+   Setup 会把经过哈希验证的官方 FM 预测放入每个候选评分视图，并生成可执行基线一致性回执。Preflight 除了验证干净的 Git 基线和 submodule、冻结约定、数据清单、官方评测器、Trae 安装与模型访问、Docker 运行时、只读编辑工具挂载、执行环境和严格输出配额外，还会验证当前 `solution/candidate.py` 在 smoke、proxy、full 与 final 路径上仍能逐字节复现 FM 预测。成功结果会包含 `"ledger_created": false`。
 
 4. 启动完整自动化循环。
 
@@ -222,7 +222,9 @@ runs/<run_id>/
 
 Starter 资源位于 tracked 的 `KuaiRand-Pure/` 和固定版本的 `kuairand-starter-kit` submodule 中。下载的数据会被明确排除在 Git 之外。
 
-评测是在 KuaiRand-Pure 已曝光记录上，以原生二元 `long_view` 为目标进行用户内排序。主分是 GAUC 与 nDCG@5 的平均值。候选代码不能修改或读取受保护评测器、split identity、final label、提交顺序或官方基线证据。Test 推理不含标签，也不能反馈给搜索。
+评测是在 KuaiRand-Pure 已曝光记录上，以原生二元 `long_view` 为目标进行用户内排序。主分是 GAUC 与 nDCG@5 的平均值。候选代码不能修改或读取受保护评测器、split identity、评测/test label 或提交顺序；唯一暴露给候选的基线证据，是与当前 score 视图对应、经过哈希验证的逐行 FM 预测。Test 推理不含标签，也不能反馈给搜索。
+
+可执行研究父模型是经 setup 验证的官方 FM 预测，而不是较弱的 popularity 近似。基线候选会逐字节复制该预测；获批的研究补丁通常应在其上学习一个有界、仅使用训练数据的残差。受保护评测还会记录不使用标签的可排序性、item 个性化、残差尺度以及与 FM 父模型相关性的诊断，使下一轮规划在不接触标签的情况下区分实现缺陷与无效假设。
 
 数据准备、官方 split、基线复现、评测语义和提交检查详见 [`docs/KUAIRAND_STARTER_KIT.md`](docs/KUAIRAND_STARTER_KIT.md)。
 
@@ -302,14 +304,16 @@ PYTHONPATH=src:. .venv/bin/python -m pytest \
 
 截至 2026-08-30：
 
-- 完整自动化测试套件在源代码 commit `bdeed2f` 上通过，共 470 项测试。
+- 当前完整自动化测试套件通过 488 项测试，并有 11 项符合预期的平台跳过。
 - 一次有界实时 CPU 运行使用了生产 DeepSeek 研究员、固定 Trae 工作器、加固 Docker runner 和官方 KuaiRand-Pure 数据。
 - Trae 生成了仅修改 `solution/candidate.py` 的 pairwise BPR 候选；14 项 Gate A 检查全部通过，smoke 与 proxy 的 11 项 Gate B 检查也全部通过。
 - 受保护 proxy 评测得到 GAUC `0.62112551`、nDCG@5 `0.51277198`、primary `0.56694875`，因此控制器正确剪枝该候选。
 - 一实验预算选择了仍然最优的官方 FM 基线，生成了通过 TacoRank 和官方 checker 的、由 manifest 证明的 170,588 行 test 提交；20 事件账本成功重放。
 - 另一次真实迭代回归运行完成了第一轮编码、Gate A、CPU smoke/proxy、Gate B、受保护评测与剪枝，随后持久化创建并提出 `exp_002`，进入新的 Trae 编码上下文。观察到跨轮继续行为后，该运行在第二轮编码期间被有意停止。
+- 运行后取证发现，可编辑的 popularity 父模型得分为 `0.580721929`，而被单独评测的官方 FM 为 `0.601468756`。修复后的候选现在会逐字节复现官方 FM；对 124,909 行 full validation 的 CPU 重放得到 GAUC `0.6671326322`、nDCG@5 `0.5358048805`、primary `0.6014687564`。
+- 针对 `exp_006` 的 DeepSeek 畸形工具参数路径，现有可执行兼容补丁测试和控制器集成测试覆盖了脱敏证据、provider token/耗时记账、一次有界编码重试、因果 attempt identity、仅放弃当前实验以及继续规划。新的真实 provider 验证仍需从干净 commit 重新生成 deployment，不能由这些确定性检查推断。
 
-以上证据证明了真实集成的基线路径和跨迭代继续行为，但并不证明经过实际时间的实时收敛，也不证明已经产生获胜候选。有界验收没有执行连续三次无提升的 full 迭代；由于候选在 proxy 失败，也没有进入 candidate-best clean reproduction 路径。确定性集成测试覆盖了这些控制路径。完整证据与范围见 [`docs/person3-handoff.md`](docs/person3-handoff.md)。
+以上证据证明了真实集成的基线路径、跨迭代继续行为和当前可执行 FM 一致性，但并不证明经过实际时间的实时收敛，也不证明已经产生获胜候选。有界验收没有执行连续三次无提升的 full 迭代；由于候选在 proxy 失败，也没有进入 candidate-best clean reproduction 路径。确定性集成测试覆盖了这些控制路径。历史证据与范围见 [`docs/person3-handoff.md`](docs/person3-handoff.md)。
 
 ## 安全性与可复现性
 
@@ -318,6 +322,7 @@ PYTHONPATH=src:. .venv/bin/python -m pytest \
 - 候选代码在一次性 worktree 和资源受限的 CPU Docker 容器中运行，并受输出配额约束。
 - Gate B 在评测前检查预测结构、行 identity、数值有限性、生产 commit、数据清单、命令与执行 seal。
 - 预期故障会生成类型化、脱敏、哈希寻址证据；修复和同 commit 重试均有明确上限。
+- DeepSeek 生成的畸形或截断工具参数会在 Trae 循环内转化为一次纠正步骤。如果 Trae 仍以失败结束，系统会把脱敏进程日志、可用的 trajectory、精确 provider token 与耗时写入账本；同一冻结编码任务只会从干净基线重试一次，之后仅放弃该实验而继续全局搜索。
 - 主动违反完整性边界会终止运行，并保留在账本中。
 - 收敛只统计终态、可信 full-fidelity 研究迭代，不统计 confirmation seed 执行。
 - 最终化只选择 validation best；候选必须通过 clean reproduction；test identity 不会进入规划或评测反馈。

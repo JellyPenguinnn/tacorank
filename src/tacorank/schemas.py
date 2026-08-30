@@ -741,7 +741,7 @@ class AdapterFailureResult(StrictModel):
     error_class: NonEmptyStr
     error_fingerprint: str
     error_summary: NonEmptyStr
-    diagnostic_artifact: Optional[ArtifactRef] = None
+    diagnostic_artifacts: List[ArtifactRef] = Field(default_factory=list)
     resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
 
     @field_validator("error_fingerprint")
@@ -899,6 +899,7 @@ class EvaluationResult(StrictModel):
     parent_delta: Optional[float] = None
     previous_best_delta: Optional[float] = None
     prediction_change: Union[float, PredictionChange]
+    diagnostic_metrics: Dict[NonEmptyStr, float] = Field(default_factory=dict)
     trust: TrustAssessment
     seed_evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
     metrics_artifact: Optional[ArtifactRef] = None
@@ -1130,6 +1131,7 @@ class PlannerExperimentSummary(StrictModel):
     prediction_spearman_vs_parent: Optional[float] = Field(
         default=None, ge=-1.0, le=1.0
     )
+    diagnostic_metrics: Dict[NonEmptyStr, float] = Field(default_factory=dict)
     child_count: int = Field(default=0, ge=0)
     actual_cost: Optional[CostTier] = None
     parent_eligible: bool = False

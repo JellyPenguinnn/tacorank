@@ -149,7 +149,7 @@ Setup must run from a clean tracked checkout so the Git baseline, protected mani
      --live-config .tacorank/deployment/live-adapters.json
    ```
 
-   Preflight verifies the clean Git baseline and submodule, frozen contracts, data manifest, official evaluator and FM baseline, Trae installation and model access, Docker runtime, read-only edit-tool mount, execution environment, and hard output quota. Success reports `"ledger_created": false`.
+   Setup places the hash-verified official FM predictions beside every candidate score view and records an executable parity receipt. Preflight verifies the current `solution/candidate.py` still reproduces those exact bytes on smoke, proxy, full, and final routes, in addition to the clean Git baseline and submodule, frozen contracts, data manifest, official evaluator, Trae installation and model access, Docker runtime, read-only edit-tool mount, execution environment, and hard output quota. Success reports `"ledger_created": false`.
 
 4. Start the complete autonomous loop.
 
@@ -222,7 +222,9 @@ runs/<run_id>/
 
 Starter resources are tracked in `KuaiRand-Pure/` and in the pinned `kuairand-starter-kit` submodule. Downloaded data is intentionally excluded from Git.
 
-Evaluation is within-user ranking over logged KuaiRand-Pure impressions using the native binary `long_view` target. The primary score is the mean of GAUC and nDCG@5. Candidate code cannot modify or read the protected evaluator, split identities, final labels, submission ordering, or official baseline evidence. Test inference is label-free and cannot feed back into search.
+Evaluation is within-user ranking over logged KuaiRand-Pure impressions using the native binary `long_view` target. The primary score is the mean of GAUC and nDCG@5. Candidate code cannot modify or read the protected evaluator, split identities, evaluation/test labels, or submission ordering. The only baseline evidence exposed to it is the hash-verified per-row FM prediction for its current score view. Test inference is label-free and cannot feed back into search.
+
+The executable research parent is the setup-verified official FM prediction, not a weaker popularity approximation. The baseline candidate copies it exactly; approved research patches should normally learn a bounded train-only residual on top. Protected evaluation records label-free diagnostics for rankability, item personalization, residual scale, and correlation with the FM parent, so the next planner can distinguish weak implementation mechanics from an unpromising hypothesis without seeing labels.
 
 See [`docs/KUAIRAND_STARTER_KIT.md`](docs/KUAIRAND_STARTER_KIT.md) for data preparation, official splits, baseline reproduction, evaluation semantics, and submission checks.
 
@@ -302,14 +304,16 @@ Deterministic tests do not substitute for a live provider, Docker, data, or elap
 
 As of 2026-08-30:
 
-- The complete automated suite passed: 470 tests at source commit `bdeed2f`.
+- The current complete automated suite passes 488 tests, with 11 expected platform skips.
 - A bounded live CPU run used the production DeepSeek researcher, pinned Trae worker, hardened Docker runner, and official KuaiRand-Pure data.
 - Trae produced a pairwise BPR candidate that changed only `solution/candidate.py`; all 14 Gate A checks and all 11 Gate B checks passed for both smoke and proxy execution.
 - Protected proxy evaluation scored GAUC `0.62112551`, nDCG@5 `0.51277198`, and primary `0.56694875`, so the controller correctly pruned the candidate.
 - The one-experiment budget selected the still-best official FM baseline and produced a manifest-attested 170,588-row test submission accepted by both TacoRank and the official checker. The 20-event ledger replayed successfully.
 - A separate live iterative regression run completed its first real coding, Gate A, CPU smoke/proxy, Gate B, protected evaluation, and prune cycle, then durably created and proposed `exp_002` and entered its new Trae coding context. It was intentionally stopped during that second coding pass after the continuation behavior was observed.
+- Post-run forensics found that the editable popularity parent scored `0.580721929` while the separately evaluated official FM scored `0.601468756`. The repaired candidate now reproduces the official FM bytes exactly; a full 124,909-row CPU replay returned GAUC `0.6671326322`, nDCG@5 `0.5358048805`, and primary `0.6014687564`.
+- The `exp_006` malformed DeepSeek tool-argument path is covered by an executable compatibility-patch test plus controller integration tests for redacted evidence, provider-token/wall-time accounting, one bounded coding retry, causal attempt identity, experiment-local abandonment, and continued planning. A new live provider run still requires a fresh clean deployment and is not implied by these deterministic checks.
 
-This proves a real integrated baseline path and live cross-iteration continuation, not elapsed live convergence or a winning candidate. The bounded acceptance could not exercise three non-improving full iterations, and the candidate-best clean-reproduction path was not entered because the candidate failed proxy. Deterministic integration tests cover those control paths. Full evidence and scope are recorded in [`docs/person3-handoff.md`](docs/person3-handoff.md).
+This proves a real integrated baseline path, live cross-iteration continuation, and current executable FM parity—not elapsed live convergence or a winning candidate. The bounded acceptance could not exercise three non-improving full iterations, and the candidate-best clean-reproduction path was not entered because the candidate failed proxy. Deterministic integration tests cover those control paths. Full historical evidence and scope are recorded in [`docs/person3-handoff.md`](docs/person3-handoff.md).
 
 ## Safety and reproducibility
 
@@ -318,6 +322,7 @@ This proves a real integrated baseline path and live cross-iteration continuatio
 - Candidate code runs in disposable worktrees and CPU Docker containers with bounded resources and output quotas.
 - Gate B validates prediction structure, row identity, finiteness, and producer lineage before evaluation.
 - Expected failures produce typed, redacted, hash-addressed evidence; repair and same-commit retries are bounded.
+- Malformed or truncated DeepSeek tool arguments are converted into an in-loop Trae correction step. If Trae still exits unsuccessfully, its redacted process log, trajectory when available, exact provider-token accounting, and wall time are ledgered; the same frozen coding assignment receives one clean retry before only that experiment is abandoned.
 - Deliberate integrity violations terminate the run and remain in the ledger.
 - Convergence counts terminal trusted full-fidelity research iterations, not confirmation-seed executions.
 - Finalization selects only the validation best, requires clean reproduction for a candidate, and keeps test identities out of planning and evaluation feedback.

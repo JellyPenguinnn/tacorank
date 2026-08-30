@@ -69,7 +69,11 @@ proposed -> patch_ready -> ready_to_run -> running -> output_ready
 - Gate B verifies the prediction schema, ordered row identity, finite/diverse scores, producing commit, data manifest, command, and execution seal before evaluation.
 - Smoke can promote on structural success. Proxy and full require protected evaluation. Only a trusted public-validation full result can update the best.
 
+`setup-live` gives every candidate route the exact official FM prediction plus its digest and proves the checked-in candidate reproduces it byte-for-byte. This makes the executable parent equal to the scored baseline. Candidate experiments normally preserve that parent and add one bounded train-only residual. Evaluation adds label-free rankability, personalization, residual-scale, and FM-correlation diagnostics to the canonical result and planner context; those diagnostics never replace protected metrics.
+
 Execution, Gate A, Gate B, and evaluation no-op failures enter the bounded recovery route. Recovery may retry the same commit once, apply an approved runtime adjustment, ask Trae for at most two repair patches, roll back, or abandon. Every replacement patch needs a new Gate A receipt. Repeated fingerprints stop repair cycling, and deliberate credential, hidden-label, target-label, or network boundary violations are recorded and terminate the run.
+
+The pinned DeepSeek Responses client catches malformed or truncated function arguments before Trae executes them and asks for one smaller valid JSON call inside the existing step budget. An unsuccessful coding trajectory retains a redacted trajectory and process log when available, provider token usage, and elapsed wall time in `adapter.failed`. The controller may retry the same frozen initial coding assignment once; a second provider failure invalidates only that experiment and returns the outer loop to planning. Generated experiment reports expose these failure and recovery records without changing ledger authority.
 
 ## Finalization
 

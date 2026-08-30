@@ -252,7 +252,7 @@ To download the official dataset when required:
   --download-data
 ```
 
-If the required raw files already exist in `KuaiRand-Pure/data/`, omit `--download-data`. The data directory must be a real, non-symlinked directory inside the repository. Setup creates credential-free configuration, official data views, baseline predictions, a data manifest, a pinned Trae environment, and a digest-bound Docker image. Preserve the JSON result because it reports the exact generated paths and image identity.
+If the required raw files already exist in `KuaiRand-Pure/data/`, omit `--download-data`. The data directory must be a real, non-symlinked directory inside the repository. Setup creates credential-free configuration, official data views, baseline predictions, an executable baseline-parity receipt, a data manifest, a pinned Trae environment, and a digest-bound Docker image. Every candidate view contains `fm_baseline_predictions.csv` and its `.sha256` identity; do not remove or substitute them. Preserve the setup JSON result because it reports the exact generated paths and image identity.
 
 Setup requires a clean tracked checkout and creates directories exclusively. If it fails, diagnose the reported prerequisite. Do not partially reuse or overwrite an uncertain deployment.
 
@@ -270,7 +270,7 @@ Require exit code 0 and JSON containing:
 {"ledger_created": false, "runtime": "live", "status": "passed"}
 ```
 
-Also verify that `runs/$RUN_ID/events.jsonl` does not yet exist. Preflight checks the clean Git baseline and submodule, frozen contracts, full data manifest, official evaluator and FM baseline, DeepSeek access, pinned Trae installation, Docker isolation, read-only edit tools, execution environment, and output quota.
+Also verify that `runs/$RUN_ID/events.jsonl` does not yet exist. Preflight checks the clean Git baseline and submodule, frozen contracts, full data manifest, official evaluator and FM baseline, executable candidate parity on all routes, DeepSeek access, pinned Trae installation, Docker isolation, read-only edit tools, execution environment, and output quota.
 
 ### 5. Start and allow the actual loop to finish
 
@@ -308,6 +308,8 @@ sed -n '1,220p' "$REPO_ROOT/runs/$RUN_ID/reports/RESOURCES.md"
 ```
 
 Meaningful progress fields include `phase`, `last_event_id`, `experiments_proposed`, `full_evaluations_completed`, `convergence_pressure`, `best_experiment_id`, and `best_primary_score`.
+
+For a degraded or failed experiment, inspect its generated file under `experiment-graph/directions/*/experiments/`. Label-free `diagnostic_metrics` show whether scores remain rankable and personalized and how far they moved from the FM parent. `adapter_failures` and `recovery_decisions` identify the exact stage, redacted summary, evidence artifacts, provider tokens, wall time, and bounded action. Treat the ledger as authoritative; reports are replayable views.
 
 Do not infer a hang only because stdout is quiet. Check the status, active controller/Trae process, Docker container, latest ledger event, and resource telemetry before intervening. Do not interrupt a paid run unless the human asks or a verified safety boundary is at risk.
 
@@ -391,6 +393,7 @@ Use the exact immutable configurations generated for that run:
 | Run ID already has a ledger | Do not reuse it. Inspect/validate it or select a new run ID. |
 | `resume` rejects the phase | Preserve evidence; the state is ambiguous and requires operator review. |
 | Candidate fails Gate A or Gate B | Follow typed bounded recovery; never weaken a gate to admit the candidate. |
+| Trae reports malformed or truncated tool JSON | Preserve the `adapter.failed` evidence. The pinned client first requests a smaller valid call in-loop, then the controller allows one clean retry of the same frozen assignment. A second failure invalidates only that experiment; do not hand-edit its worktree or ledger. |
 | Proxy/full score regresses | Let the deterministic controller prune/reject and continue with the legal search policy. |
 | `fatal_integrity` or final `failed` | Stop, preserve evidence, identify the violated invariant, and do not call the run successful. |
 

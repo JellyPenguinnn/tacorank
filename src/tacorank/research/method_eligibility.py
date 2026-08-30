@@ -67,13 +67,8 @@ def available_capabilities(context: Any) -> frozenset[str]:
         str(item)
         for item in as_list(get_value(contract, "research_capabilities", None))
     }
-    baseline = get_value(context, "baseline", None)
     history = as_list(get_value(context, "family_history", None))
 
-    if baseline is not None and _is_clean_full_result(baseline):
-        capabilities.update(
-            {"baseline_parity", "objective_data_frame_verified", "verified_best_prediction"}
-        )
     if {"train_interactions", "user_id", "long_view"}.issubset(allowed_data):
         capabilities.update(
             {"within_user_positive_negative_pairs", "user_impression_groups"}
