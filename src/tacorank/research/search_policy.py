@@ -35,6 +35,7 @@ DEFAULT_METHOD_ORDER = {
     "features": ("temporal_drift_past_only",),
     "model": ("model_compact_ranker",),
     "ensemble": (
+        "ensemble_parallel_round_synthesis",
         "ensemble_diverse_residual_candidate",
         "ensemble_confirmed_members",
     ),
@@ -183,6 +184,7 @@ def _method_for_family(
     *,
     preferred: str | None = None,
     parent_experiment_id: str | None = None,
+    allow_repeated: bool = False,
 ) -> Any | None:
     eligible = {
         str(get_value(card, "method_id", "")): card
@@ -193,7 +195,7 @@ def _method_for_family(
         # soft-portfolio route. Generic depth-first proposals have no such
         # component contract and must not select it.
         eligible.pop("ensemble_diverse_residual_candidate", None)
-    attempted = {
+    attempted = set() if allow_repeated else {
         method_id
         for summary in as_list(get_value(context, "family_history", None))
         if parent_experiment_id is not None
@@ -859,4 +861,108 @@ class SearchPolicy:
             "NO_ELIGIBLE_METHOD",
             "No candidate method satisfies status, data, prerequisite, prohibition and family gates.",
             phase="none",
+        )
+
+    def choose_parallel_direction(
+        self, context: Any, direction_index: int, direction_count: int
+    ) -> PolicyChoice:
+        """Choose one legal, independently testable lane for a parallel round.
+
+        Lanes may share a method card, but the provider is required to produce a
+        distinct atomic hypothesis for each indexed lane.  This is deliberate:
+        the frozen method portfolio can expose fewer than seven legal cards at a
+        checkpoint, while a round still needs seven independent searches.
+        """
+
+        if direction_index < 0 or direction_index >= direction_count:
+            raise ValueError("parallel direction index is out of range")
+        graph = GraphView.from_context(context)
+        eligible = list(graph.eligible_parents())
+        allowed = _allowed_families(context)
+        if not eligible or not allowed or not method_card_map(context):
+            return self.choose(context)
+        parent = _best_parent(eligible)
+        choices: list[PolicyChoice] = []
+        for family in allowed:
+            card = _method_for_family(
+                context,
+                family,
+                parent_experiment_id=parent.experiment_id,
+                allow_repeated=True,
+            )
+            if card is None or family == "ensemble":
+                continue
+            choices.append(
+                _proposal(
+                    parent=parent,
+                    family=family,
+                    card=card,
+                    phase="parallel_round",
+                    reason_code="PARALLEL_DIRECTION_%d_OF_%d"
+                    % (direction_index + 1, direction_count),
+                    reason=(
+                        "Produce atomic direction %d of %d. It must be materially "
+                        "distinct from the other lanes while remaining within method %s."
+                        % (
+                            direction_index + 1,
+                            direction_count,
+                            get_value(card, "method_id", ""),
+                        )
+                    ),
+                )
+            )
+        if not choices:
+            return self.choose(context)
+        return choices[direction_index % len(choices)]
+
+    def choose_synthesis(
+        self, context: Any, component_experiment_ids: Sequence[str]
+    ) -> PolicyChoice:
+        """Create one agent-implemented alignment candidate from round winners."""
+
+        graph = GraphView.from_context(context)
+        eligible_by_id = {
+            node.experiment_id: node for node in graph.eligible_parents()
+        }
+        components = [
+            eligible_by_id[experiment_id]
+            for experiment_id in component_experiment_ids
+            if experiment_id in eligible_by_id
+        ]
+        if len(components) < 2:
+            return _blocked(
+                "INSUFFICIENT_PARALLEL_IMPROVEMENTS",
+                "Synthesis requires at least two independently accepted round members.",
+                phase="synthesis",
+            )
+        parent = _best_parent(components)
+        card = _method_for_family(
+            context,
+            "ensemble",
+            preferred="ensemble_parallel_round_synthesis",
+            parent_experiment_id=parent.experiment_id,
+            allow_repeated=True,
+        )
+        if card is None:
+            return _blocked(
+                "SYNTHESIS_METHOD_UNAVAILABLE",
+                "The parallel synthesis method is not legal at this checkpoint.",
+                phase="synthesis",
+            )
+        secondary = tuple(
+            node.experiment_id
+            for node in components
+            if node.experiment_id != parent.experiment_id
+        )
+        return _proposal(
+            parent=parent,
+            family="ensemble",
+            card=card,
+            phase="synthesis",
+            reason_code="PARALLEL_ROUND_SYNTHESIS",
+            reason=(
+                "Align every independently accepted round improvement on the best "
+                "member, resolve interaction conflicts, and produce one gated candidate."
+            ),
+            component_experiment_ids=secondary,
         )

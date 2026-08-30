@@ -6,7 +6,7 @@ from tacorank.research.portfolio import load_method_cards
 def test_schema_v1_method_cards_load_with_markdown_sections():
     portfolio = load_method_cards(Path(__file__).parents[2] / "research" / "methods")
 
-    assert len(portfolio.cards) == 10
+    assert len(portfolio.cards) == 11
     card = next(card for card in portfolio.cards if card.method_id == "objective_pairwise_bpr")
     assert card.schema_version == "1.0"
     assert card.family == "objective"
@@ -47,6 +47,14 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
         "solution/features.py",
         "solution/inference.py",
     )
+
+    synthesis = next(
+        card
+        for card in portfolio.cards
+        if card.method_id == "ensemble_parallel_round_synthesis"
+    )
+    assert synthesis.prerequisites == ("two_confirmed_clean_members",)
+    assert "solution/candidate.py" in synthesis.implementation_targets
 
     history = next(
         card

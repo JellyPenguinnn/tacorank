@@ -19,6 +19,8 @@ from tacorank.schemas import (
     ArtifactKind,
     CheckResult,
     CheckStatus,
+    CostEstimate,
+    CostTier,
     EventType,
     ExperimentDecision,
     ExperimentDecisionKind,
@@ -26,6 +28,7 @@ from tacorank.schemas import (
     PlannerAction,
     PlannerOutput,
     PatchCheckResult,
+    ResearchProposal,
     SubmissionCheckedPayload,
     Violation,
 )
@@ -48,6 +51,77 @@ class SequentialPlanner:
             update={"duplicate_key": "feature_cross:user_item:v%d" % number}
         )
         return output.model_copy(update={"spec": spec})
+
+
+class ParallelPlanner:
+    def __init__(self, parent_commit_sha: str) -> None:
+        self.parent_commit_sha = parent_commit_sha
+
+    async def propose_parallel_direction(self, context, index, count):
+        output = await FakeResearchPlanner(self.parent_commit_sha).propose(context)
+        spec = output.spec.model_copy(
+            update={
+                "hypothesis": "Independent parallel hypothesis %d of %d." % (index + 1, count),
+                "duplicate_key": "parallel:direction:%d" % index,
+            }
+        )
+        return output.model_copy(update={"spec": spec})
+
+    async def propose_synthesis(self, context, component_experiment_ids):
+        by_id = {
+            item.experiment_id: item
+            for item in [context.baseline, *context.family_history]
+        }
+        parent_id = component_experiment_ids[0]
+        parent = by_id[parent_id]
+        spec = ResearchProposal(
+            run_id=context.run_id,
+            experiment_id="exp_pending",
+            parent_experiment_id=parent_id,
+            parent_commit_sha=parent.commit_sha,
+            context_id=context.context_id,
+            hypothesis="Align every accepted parallel improvement without interaction drift.",
+            family="ensemble",
+            change_summary="Combine all compatible accepted round patches.",
+            expected_mechanism="Complementary changes retain independent gains.",
+            success_criteria="The synthesis exceeds its strongest member.",
+            falsification_condition="Any gate failure or no gain rejects synthesis.",
+            estimated_cost=CostEstimate(
+                llm_tokens_upper_bound=500,
+                wall_time_seconds_upper_bound=60,
+                gpu_seconds_upper_bound=0,
+                cost_tier=CostTier.MEDIUM,
+            ),
+            method_card_ids=["ensemble_parallel_round_synthesis"],
+            component_experiment_ids=list(component_experiment_ids[1:]),
+            evidence_event_ids=context.source_event_ids,
+            duplicate_key="parallel:round:synthesis",
+        )
+        return PlannerOutput(
+            action=PlannerAction.PROPOSE,
+            spec=spec,
+            reason_code="parallel_round_synthesis",
+            reason="Combine accepted lanes through the normal coding and gate path.",
+        )
+
+
+class ConcurrentCodingWorker:
+    def __init__(self, delegate) -> None:
+        self.delegate = delegate
+        self.active = 0
+        self.max_active = 0
+
+    async def create_patch(self, context, spec):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(0.02)
+            return await self.delegate.create_patch(context, spec)
+        finally:
+            self.active -= 1
+
+    async def repair_patch(self, context, decision):
+        return await self.delegate.repair_patch(context, decision)
 
 
 class NonImprovingEvaluator(FakeEvaluator):
@@ -78,6 +152,99 @@ class NonImprovingEvaluator(FakeEvaluator):
                 }
             )
         return result
+
+
+class AllImprovingEvaluator(FakeEvaluator):
+    async def decide(self, result, context):
+        decision = await super().decide(result, context)
+        if (
+            result.fidelity == Fidelity.FULL
+            and result.trust.stability.value == "confirmed"
+        ):
+            return decision.model_copy(update={"best_eligible": True})
+        return decision
+
+
+def test_parallel_round_runs_independent_lanes_and_serializes_public_queries(
+    harness, baseline_evaluation
+):
+    harness.config = harness.config.model_copy(
+        update={
+            "max_experiments": 3,
+            "parallel_directions": 3,
+            "synthesize_parallel_improvements": False,
+        }
+    )
+    harness.planner = ParallelPlanner(harness.config.baseline_commit_sha)
+    worker = ConcurrentCodingWorker(harness.coding_worker)
+    harness.coding_worker = worker
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_parallel_round())
+
+    assert state.experiments_proposed == 3
+    assert worker.max_active == 3
+    assert state.stop_reason_code == "experiment_budget"
+    proposals = [
+        event.payload.spec
+        for event in harness.events()
+        if event.event_type == EventType.EXPERIMENT_PROPOSED
+    ]
+    assert [spec.experiment_id for spec in proposals] == [
+        "exp_001",
+        "exp_002",
+        "exp_003",
+    ]
+    public_indices = [
+        event.payload.result.public_query_index
+        for event in harness.events()
+        if event.event_type == EventType.EVALUATION_COMPLETED
+        and event.payload.result.population.value == "public_validation"
+    ]
+    assert public_indices == list(range(1, len(public_indices) + 1))
+
+
+def test_parallel_round_synthesizes_all_independent_improvements(
+    harness, baseline_evaluation
+):
+    harness.config = harness.config.model_copy(
+        update={
+            "max_experiments": 4,
+            "parallel_directions": 3,
+            "synthesize_parallel_improvements": True,
+        }
+    )
+    harness.planner = ParallelPlanner(harness.config.baseline_commit_sha)
+    harness.evaluator = AllImprovingEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_parallel_round())
+
+    assert state.experiments_proposed == 4
+    synthesis = next(
+        event.payload.spec
+        for event in harness.events()
+        if event.event_type == EventType.EXPERIMENT_PROPOSED
+        and event.payload.spec.family == "ensemble"
+    )
+    assert synthesis.experiment_id == "exp_004"
+    assert synthesis.parent_experiment_id == "exp_001"
+    assert synthesis.component_experiment_ids == ["exp_002", "exp_003"]
+    coder_context = next(
+        event.payload.context
+        for event in harness.events()
+        if event.event_type == EventType.CONTEXT_CREATED
+        and event.payload.context.role == "coder"
+        and event.payload.context.experiment_id == "exp_004"
+    )
+    assert [item["experiment_id"] for item in coder_context.component_patches] == [
+        "exp_002",
+        "exp_003",
+    ]
 
 
 class BlockedPlanner:

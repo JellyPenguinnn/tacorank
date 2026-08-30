@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
+import re
 from typing import Deque, Optional, Sequence, Tuple
 
 from ..config import RunConfig, VerifiedContract
@@ -127,6 +129,9 @@ class Harness:
         self.output_gate = output_gate
         self.evaluator = evaluator
         self.final_submission_provider = final_submission_provider
+        self._parallel_round_active = False
+        self._pending_parallel_stop: Optional[StopDecision] = None
+        self._evaluation_lock = asyncio.Lock()
 
     def _key(self, experiment_id: str, stage: str, attempt: int, value: object) -> str:
         return "%s:%s:%s:%d:%s" % (
@@ -250,6 +255,10 @@ class Harness:
                 contract_sha256=self.verified_contract.contract_sha256,
                 protected_paths_sha256=self.verified_contract.protected_paths_sha256,
                 max_experiments=self.config.max_experiments,
+                parallel_directions=self.config.parallel_directions,
+                synthesize_parallel_improvements=(
+                    self.config.synthesize_parallel_improvements
+                ),
                 wall_time_limit_seconds=self.config.wall_time_limit_seconds,
                 token_limit=self.config.token_limit,
                 gpu_seconds_limit=self.config.gpu_seconds_limit,
@@ -300,6 +309,12 @@ class Harness:
         )
 
     def _stop_if_runtime_budget_exhausted(self) -> bool:
+        if self._parallel_round_active:
+            decision = runtime_budget_decision(self.state(), self.config)
+            if decision.stop:
+                self._pending_parallel_stop = decision
+                return True
+            return False
         decision = runtime_budget_decision(self.state(), self.config)
         if not decision.stop:
             return False
@@ -642,7 +657,11 @@ class Harness:
                 causation_event_id=decision_event.event_id,
             )
         if decision.reason_code == "INTEGRITY_VIOLATION":
-            self.stop(self.deterministic_stop(fatal_integrity=True))
+            fatal = self.deterministic_stop(fatal_integrity=True)
+            if self._parallel_round_active:
+                self._pending_parallel_stop = fatal
+            else:
+                self.stop(fatal)
         return decision.action, (decision, context, decision_event)
 
     async def _execute_code_repair(
@@ -796,12 +815,14 @@ class Harness:
                 )
                 return self.state()
 
-    async def _run_one_experiment(self) -> object:
+    async def _prepare_experiment(
+        self,
+    ):
         events = self.events()
         stop = stop_decision(project(events), events, self.config)
         if stop.stop:
             self.stop(stop)
-            return self.state()
+            return None
 
         planner_context = self.context_builder.build_planner(events)
         planner_context_event = self._append(
@@ -825,7 +846,7 @@ class Harness:
                     "the run was stopped with durable failure evidence.",
                 )
             )
-            return self.state()
+            return None
         if planner_output.action != PlannerAction.PROPOSE:
             self._append(
                 PlannerRecommendedPayload(output=planner_output),
@@ -848,7 +869,7 @@ class Harness:
                         "resume from the persisted planner checkpoint"
                     )
             self.stop(decision)
-            return self.state()
+            return None
 
         proposal = planner_output.spec
         assert proposal is not None
@@ -866,7 +887,15 @@ class Harness:
             resource_delta=planner_output.resource_delta,
         )
         if self._stop_if_runtime_budget_exhausted():
-            return self.state()
+            return None
+        return spec, proposal_event
+
+    async def _run_one_experiment(self, prepared=None) -> object:
+        if prepared is None:
+            prepared = await self._prepare_experiment()
+            if prepared is None:
+                return self.state()
+        spec, proposal_event = prepared
         coder_context = self.context_builder.build_coder(self.events(), spec)
         coder_context_event = self._append(
             ContextCreatedPayload(context=coder_context),
@@ -1239,32 +1268,49 @@ class Harness:
                 if fidelity == Fidelity.PROXY
                 else Population.PUBLIC_VALIDATION
             )
-            state = self.state()
             baseline = self._baseline_metrics()
             parent = self._reference_metrics(spec.parent_experiment_id, fidelity)
-            best = self._reference_metrics(state.best_experiment_id, fidelity)
-            evaluation_request = EvaluationRequest(
-                run_id=self.config.run_id,
-                experiment_id=spec.experiment_id,
-                attempt=attempt,
-                output_checked_event_id=output_event.event_id,
-                prediction_artifact=output.prediction_artifact,
-                population=population,
-                fidelity=fidelity,
-                seed=request.seed,
-                contract_sha256=self.verified_contract.contract_sha256,
-                evaluator_sha256=self.config.evaluator_sha256,
-                baseline_summary=baseline,
-                parent_summary=parent,
-                previous_best_summary=best,
-                public_query_index=(
-                    state.public_validation_queries + 1
-                    if population == Population.PUBLIC_VALIDATION
-                    else None
-                ),
-            )
             try:
-                evaluation = await self.evaluator.evaluate(evaluation_request)
+                # Protected query indices and best-reference selection are
+                # ledger-global. Serialize only this short authority boundary;
+                # coding, Gate A, and candidate execution remain concurrent.
+                async with self._evaluation_lock:
+                    state = self.state()
+                    best = self._reference_metrics(
+                        state.best_experiment_id, fidelity
+                    )
+                    evaluation_request = EvaluationRequest(
+                        run_id=self.config.run_id,
+                        experiment_id=spec.experiment_id,
+                        attempt=attempt,
+                        output_checked_event_id=output_event.event_id,
+                        prediction_artifact=output.prediction_artifact,
+                        population=population,
+                        fidelity=fidelity,
+                        seed=request.seed,
+                        contract_sha256=self.verified_contract.contract_sha256,
+                        evaluator_sha256=self.config.evaluator_sha256,
+                        baseline_summary=baseline,
+                        parent_summary=parent,
+                        previous_best_summary=best,
+                        public_query_index=(
+                            state.public_validation_queries + 1
+                            if population == Population.PUBLIC_VALIDATION
+                            else None
+                        ),
+                    )
+                    evaluation = await self.evaluator.evaluate(
+                        evaluation_request
+                    )
+                    self.config.validate_metric_set(evaluation.metric_set)
+                    evaluation_event = self._append(
+                        EvaluationCompletedPayload(result=evaluation),
+                        stage="evaluation_%s" % fidelity.value,
+                        experiment_id=spec.experiment_id,
+                        attempt=attempt,
+                        causation_event_id=output_event.event_id,
+                        resource_delta=evaluation.resource_delta,
+                    )
             except Exception as error:
                 failure_event = self._record_adapter_failure(
                     experiment_id=spec.experiment_id,
@@ -1309,15 +1355,6 @@ class Harness:
                         stage_queue.appendleft(fidelity)
                         continue
                 return self.state()
-            self.config.validate_metric_set(evaluation.metric_set)
-            evaluation_event = self._append(
-                EvaluationCompletedPayload(result=evaluation),
-                stage="evaluation_%s" % fidelity.value,
-                experiment_id=spec.experiment_id,
-                attempt=attempt,
-                causation_event_id=output_event.event_id,
-                resource_delta=evaluation.resource_delta,
-            )
             if self._stop_if_runtime_budget_exhausted():
                 return self.state()
             if evaluation.trust.verdict == TrustVerdict.NO_OP:
@@ -1454,13 +1491,297 @@ class Harness:
 
         return self.state()
 
-    async def run_until_stopped(self) -> object:
-        """Run sequential research iterations until a frozen stop rule matches.
+    def _parallel_experiment_ids(self, count: int) -> list[str]:
+        numbers = []
+        for event in self.events():
+            if event.event_type != EventType.EXPERIMENT_PROPOSED:
+                continue
+            match = re.fullmatch(
+                r"exp_(\d+)", event.payload.spec.experiment_id
+            )
+            if match:
+                numbers.append(int(match.group(1)))
+        start = max(numbers, default=0) + 1
+        return ["exp_%03d" % value for value in range(start, start + count)]
 
-        Every iteration starts from a durable planning checkpoint and consumes
-        the ledger-derived context produced by the preceding iteration.  This
-        keeps the outer loop deterministic while the planner and coding worker
-        remain replaceable adapters.
+    async def _prepare_parallel_round(self, count: int):
+        events = self.events()
+        stop = stop_decision(project(events), events, self.config)
+        if stop.stop:
+            self.stop(stop)
+            return []
+        planner_context = self.context_builder.build_planner(events)
+        context_event = self._append(
+            ContextCreatedPayload(context=planner_context),
+            stage="parallel_planner_context",
+            causation_event_id=events[-1].event_id,
+        )
+        propose = getattr(self.planner, "propose_parallel_direction", None)
+
+        async def request(index: int):
+            if propose is None:
+                return await self.planner.propose(planner_context)
+            return await propose(planner_context, index, count)
+
+        outputs = []
+        try:
+            # The DeepSeek research adapter tracks bounded repair state and
+            # token usage per call, so seal its seven outputs serially before
+            # starting the concurrent coding/execution fan-out.
+            for index in range(count):
+                outputs.append(await request(index))
+        except Exception as failure:
+            self._record_planning_failure(
+                context_id=planner_context.context_id,
+                error=failure,
+                causation_event_id=context_event.event_id,
+            )
+            self.stop(
+                StopDecision(
+                    True,
+                    "PLANNER_PROVIDER_FAILURE",
+                    "A parallel research direction failed before the round was sealed.",
+                )
+            )
+            return []
+        if any(item.action != PlannerAction.PROPOSE for item in outputs):
+            self.stop(
+                StopDecision(
+                    True,
+                    "PARALLEL_ROUND_INCOMPLETE",
+                    "The researcher did not return every required parallel direction.",
+                )
+            )
+            return []
+        duplicate_keys = [item.spec.duplicate_key for item in outputs]
+        existing_keys = {
+            event.payload.spec.duplicate_key
+            for event in events
+            if event.event_type == EventType.EXPERIMENT_PROPOSED
+        }
+        if (
+            len(duplicate_keys) != len(set(duplicate_keys))
+            or bool(existing_keys.intersection(duplicate_keys))
+        ):
+            error = ResumablePlanningError(
+                "parallel researcher returned duplicate directions"
+            )
+            self._record_planning_failure(
+                context_id=planner_context.context_id,
+                error=error,
+                causation_event_id=context_event.event_id,
+            )
+            raise error
+
+        prepared = []
+        for experiment_id, output in zip(
+            self._parallel_experiment_ids(count), outputs
+        ):
+            proposal = output.spec
+            assert proposal is not None
+            if proposal.context_id != planner_context.context_id:
+                raise ResumablePlanningError(
+                    "parallel planner proposal cites a different context"
+                )
+            proposal = proposal.model_copy(
+                update={"experiment_id": experiment_id}
+            )
+            spec = self.context_builder.bind_implementation(proposal)
+            proposal_event = self._append(
+                ExperimentProposedPayload(spec=spec),
+                stage="parallel_proposed",
+                experiment_id=spec.experiment_id,
+                causation_event_id=context_event.event_id,
+                resource_delta=output.resource_delta,
+            )
+            prepared.append((spec, proposal_event))
+        return prepared
+
+    async def _run_parallel_lane(self, prepared) -> object:
+        spec, _ = prepared
+        try:
+            return await self._run_one_experiment(prepared)
+        except Exception as error:
+            if isinstance(
+                error,
+                (LedgerError, TransitionError, OrchestrationError, AssertionError),
+            ):
+                raise
+            state = self.state()
+            node = state.experiments[spec.experiment_id]
+            stage = self._adapter_failure_stage(spec.experiment_id)
+            cause = next(
+                event
+                for event in reversed(self.events())
+                if self._event_experiment_id(event) == spec.experiment_id
+            )
+            failure_event = self._record_adapter_failure(
+                experiment_id=spec.experiment_id,
+                attempt=max(1, node.attempt_count),
+                stage=stage,
+                error=error,
+                causation_event_id=cause.event_id,
+            )
+            action, _ = await self._recover(
+                failure_event,
+                failure_event.payload.result,
+                spec.experiment_id,
+            )
+            if self._pending_parallel_stop is None:
+                self._pending_parallel_stop = StopDecision(
+                    True,
+                    "ADAPTER_FAILURE_%s" % action.value.upper(),
+                    "A parallel %s adapter failed; recovery recorded %s and the round stopped safely."
+                    % (stage, action.value),
+                )
+            return self.state()
+
+    @staticmethod
+    def _event_experiment_id(event: Event) -> Optional[str]:
+        payload = event.payload
+        for name in ("spec", "candidate", "result", "request", "decision"):
+            value = getattr(payload, name, None)
+            experiment_id = getattr(value, "experiment_id", None)
+            if experiment_id is not None:
+                return experiment_id
+        context = getattr(payload, "context", None)
+        return getattr(context, "experiment_id", None)
+
+    async def run_parallel_round(self) -> object:
+        state = self.state()
+        round_start_best = state.best_primary_score
+        count = min(
+            self.config.parallel_directions,
+            state.remaining_experiments,
+        )
+        if count <= 0:
+            decision = stop_decision(state, self.events(), self.config)
+            if decision.stop:
+                self.stop(decision)
+            return self.state()
+        prepared = await self._prepare_parallel_round(count)
+        if not prepared:
+            return self.state()
+        self._parallel_round_active = True
+        self._pending_parallel_stop = None
+        try:
+            results = await asyncio.gather(
+                *(self._run_parallel_lane(item) for item in prepared),
+                return_exceptions=True,
+            )
+        finally:
+            self._parallel_round_active = False
+        failures = [item for item in results if isinstance(item, Exception)]
+        if failures:
+            self.stop(
+                StopDecision(
+                    True,
+                    "RECOVERY_CONTROL_PLANE_FAILURE",
+                    "A parallel lane violated a controller invariant; the round stopped fail-closed.",
+                )
+            )
+            return self.state()
+        if self._pending_parallel_stop is not None:
+            self.stop(self._pending_parallel_stop)
+            self._pending_parallel_stop = None
+            return self.state()
+        if self.config.synthesize_parallel_improvements:
+            improvements = self._round_improvements(
+                [spec.experiment_id for spec, _ in prepared],
+                round_start_best,
+            )
+            if len(improvements) >= 2 and self.state().remaining_experiments > 0:
+                await self._run_round_synthesis(improvements)
+        decision = stop_decision(self.state(), self.events(), self.config)
+        if decision.stop:
+            self.stop(decision)
+        return self.state()
+
+    def _round_improvements(
+        self,
+        experiment_ids: Sequence[str],
+        incumbent_score: Optional[float],
+    ) -> list[str]:
+        state = self.state()
+        threshold = float("-inf") if incumbent_score is None else incumbent_score
+        improved = []
+        for experiment_id in experiment_ids:
+            node = state.experiments[experiment_id]
+            if (
+                node.status.value == "accepted"
+                and node.metric_set is not None
+                and node.metric_set.primary_score > threshold
+                and node.best_eligible
+            ):
+                improved.append(experiment_id)
+        return improved
+
+    async def _run_round_synthesis(
+        self, component_experiment_ids: Sequence[str]
+    ) -> object:
+        events = self.events()
+        planner_context = self.context_builder.build_planner(events)
+        context_event = self._append(
+            ContextCreatedPayload(context=planner_context),
+            stage="synthesis_planner_context",
+            causation_event_id=events[-1].event_id,
+        )
+        propose = getattr(self.planner, "propose_synthesis", None)
+        if propose is None:
+            raise OrchestrationError(
+                "parallel synthesis requires a synthesis-capable research planner"
+            )
+        try:
+            output = await propose(
+                planner_context, list(component_experiment_ids)
+            )
+        except Exception as error:
+            self._record_planning_failure(
+                context_id=planner_context.context_id,
+                error=error,
+                causation_event_id=context_event.event_id,
+            )
+            self.stop(
+                StopDecision(
+                    True,
+                    "PLANNER_PROVIDER_FAILURE",
+                    "The synthesis researcher failed before proposing an aligned candidate.",
+                )
+            )
+            return self.state()
+        if output.action != PlannerAction.PROPOSE or output.spec is None:
+            raise ResumablePlanningError(
+                "research planner could not produce the required round synthesis"
+            )
+        proposal = output.spec
+        if proposal.context_id != planner_context.context_id:
+            raise ResumablePlanningError(
+                "synthesis proposal cites a different planner context"
+            )
+        proposal = proposal.model_copy(
+            update={"experiment_id": self._parallel_experiment_ids(1)[0]}
+        )
+        spec = self.context_builder.bind_implementation(proposal)
+        proposal_event = self._append(
+            ExperimentProposedPayload(spec=spec),
+            stage="synthesis_proposed",
+            experiment_id=spec.experiment_id,
+            causation_event_id=context_event.event_id,
+            resource_delta=output.resource_delta,
+        )
+        try:
+            return await self._run_one_experiment((spec, proposal_event))
+        except ResumablePlanningError:
+            raise
+        except Exception as error:
+            return await self._handle_unexpected_adapter_failure(error)
+
+    async def run_until_stopped(self) -> object:
+        """Run configured research rounds until a frozen stop rule matches.
+
+        A parallel round seals every direction against one planner snapshot,
+        executes independent lanes, and optionally evaluates a fresh synthesis
+        candidate before exposing the resulting ledger to the next round.
         """
 
         if not self.events():
@@ -1475,7 +1796,11 @@ class Harness:
                     "current phase is %s" % state.phase
                 )
             previous_head = state.last_event_id
-            state = await self.run_one_experiment()
+            state = (
+                await self.run_parallel_round()
+                if self.config.parallel_directions > 1
+                else await self.run_one_experiment()
+            )
             if state.status.value == "stopped":
                 return state
             if state.last_event_id == previous_head:

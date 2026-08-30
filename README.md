@@ -48,7 +48,7 @@ After completing [installation](#installation) and [deployment setup](#configura
   --live-config .tacorank/deployment/live-adapters.json
 ```
 
-This is the canonical end-to-end entry point. It runs one experiment at a time, rebuilds each planner context from durable memory, stops on a frozen convergence or resource rule, and finalizes the selected test submission automatically.
+This is the canonical end-to-end entry point. Production deployments seal seven distinct research directions from one ledger snapshot, run Trae and candidate execution in independent worktrees concurrently, evaluate each lane with serialized protected-query authority, and synthesize all independently accepted improvements into one newly gated candidate. The next round starts from durable post-synthesis memory. Frozen convergence and resource rules still own stopping and final selection.
 
 ## Agent-assisted operation
 

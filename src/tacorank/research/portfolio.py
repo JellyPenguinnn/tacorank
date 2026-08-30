@@ -186,6 +186,38 @@ def default_portfolio() -> ExperimentPortfolio:
                 ),
             ),
             MethodCard(
+                method_id="ensemble_parallel_round_synthesis",
+                family="ensemble",
+                summary="Align all independently accepted parallel-round members.",
+                tags=("ensemble", "parallel_round", "alignment", "composition"),
+                cost_tier="medium",
+                mechanism=(
+                    "Preserve compatible improvements on the strongest accepted "
+                    "member and resolve overlapping score-path changes explicitly."
+                ),
+                prerequisites=("two_confirmed_clean_members",),
+                allowed_data=(
+                    "train_interactions",
+                    "user_id",
+                    "video_id",
+                    "author_id",
+                    "tab",
+                    "date",
+                    "duration_ms",
+                    "long_view",
+                    "verified_predictions",
+                ),
+                expected_effect="Retain complementary gains in one reproducible candidate.",
+                falsifier="The aligned candidate fails a gate or does not improve the best member.",
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/model.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
+            ),
+            MethodCard(
                 method_id="ensemble_diverse_residual_candidate",
                 family="ensemble",
                 summary=(

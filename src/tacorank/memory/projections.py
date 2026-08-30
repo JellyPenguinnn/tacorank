@@ -49,6 +49,10 @@ def project(events: Iterable[Event]) -> RunState:
             state.phase = "contract_verification"
             state.started_at = event.timestamp
             state.max_experiments = payload.max_experiments
+            state.parallel_directions = payload.parallel_directions
+            state.synthesize_parallel_improvements = (
+                payload.synthesize_parallel_improvements
+            )
             state.wall_time_limit_seconds = payload.wall_time_limit_seconds
             state.token_limit = payload.token_limit
             state.gpu_seconds_limit = payload.gpu_seconds_limit

@@ -18,6 +18,56 @@ def test_policy_starts_score_guided_depth_first_from_baseline(planner_context):
     assert choice.method_card_id == "objective_pairwise_bpr"
 
 
+def test_parallel_direction_is_indexed_and_legal(planner_context):
+    choice = SearchPolicy().choose_parallel_direction(planner_context, 0, 7)
+
+    assert choice.action == "propose"
+    assert choice.phase == "parallel_round"
+    assert choice.reason_code == "PARALLEL_DIRECTION_1_OF_7"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.method_card_id == "objective_pairwise_bpr"
+
+
+def test_synthesis_uses_strongest_confirmed_member_and_all_others(
+    planner_context,
+):
+    first = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="objective",
+        score=0.61,
+        parent_eligible=True,
+    )
+    second = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0000",
+        commit_sha="c" * 40,
+        family="model",
+        score=0.60,
+        parent_eligible=True,
+    )
+    context = SimpleNamespace(
+        contract_summary=planner_context.contract_summary,
+        baseline=planner_context.baseline,
+        current_best=first,
+        eligible_frontier=[planner_context.baseline, first, second],
+        family_history=[first, second],
+        method_cards=planner_context.method_cards,
+        playbook=planner_context.playbook,
+    )
+
+    choice = SearchPolicy().choose_synthesis(
+        context, ["exp_0001", "exp_0002"]
+    )
+
+    assert choice.action == "propose"
+    assert choice.phase == "synthesis"
+    assert choice.parent.experiment_id == "exp_0001"
+    assert choice.method_card_id == "ensemble_parallel_round_synthesis"
+    assert choice.component_experiment_ids == ("exp_0002",)
+
+
 def test_clean_evaluator_baseline_does_not_imply_executable_parent_parity(
     planner_context,
 ):

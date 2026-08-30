@@ -1540,6 +1540,7 @@ class CoderContext(ContextDocument):
     active_lessons: List[Dict[str, Any]] = Field(default_factory=list)
     coding_invariants: List[NonEmptyStr] = Field(default_factory=list)
     prior_result_summaries: List[CoderPriorResultSummary] = Field(default_factory=list)
+    component_patches: List[Dict[str, Any]] = Field(default_factory=list)
     step_limit: int = Field(gt=0)
     token_limit: Optional[int] = Field(gt=0)
     wall_time_limit_seconds: int = Field(gt=0)
@@ -1640,6 +1641,8 @@ class RunStartedPayload(StrictModel):
     contract_sha256: str
     protected_paths_sha256: str
     max_experiments: int = Field(gt=0)
+    parallel_directions: int = Field(default=1, gt=0, le=7)
+    synthesize_parallel_improvements: bool = True
     wall_time_limit_seconds: int = Field(gt=0)
     token_limit: Optional[int] = Field(default=None, gt=0)
     gpu_seconds_limit: Optional[int] = Field(default=None, gt=0)

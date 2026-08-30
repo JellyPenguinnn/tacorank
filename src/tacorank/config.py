@@ -105,6 +105,8 @@ class RunConfig(StrictModel):
     evaluator_sha256: str
     baseline_commit_sha: NonEmptyStr
     max_experiments: int = Field(default=50, gt=0)
+    parallel_directions: int = Field(default=1, gt=0, le=7)
+    synthesize_parallel_improvements: bool = True
     wall_time_limit_seconds: int = Field(default=21_600, gt=0)
     token_limit: Optional[int] = Field(default=None, gt=0)
     gpu_seconds_limit: Optional[int] = Field(default=None, gt=0)
@@ -118,6 +120,7 @@ class RunConfig(StrictModel):
     max_confirmation_attempts: int = Field(default=2, ge=0)
     seed_schedule: List[int]
     context_token_limit: int = Field(default=6_000, gt=0)
+    synthesis_context_token_limit: int = Field(default=16_000, gt=0)
     adapter_mode: Literal["live"] = "live"
     live_adapter_config_sha256: Optional[str] = None
     editable_roots: List[str] = Field(default_factory=lambda: ["solution"])

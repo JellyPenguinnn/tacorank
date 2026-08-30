@@ -87,6 +87,8 @@ class RunState:
     convergence_epsilon: float = 0.002
     convergence_patience: int = 3
     max_experiments: int = 0
+    parallel_directions: int = 1
+    synthesize_parallel_improvements: bool = True
     wall_time_limit_seconds: int = 0
     token_limit: Optional[int] = None
     gpu_seconds_limit: Optional[int] = None

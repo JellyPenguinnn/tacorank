@@ -1082,6 +1082,8 @@ class ContextBuilder:
         effective_max_tokens = (
             max_tokens if max_tokens is not None else self.config.context_token_limit
         )
+        if spec.component_experiment_ids and max_tokens is None:
+            effective_max_tokens = self.config.synthesis_context_token_limit
         selected_method_cards: List[Dict[str, object]] = []
         wanted = set(spec.method_card_ids)
         for path in sorted((self.config.repository_root / "research/methods").glob("*.md")):
@@ -1105,6 +1107,58 @@ class ContextBuilder:
                 % ", ".join(missing_method_ids)
             )
         prior_result_summaries = self._coder_prior_result_summaries(visible, spec)
+        component_patches = []
+        component_bytes = 0
+        for component_id in spec.component_experiment_ids:
+            patch_event = next(
+                (
+                    event
+                    for event in reversed(visible)
+                    if event.event_type == EventType.PATCH_CREATED
+                    and event.payload.candidate.experiment_id == component_id
+                ),
+                None,
+            )
+            if patch_event is None:
+                raise ContextBuildError(
+                    "synthesis component patch is unavailable: %s" % component_id
+                )
+            candidate = patch_event.payload.candidate
+            gate_event = next(
+                (
+                    event
+                    for event in reversed(visible)
+                    if event.event_type == EventType.PATCH_CHECKED
+                    and event.payload.result.experiment_id == component_id
+                    and event.payload.result.patch_commit_sha
+                    == candidate.patch_commit_sha
+                    and event.payload.result.accepted
+                ),
+                None,
+            )
+            if gate_event is None:
+                raise ContextBuildError(
+                    "synthesis component has no matching accepted Gate A receipt: %s"
+                    % component_id
+                )
+            self.artifact_store.verify(candidate.diff_artifact)
+            path = self.config.repository_root / candidate.diff_artifact.path
+            raw_diff = path.read_bytes()
+            component_bytes += len(raw_diff)
+            if component_bytes > 320_000:
+                raise ContextBuildError(
+                    "synthesis component patches exceed the bounded prompt budget"
+                )
+            component_patches.append(
+                {
+                    "experiment_id": component_id,
+                    "patch_commit_sha": candidate.patch_commit_sha,
+                    "gate_a_receipt_id": gate_event.payload.result.receipt_id,
+                    "diff_sha256": candidate.diff_sha256,
+                    "changed_files": list(candidate.changed_files),
+                    "diff": raw_diff.decode("utf-8", errors="strict"),
+                }
+            )
         target_interfaces = {
             target: self.config.target_interface_excerpts[target]
             for target in spec.target_files
@@ -1226,6 +1280,7 @@ class ContextBuilder:
                 ],
                 "coding_invariants": list(CODER_SCORE_INVARIANTS),
                 "prior_result_summaries": prior_result_summaries,
+                "component_patches": component_patches,
                 "step_limit": self.config.coding_step_limit,
                 "token_limit": self.config.coding_token_limit,
                 "wall_time_limit_seconds": (
