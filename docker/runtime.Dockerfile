@@ -45,7 +45,14 @@ WORKDIR /opt/tacorank
 COPY pyproject.toml setup.cfg setup.py requirements.txt ./
 COPY src ./src
 COPY benchmarks ./benchmarks
-RUN python -m pip install --no-cache-dir .
+# requirements.txt was copied in but never installed, so the candidate
+# container held only setup.cfg's install_requires (pydantic, PyYAML). Every
+# candidate therefore had to train in pure Python, and a patch that reached
+# for numpy failed Gate A's isolated import with ModuleNotFoundError. Install
+# the declared requirements so the numeric stack the starter kit assumes is
+# actually present; the built image id stays pinned per deployment.
+RUN python -m pip install --no-cache-dir --requirement requirements.txt \
+    && python -m pip install --no-cache-dir .
 COPY --from=trae-tools \
     /usr/local/lib/python3.12/site-packages/trae_agent/dist \
     /opt/tacorank-trae-tools
