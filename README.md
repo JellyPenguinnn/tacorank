@@ -1,13 +1,16 @@
+[简体中文](README.zh-CN.md) | **English**
+
 # TacoRank
 
 TacoRank is a deterministic, evidence-tracked harness for autonomous recommender-system research on KuaiRand-Pure. It connects research planning, Trae-based code generation, guarded CPU execution, failure recovery, protected evaluation, durable memory, convergence, and final submission checking in one reproducible workflow.
 
-> **Status:** The complete CPU workflow is implemented and has passed a bounded live acceptance run with DeepSeek, Trae, Docker, and the official KuaiRand-Pure data. See [Validation status](#validation-status) for the exact boundary of that evidence and [Current limitations](#current-limitations) before running it.
+> **Status:** The complete CPU workflow is implemented. The deterministic suite passes, a bounded production run completed through official submission checking, and a separate live regression run continued correctly into a second research iteration. See [Validation status](#validation-status) for the exact evidence boundary and [Current limitations](#current-limitations) before running it.
 
 ## Contents
 
 - [Features](#features)
 - [Quick start](#quick-start)
+- [Agent-assisted operation](#agent-assisted-operation)
 - [Architecture](#architecture)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -46,6 +49,16 @@ After completing [installation](#installation) and [deployment setup](#configura
 ```
 
 This is the canonical end-to-end entry point. It runs one experiment at a time, rebuilds each planner context from durable memory, stops on a frozen convergence or resource rule, and finalizes the selected test submission automatically.
+
+## Agent-assisted operation
+
+[`AGENTS.md`](AGENTS.md) is the operational runbook for coding agents. It explains the system authorities and safety boundaries, development and Trae-only validation, complete live setup, monitoring, recovery, finalization, ledger validation, output inspection, and the evidence an agent must report.
+
+You can give a repository-aware coding agent this instruction:
+
+> Read `AGENTS.md` completely, inspect the current repository state, and help me set up and run the TacoRank workflow. Follow the documented credential and data boundaries, validate each stage with direct evidence, and do not claim completion until the requested completion contract is met.
+
+The guide separates three evidence levels: deterministic development tests, real Trae-only coding validation, and a complete live autonomous ML run. Tell the agent which level you want before it starts provider calls, downloads, Docker builds, or long CPU execution.
 
 ## Architecture
 
@@ -102,7 +115,7 @@ python3 -m venv .venv
 .venv/bin/tacorank --help
 ```
 
-If the repository was cloned without submodules, initialize them with:
+Both the superproject and starter-kit submodule require repository access. Use authenticated HTTPS or your approved SSH configuration; never place a token in a remote URL. If the repository was cloned without submodules, initialize them with:
 
 ```bash
 git submodule update --init --recursive
@@ -126,7 +139,7 @@ Setup must run from a clean tracked checkout so the Git baseline, protected mani
      --download-data
    ```
 
-   If the official data already exists, omit `--download-data` and pass `--data-dir /absolute/path/to/data`. If Python 3.12 or Docker is not on `PATH`, pass their canonical executables with `--python312` and `--docker`.
+   If the official data already exists, omit `--download-data` and pass an absolute, non-symlinked path inside this checkout, such as `--data-dir /absolute/path/to/tacorank/KuaiRand-Pure/data`. If Python 3.12 or Docker is not on `PATH`, pass their canonical executables with `--python312` and `--docker`.
 
 3. Run the non-mutating production preflight.
 
@@ -259,7 +272,7 @@ Only Person 2's controller appends events. Other components own their domain log
 Run the complete deterministic suite before integration:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/tacorank-pycache \
+PYTHONPATH=src:. PYTHONPYCACHEPREFIX=/tmp/tacorank-pycache \
   .venv/bin/python -m pytest -q
 ```
 
@@ -267,19 +280,19 @@ Useful component-level checks:
 
 ```bash
 # Research, schemas, memory, contexts, and orchestration
-.venv/bin/python -m pytest \
+PYTHONPATH=src:. .venv/bin/python -m pytest \
   tests/research tests/schemas tests/memory tests/context tests/orchestrator
 
 # Coding, Git, gates, execution, and failure injection
-.venv/bin/python -m pytest \
+PYTHONPATH=src:. .venv/bin/python -m pytest \
   tests/coding tests/git tests/safety tests/execution tests/failure_injection
 
 # Health and recovery
-.venv/bin/python -m pytest \
+PYTHONPATH=src:. .venv/bin/python -m pytest \
   tests/sre tests/recovery tests/integration/test_recovery_lifecycle.py
 
 # Evaluation, reflection, and reporting
-.venv/bin/python -m pytest \
+PYTHONPATH=src:. .venv/bin/python -m pytest \
   tests/evaluation tests/reflection tests/reporting
 ```
 
@@ -289,13 +302,14 @@ Deterministic tests do not substitute for a live provider, Docker, data, or elap
 
 As of 2026-08-30:
 
-- The complete automated suite passed: 469 tests.
+- The complete automated suite passed: 470 tests at source commit `bdeed2f`.
 - A bounded live CPU run used the production DeepSeek researcher, pinned Trae worker, hardened Docker runner, and official KuaiRand-Pure data.
 - Trae produced a pairwise BPR candidate that changed only `solution/candidate.py`; all 14 Gate A checks and all 11 Gate B checks passed for both smoke and proxy execution.
 - Protected proxy evaluation scored GAUC `0.62112551`, nDCG@5 `0.51277198`, and primary `0.56694875`, so the controller correctly pruned the candidate.
 - The one-experiment budget selected the still-best official FM baseline and produced a manifest-attested 170,588-row test submission accepted by both TacoRank and the official checker. The 20-event ledger replayed successfully.
+- A separate live iterative regression run completed its first real coding, Gate A, CPU smoke/proxy, Gate B, protected evaluation, and prune cycle, then durably created and proposed `exp_002` and entered its new Trae coding context. It was intentionally stopped during that second coding pass after the continuation behavior was observed.
 
-This proves a real integrated baseline path, not live convergence or a winning candidate. The bounded run could not exercise three non-improving full iterations, and the candidate-best clean-reproduction path was not entered because the candidate failed proxy. Deterministic integration tests cover those control paths. Full evidence and scope are recorded in [`docs/person3-handoff.md`](docs/person3-handoff.md).
+This proves a real integrated baseline path and live cross-iteration continuation, not elapsed live convergence or a winning candidate. The bounded acceptance could not exercise three non-improving full iterations, and the candidate-best clean-reproduction path was not entered because the candidate failed proxy. Deterministic integration tests cover those control paths. Full evidence and scope are recorded in [`docs/person3-handoff.md`](docs/person3-handoff.md).
 
 ## Safety and reproducibility
 
@@ -336,7 +350,7 @@ Read [`AGENTS.md`](AGENTS.md) before making changes. In particular:
 - Candidate execution is CPU-only; GPU commands fail closed until a hard per-container GPU-memory limit is available.
 - Automatic resume is supported only at durable planning checkpoints. A crash during a provider, coding, execution, or protected-evaluation call requires operator review at the last unambiguous boundary.
 - Live success depends on the current machine, credential, provider, Docker daemon, network, and official data. Passing deterministic tests alone does not prove those external dependencies are available.
-- The latest live acceptance was intentionally bounded to one experiment and therefore is not evidence of elapsed three-iteration convergence.
+- The finalized live acceptance was intentionally bounded to one experiment. A later live run proved transition into a second iteration but was intentionally stopped there; neither is evidence of elapsed three-iteration convergence.
 
 ## Documentation
 
