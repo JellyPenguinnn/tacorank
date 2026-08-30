@@ -1474,6 +1474,13 @@ class PlannerExperimentSummary(StrictModel):
     output_checks: Dict[str, CheckStatus] = Field(default_factory=dict)
     output_violations: List[Violation] = Field(default_factory=list)
     primary_score: Optional[float] = None
+    # ``primary_score`` is retained for compatibility with older projections;
+    # this field makes the score used for learning explicit.  Confirmed
+    # evaluations use the verified seed mean, while single-seed records remain
+    # clearly identifiable to the ranker.
+    stable_primary_score: Optional[float] = None
+    seed_stderr: Optional[float] = Field(default=None, ge=0.0)
+    seed_count: int = Field(default=1, ge=1)
     metric_set: Optional[MetricSet] = None
     metric_deltas: Dict[str, float] = Field(default_factory=dict)
     baseline_delta: Optional[float] = None
@@ -1494,6 +1501,32 @@ class PlannerExperimentSummary(StrictModel):
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+
+
+class PlannerHistoricalSummary(StrictModel):
+    """A compact, compatibility-checked observation from an earlier run.
+
+    Historical observations are read-only planner evidence.  They never carry
+    implementation lineage and are admitted only after their source ledger,
+    contract, evaluator, baseline, and public output checks agree.
+    """
+
+    source_run_id: NonEmptyStr
+    experiment_id: NonEmptyStr
+    parent_experiment_id: Optional[str] = None
+    family: Optional[str] = None
+    method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
+    stable_primary_score: Optional[float] = None
+    parent_stable_primary_score: Optional[float] = None
+    reward: Optional[float] = None
+    risk_adjusted_reward: Optional[float] = None
+    seed_count: int = Field(default=1, ge=1)
+    seed_stderr: Optional[float] = Field(default=None, ge=0.0)
+    stability: Optional[Stability] = None
+    trust_verdict: Optional[TrustVerdict] = None
+    integrity: Optional[Integrity] = None
+    trust_flags: List[NonEmptyStr] = Field(default_factory=list)
+    diagnostic_metrics: Dict[NonEmptyStr, float] = Field(default_factory=dict)
 
 
 class PlannerLessonSummary(StrictModel):
@@ -1547,6 +1580,9 @@ class PlannerContext(ContextDocument):
     # Short-term iteration memory contains every visible experiment outcome,
     # including proxy failures, no-ops, and inconclusive results.
     family_history: List[PlannerExperimentSummary] = Field(default_factory=list)
+    # Cross-run evidence is bounded and compatibility-filtered.  It informs
+    # exploration but is never treated as a current-run event citation.
+    historical_feedback: List[PlannerHistoricalSummary] = Field(default_factory=list)
     # Long-term memory contains only active controller-recorded lessons.
     active_lessons: List[PlannerLessonSummary] = Field(default_factory=list)
     method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
