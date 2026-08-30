@@ -59,6 +59,24 @@ def test_validator_accepts_contract_compatible_plan(planner_context):
     assert result.errors == ()
 
 
+def test_validator_treats_training_parameters_as_optional_guidance(planner_context):
+    suggested = make_spec(
+        planner_context,
+        training_parameters={
+            "rank_candidates": [8, 16],
+            "learning_rate_candidates": [0.001, 0.01],
+            "epochs_candidates": [2, 4],
+        },
+    )
+    suggested_result = PlanValidator().validate(suggested, planner_context)
+    omitted_result = PlanValidator().validate(
+        make_spec(planner_context, training_parameters=None), planner_context
+    )
+
+    assert suggested_result.accepted, suggested_result.errors
+    assert omitted_result.accepted, omitted_result.errors
+
+
 def test_validator_allows_policy_authorized_soft_refinement(planner_context):
     from tacorank.research.search_policy import SearchPolicy
 

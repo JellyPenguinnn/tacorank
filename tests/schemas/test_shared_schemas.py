@@ -54,6 +54,19 @@ def test_unknown_fields_are_rejected():
         valid_spec(unknown="not allowed")
 
 
+def test_training_parameter_guidance_is_optional_and_open_ended():
+    assert valid_spec().training_parameters is None
+    spec = valid_spec(
+        training_parameters={
+            "rank_candidates": [8, 16],
+            "learning_rate_candidates": [0.001, 0.01],
+            "rationale": "Test a modest capacity increase.",
+        }
+    )
+
+    assert spec.training_parameters["rank_candidates"] == [8, 16]
+
+
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
 def test_non_finite_metrics_are_rejected(value):
     with pytest.raises(ValidationError):

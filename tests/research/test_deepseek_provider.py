@@ -245,6 +245,9 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     system_prompt = " ".join(payload["messages"][0]["content"].split())
     assert "bounded additive residual" in system_prompt
     assert "do not propose clipping" in system_prompt
+    assert "optional guidance" in system_prompt
+    assert "may use, adapt, or omit" in system_prompt
+    assert "must implement the supplied training_parameters exactly" not in system_prompt
     assert "secret-key" not in json.dumps(payload)
     assert timeout == 120
     assert provider.resource_delta.llm_input_tokens == 101

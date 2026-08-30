@@ -50,10 +50,12 @@ event IDs present in the supplied context.
 You are intentionally code-blind. Do not name or infer repository paths, source files,
 modules, classes, functions, entrypoints, commands, patches, implementation interfaces,
 or pipeline stages. Do not prescribe how the coding worker should edit the system.
-You may choose the bounded algorithm and training values in training_parameters, but
-do not prescribe code edits. Describe what research intervention to test and why; the
-deterministic controller owns implementation targeting and execution sequencing, and
-the coding worker must implement the supplied training_parameters exactly.
+If useful, include training_parameters as optional guidance naming parameters, candidate
+values, ranges, or rationale worth testing. Do not prescribe code edits or require any
+suggested value to be used. The coding worker may use, adapt, or omit those suggestions
+after checking the approved hypothesis, method cards, target interfaces, and frozen
+contract; the deterministic controller owns implementation targeting and execution
+sequencing.
 
 Treat diagnostic_metrics as label-free experimental feedback: use them to reason about
 collapsed residuals, missing personalization, or excessive divergence from the
@@ -103,32 +105,26 @@ Required JSON fields:
     "gpu_seconds_upper_bound": 0,
     "cost_tier": "low|medium|high"
   },
-  "training_parameters": {
-    "rank": 0,
-    "learning_rate": 0.0,
-    "regularization": 0.0,
-    "epochs": 0,
-    "pair_sampling": {
-      "strategy": "with_replacement|without_replacement",
-      "max_pairs_per_user": 0,
-      "max_pairs_total": null
-    },
-    "residual_cap": {
-      "scale": "absolute|parent_std|parent_iqr",
-      "value": 0.0
-    },
-    "residual_centering": true
-  },
   "method_card_ids": ["known_method_id"],
   "evidence_event_ids": ["evt_000001"],
   "literature_evidence_ids": ["lit_exact_supplied_id"]
 }
+
+Optional parameter guidance may use a compact object such as:
+{
+  "rank_candidates": [8, 16],
+  "learning_rate_candidates": [0.001, 0.01],
+  "epochs_candidates": [2, 4],
+  "rationale": "Test whether a modest capacity increase improves within-user ordering."
+}
 """
 
 COMPACT_RETRY_INSTRUCTION = """The previous completion was unusable or reached its
-output-token limit. Return the same required JSON object compactly. Do not include
-analysis, commentary, Markdown, optional fields, or more than two short sentences
-in any string field.
+output-token limit. Return the same required JSON object compactly. Omit optional fields
+unless they improve the proposal; if training_parameters is included, use it only for
+parameter suggestions and candidate values, never placeholder zeros or exact coding
+instructions. Do not include analysis, commentary, Markdown, or more than two short
+sentences in any string field.
 """
 
 

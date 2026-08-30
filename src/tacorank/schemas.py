@@ -564,7 +564,7 @@ class ResidualCapParameters(StrictModel):
 
 
 class TrainingParameters(StrictModel):
-    """Structured training choices carried from the planner to the coder."""
+    """Legacy structured training choices retained for compatibility."""
 
     rank: int = Field(gt=0, le=512)
     learning_rate: float = Field(gt=0, le=1.0)
@@ -573,6 +573,12 @@ class TrainingParameters(StrictModel):
     pair_sampling: PairSamplingParameters
     residual_cap: ResidualCapParameters
     residual_centering: bool
+
+
+# Planner parameter guidance is intentionally open-ended.  The planner may suggest
+# scalar values, candidate lists, ranges, or rationale without making any of those
+# suggestions an executable contract for the coding worker.
+TrainingParameterSuggestions = Dict[str, Any]
 
 
 class ResearchProposal(StrictModel):
@@ -596,7 +602,7 @@ class ResearchProposal(StrictModel):
     success_criteria: NonEmptyStr
     falsification_condition: NonEmptyStr
     estimated_cost: CostEstimate
-    training_parameters: Optional[TrainingParameters] = None
+    training_parameters: Optional[TrainingParameterSuggestions] = None
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
     # Ensemble proposals retain one canonical Git parent and identify any
     # additional clean component experiments explicitly.  Non-ensemble plans
@@ -1480,7 +1486,7 @@ class PlannerExperimentSummary(StrictModel):
     diagnostic_metrics: Dict[NonEmptyStr, float] = Field(default_factory=dict)
     child_count: int = Field(default=0, ge=0)
     actual_cost: Optional[CostTier] = None
-    training_parameters: Optional[TrainingParameters] = None
+    training_parameters: Optional[TrainingParameterSuggestions] = None
     parent_eligible: bool = False
     best_eligible: bool = False
     status: NonEmptyStr
