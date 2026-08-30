@@ -10,13 +10,19 @@ from tacorank.orchestrator.fakes import (
     FakeExecutionRunner,
     FakeResearchPlanner,
 )
-from tacorank.orchestrator.router import ResumablePlanningError
+from tacorank.orchestrator.router import OrchestrationError, ResumablePlanningError
+from tacorank.orchestrator.finalize import FinalizationError
+from tacorank.orchestrator.state import ExperimentStatus
+from tacorank.providers.research_provider import ProviderError
 from tacorank.recovery import RecoveryManager
 from tacorank.schemas import (
     ArtifactKind,
     CheckResult,
     CheckStatus,
     EventType,
+    ExperimentDecision,
+    ExperimentDecisionKind,
+    Fidelity,
     PlannerAction,
     PlannerOutput,
     PatchCheckResult,
@@ -92,6 +98,37 @@ class InvalidProviderPlanner:
             reason="Provider output failed bounded plan validation.",
             supporting_event_ids=context.source_event_ids,
         )
+
+
+class PruneThenProviderFailurePlanner:
+    def __init__(self, parent_commit_sha: str) -> None:
+        self.parent_commit_sha = parent_commit_sha
+        self.calls = 0
+
+    async def propose(self, context):
+        self.calls += 1
+        if self.calls == 2:
+            raise ProviderError(
+                "DeepSeek request timed out after 120 seconds; "
+                "Authorization: Bearer abcdefghijklmnop"
+            )
+        return await FakeResearchPlanner(self.parent_commit_sha).propose(context)
+
+
+class ProxyPruningEvaluator(FakeEvaluator):
+    async def decide(self, result, context):
+        if result.fidelity == Fidelity.PROXY:
+            return ExperimentDecision(
+                run_id=result.run_id,
+                experiment_id=result.experiment_id,
+                evaluation_event_id="evt_pending",
+                decision=ExperimentDecisionKind.PRUNE,
+                reason_code="negative_proxy",
+                fidelity_completed=Fidelity.PROXY,
+                parent_eligible=False,
+                best_eligible=False,
+            )
+        return await super().decide(result, context)
 
 
 class IntegrityRejectingPatchGate:
@@ -207,6 +244,51 @@ def test_invalid_provider_plan_is_resumable_and_not_a_false_convergence(
     assert state.stop_reason_code == "no_legal_proposal"
 
 
+def test_provider_failure_after_prune_is_run_level_and_preserves_original_error(
+    harness, baseline_evaluation
+):
+    planner = PruneThenProviderFailurePlanner(harness.config.baseline_commit_sha)
+    harness.planner = planner
+    harness.evaluator = ProxyPruningEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.bootstrap(baseline_evaluation)
+
+    pruned = asyncio.run(harness.run_one_experiment())
+
+    assert pruned.experiments["exp_001"].status == ExperimentStatus.PRUNED
+    assert pruned.active_experiment_id is None
+    assert pruned.active_attempt is None
+    assert pruned.active_fidelity is None
+
+    with pytest.raises(
+        OrchestrationError, match="PLANNER_PROVIDER_FAILURE"
+    ):
+        asyncio.run(harness.run_to_completion())
+    state = harness.state()
+    events = list(harness.events())
+    planning_failure = next(
+        event for event in events if event.event_type == EventType.PLANNING_FAILED
+    )
+
+    assert state.status.value == "failed"
+    assert state.stop_reason_code == "PLANNER_PROVIDER_FAILURE"
+    assert planning_failure.payload.result.error_class == "ProviderError"
+    assert "DeepSeek request timed out after 120 seconds" in (
+        planning_failure.payload.result.error_summary
+    )
+    assert "abcdefghijklmnop" not in planning_failure.payload.result.error_summary
+    assert "[REDACTED]" in planning_failure.payload.result.error_summary
+    assert not hasattr(planning_failure.payload.result, "experiment_id")
+    assert not any(event.event_type == EventType.ADAPTER_FAILED for event in events)
+    assert events[-2].event_type == EventType.PLANNING_FAILED
+    assert events[-1].event_type == EventType.RUN_STOPPED
+    assert not any(event.event_type == EventType.FINAL_SELECTED for event in events)
+    assert state.experiments["exp_001"].terminal_event_id is not None
+
+
 def test_integrity_violation_is_recorded_and_stops_the_run(
     harness, baseline_evaluation
 ):
@@ -217,11 +299,14 @@ def test_integrity_violation_is_recorded_and_stops_the_run(
     state = asyncio.run(harness.run_until_stopped())
 
     assert state.stop_reason_code == "fatal_integrity"
+    assert state.status.value == "failed"
     assert state.experiments_proposed == 1
     assert [event.event_type for event in harness.events()][-2:] == [
         EventType.LESSON_RECORDED,
         EventType.RUN_STOPPED,
     ]
+    with pytest.raises(FinalizationError, match="stopped run"):
+        asyncio.run(harness.finalize())
 
 
 def test_selected_candidate_cleanly_reproduces_and_checks_final_submission(
@@ -231,7 +316,9 @@ def test_selected_candidate_cleanly_reproduces_and_checks_final_submission(
     harness.runner = runner
     harness.bootstrap(baseline_evaluation)
     asyncio.run(harness.run_one_experiment())
-    harness.stop(StopDecision(True, "test_complete", "Finish the test search."))
+    harness.stop(
+        StopDecision(True, "no_legal_proposal", "Finish the test search.")
+    )
 
     state = asyncio.run(harness.finalize())
 

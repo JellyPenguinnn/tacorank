@@ -42,6 +42,8 @@ from ..schemas import (
     OutputCheckedPayload,
     PatchCheckedPayload,
     PatchCreatedPayload,
+    PlanningFailedPayload,
+    PlanningFailureResult,
     PlannerAction,
     PlannerRecommendedPayload,
     Population,
@@ -56,7 +58,12 @@ from ..schemas import (
     SubmissionCheckedPayload,
     TrustVerdict,
 )
-from .convergence import StopDecision, runtime_budget_decision, stop_decision
+from .convergence import (
+    StopDecision,
+    is_finalizable_stop_reason,
+    runtime_budget_decision,
+    stop_decision,
+)
 from .finalize import (
     FinalizationError,
     baseline_reproduction_event_id,
@@ -515,6 +522,52 @@ class Harness:
             resource_delta=result.resource_delta,
         )
 
+    def _record_planning_failure(
+        self,
+        *,
+        context_id: str,
+        error: Exception,
+        causation_event_id: str,
+    ) -> Event:
+        """Persist a sanitized planner exception without experiment ownership."""
+
+        error_class = str(
+            getattr(error, "code", None) or type(error).__name__
+        ).strip()
+        summary = str(getattr(error, "summary", None) or str(error)).strip()
+        output_tail = str(getattr(error, "output_tail", None) or "").strip()
+        combined = summary + (("\n" + output_tail) if output_tail else "")
+        safe_summary = (
+            normalize_text(SecretRedactor().redact(combined))[:800] or error_class
+        )
+        diagnostic_artifacts = list(
+            getattr(error, "diagnostic_artifacts", ()) or ()
+        )
+        raw_delta = getattr(error, "resource_delta", None)
+        if raw_delta is None:
+            provider = getattr(self.planner, "provider", None)
+            raw_delta = getattr(provider, "resource_delta", None)
+        resource_delta = (
+            ResourceDelta.model_validate(raw_delta)
+            if raw_delta is not None
+            else ResourceDelta()
+        )
+        result = PlanningFailureResult(
+            run_id=self.config.run_id,
+            context_id=context_id,
+            error_class=error_class,
+            error_fingerprint=fingerprint_failure(error_class, safe_summary),
+            error_summary=safe_summary,
+            diagnostic_artifacts=diagnostic_artifacts,
+            resource_delta=resource_delta,
+        )
+        return self._append(
+            PlanningFailedPayload(result=result),
+            stage="planning_failed",
+            causation_event_id=causation_event_id,
+            resource_delta=result.resource_delta,
+        )
+
     async def _recover(
         self,
         failure_event: Event,
@@ -756,7 +809,23 @@ class Harness:
             stage="planner_context",
             causation_event_id=events[-1].event_id,
         )
-        planner_output = await self.planner.propose(planner_context)
+        try:
+            planner_output = await self.planner.propose(planner_context)
+        except Exception as error:
+            self._record_planning_failure(
+                context_id=planner_context.context_id,
+                error=error,
+                causation_event_id=planner_context_event.event_id,
+            )
+            self.stop(
+                StopDecision(
+                    True,
+                    "PLANNER_PROVIDER_FAILURE",
+                    "The research planner failed before proposing a new experiment; "
+                    "the run was stopped with durable failure evidence.",
+                )
+            )
+            return self.state()
         if planner_output.action != PlannerAction.PROPOSE:
             self._append(
                 PlannerRecommendedPayload(output=planner_output),
@@ -1415,7 +1484,12 @@ class Harness:
     async def run_to_completion(self) -> object:
         """Drive research to a deterministic stop and finalize its selected best."""
 
-        await self.run_until_stopped()
+        state = await self.run_until_stopped()
+        if state.status.value != "stopped":
+            raise OrchestrationError(
+                "run stopped abnormally: %s"
+                % (state.stop_reason_code or state.status.value)
+            )
         return await self.finalize()
 
     async def _run_final_execution(
@@ -1493,6 +1567,10 @@ class Harness:
             return state
         if state.status.value != "stopped":
             raise FinalizationError("finalization requires a stopped run")
+        if not is_finalizable_stop_reason(state.stop_reason_code):
+            raise FinalizationError(
+                "finalization requires a normal deterministic stop reason"
+            )
 
         if state.best_experiment_id == "baseline":
             if self.final_submission_provider is None:

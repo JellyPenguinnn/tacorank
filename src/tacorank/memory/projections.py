@@ -12,6 +12,7 @@ from ..orchestrator.state import (
     RunState,
     RunStatus,
 )
+from ..orchestrator.convergence import is_finalizable_stop_reason
 from ..schemas import (
     Event,
     EventType,
@@ -125,6 +126,11 @@ def project(events: Iterable[Event]) -> RunState:
             node.status = ExperimentStatus.RECOVERING
             node.last_error_fingerprint = result.error_fingerprint
             state.phase = "recovery"
+        elif event.event_type == EventType.PLANNING_FAILED:
+            state.active_experiment_id = None
+            state.active_attempt = None
+            state.active_fidelity = None
+            state.phase = "planning_failure"
         elif event.event_type == EventType.RECOVERY_DECIDED:
             decision = payload.decision
             node = _node(state, decision.experiment_id)
@@ -138,6 +144,9 @@ def project(events: Iterable[Event]) -> RunState:
             ):
                 node.status = ExperimentStatus.INVALID
                 node.terminal_event_id = event.event_id
+                state.active_experiment_id = None
+                state.active_attempt = None
+                state.active_fidelity = None
                 state.phase = "planning"
             elif decision.action in (
                 RecoveryAction.RETRY_SAME_COMMIT,
@@ -194,6 +203,9 @@ def project(events: Iterable[Event]) -> RunState:
                 state.phase = "execution"
             else:
                 node.terminal_event_id = event.event_id
+                state.active_experiment_id = None
+                state.active_attempt = None
+                state.active_fidelity = None
                 state.phase = "planning"
                 if (
                     decision.fidelity_completed == Fidelity.FULL
@@ -228,8 +240,9 @@ def project(events: Iterable[Event]) -> RunState:
         elif event.event_type == EventType.MANUAL_INTERVENTION:
             state.manual_intervention_count += 1
         elif event.event_type == EventType.RUN_STOPPED:
-            state.status = RunStatus.STOPPED
-            state.phase = "stopped"
+            finalizable = is_finalizable_stop_reason(payload.reason_code)
+            state.status = RunStatus.STOPPED if finalizable else RunStatus.FAILED
+            state.phase = "stopped" if finalizable else "failed"
             state.stop_reason_code = payload.reason_code
             state.active_experiment_id = None
             state.active_attempt = None

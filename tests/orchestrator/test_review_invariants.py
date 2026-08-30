@@ -154,7 +154,9 @@ def test_run_stopped_rejects_inflight_development_transitions(
         for event in events
         if event.event_type == EventType.EXECUTION_FINISHED
     )
-    harness.stop(StopDecision(True, "test_stop", "Stop for terminality test."))
+    harness.stop(
+        StopDecision(True, "no_legal_proposal", "Stop for terminality test.")
+    )
 
     with pytest.raises(TransitionError, match="no execution is running"):
         validate_transition(list(harness.events()), execution_result)
@@ -170,7 +172,9 @@ def test_final_selection_requires_exact_commit_and_existing_trusted_evidence(
         if event.event_type == EventType.EVALUATION_COMPLETED
         and event.payload.result.fidelity == Fidelity.FULL
     )
-    harness.stop(StopDecision(True, "test_stop", "Stop for final-selection test."))
+    harness.stop(
+        StopDecision(True, "no_legal_proposal", "Stop for final-selection test.")
+    )
     stopped = list(harness.events())
     state = harness.state()
 

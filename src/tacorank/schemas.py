@@ -780,6 +780,31 @@ class AdapterFailureResult(StrictModel):
         return self
 
 
+class PlanningFailureResult(StrictModel):
+    """A run-level failure raised before a new experiment exists.
+
+    Planning failures must not be attributed to the previously completed
+    experiment.  The planner context is the durable identity for this adapter
+    boundary.
+    """
+
+    run_id: NonEmptyStr
+    context_id: NonEmptyStr
+    failure_stage: Literal["planner"] = "planner"
+    error_class: NonEmptyStr
+    error_fingerprint: str
+    error_summary: NonEmptyStr
+    diagnostic_artifacts: List[ArtifactRef] = Field(default_factory=list)
+    resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
+
+    @field_validator("error_fingerprint")
+    @classmethod
+    def validate_error_fingerprint(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("error_fingerprint must be lowercase sha256")
+        return value
+
+
 class OutputCheckResult(StrictModel):
     run_id: NonEmptyStr
     experiment_id: NonEmptyStr
@@ -1589,6 +1614,7 @@ class EventType(str, Enum):
     BASELINE_VERIFIED = "baseline.verified"
     CONTEXT_CREATED = "context.created"
     PLANNER_RECOMMENDED = "planner.recommended"
+    PLANNING_FAILED = "planning.failed"
     EXPERIMENT_PROPOSED = "experiment.proposed"
     PATCH_CREATED = "patch.created"
     PATCH_CHECKED = "patch.checked"
@@ -1676,6 +1702,11 @@ class PlannerRecommendedPayload(StrictModel):
         if self.output.action == PlannerAction.PROPOSE:
             raise ValueError("planner.recommended cannot contain a proposal")
         return self
+
+
+class PlanningFailedPayload(StrictModel):
+    type: Literal["planning.failed"] = "planning.failed"
+    result: PlanningFailureResult
 
 
 class ExperimentProposedPayload(StrictModel):
@@ -1789,6 +1820,7 @@ EventPayload = Annotated[
         BaselineVerifiedPayload,
         ContextCreatedPayload,
         PlannerRecommendedPayload,
+        PlanningFailedPayload,
         ExperimentProposedPayload,
         PatchCreatedPayload,
         PatchCheckedPayload,
@@ -1816,6 +1848,7 @@ EVENT_PAYLOAD_MODELS: Mapping[EventType, Type[StrictModel]] = {
     EventType.BASELINE_VERIFIED: BaselineVerifiedPayload,
     EventType.CONTEXT_CREATED: ContextCreatedPayload,
     EventType.PLANNER_RECOMMENDED: PlannerRecommendedPayload,
+    EventType.PLANNING_FAILED: PlanningFailedPayload,
     EventType.EXPERIMENT_PROPOSED: ExperimentProposedPayload,
     EventType.PATCH_CREATED: PatchCreatedPayload,
     EventType.PATCH_CHECKED: PatchCheckedPayload,

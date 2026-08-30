@@ -61,6 +61,12 @@ negative proxy, no-op, inconclusive, redundant, and suspicious outcomes; weight 
 item by its fidelity, population, decision, stability, integrity, and trust flags.
 Treat active_lessons as separately curated long-term memory. Do not promote an item
 from family_history into a durable belief merely because it appears in the context.
+Use failure_hypotheses, diagnostic_best_slice, diagnostic_worst_slice, and their
+diagnostic_metrics as actionable cohort evidence. When prior movement is sparse or
+concentrated, do not merely increase residual magnitude; propose a bounded mechanism
+that broadens justified coverage or targets the evidenced weak cohort. When movement
+is broad and all protected metrics regress, change the mechanism rather than scaling
+the same residual.
 
 The context data_profile was computed before this request by fixed read-only aggregate
 EDA tools over the candidate-visible training and unlabeled scoring views. Use its
@@ -183,6 +189,10 @@ def _research_summary(value: Any) -> Dict[str, Any]:
         "stability",
         "integrity",
         "trust_flags",
+        "failure_hypotheses",
+        "diagnostic_limitations",
+        "diagnostic_best_slice",
+        "diagnostic_worst_slice",
         "decision",
         "decision_reason_code",
         "highest_completed_fidelity",

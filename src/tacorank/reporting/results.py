@@ -301,6 +301,11 @@ def _render_lesson(lesson_id: str, record: dict) -> str:
 
 def render_summary(events: Sequence[Event]) -> str:
     state = project(events)
+    planning_failures = [
+        event.payload.result
+        for event in events
+        if event.payload.type == "planning.failed"
+    ]
     adapter_failures = [
         event.payload.result
         for event in events
@@ -362,6 +367,7 @@ def render_summary(events: Sequence[Event]) -> str:
             "- GPU-hours: %.6f" % totals.gpu_hours,
             "- Manual interventions: %d" % state.manual_intervention_count,
             "- Adapter failures: %d (%s)" % (len(adapter_failures), failure_text),
+            "- Planning failures: %d" % len(planning_failures),
             "",
             "Ledger head: `%s` / `%s`" % (state.last_event_id, state.last_event_hash),
         )
