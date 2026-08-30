@@ -8,20 +8,22 @@ remain with the outer harness and evaluation owners.
 
 ## Control flow
 
-1. Person 2 assembles a deterministic context from `COMPETITION.md`, Git, and
-   the append-only event ledger. For the current run it also retrieves the
-   applicable rule from `research/CURRENT_RUN_IMPROVEMENT_PLAN.md` and the
-   referenced method cards; the playbook itself remains read-only.
+1. Person 2 assembles a deterministic, code-blind context from the frozen
+   research policy and append-only evaluation feedback. For the current run it
+   also retrieves the applicable high-level research rule and scientific method
+   overviews; repository paths and implementation details stay controller-side.
 2. `ConvergenceAdvisor` checks only advisory budget/patience conditions.
 3. `SearchPolicy` creates a transient `GraphView`, applies the authoritative
    branch/refinement/ensemble portfolios, and chooses one legal search action.
 4. `ResearchProvider` receives one bounded structured request and may make one
    format-repair call.
-5. `PlanValidator` checks identity, lineage, contract paths, fidelity order,
-   evidence citations, duplicate identity, hidden-data references, and cost
-   budgets.
-6. The planner returns exactly one proposal, an advisory stop, or a blocked
-   result. The harness owns event logging and all subsequent gates.
+5. `PlanValidator` checks research identity and policy, evidence citations,
+   duplicate identity, hidden-data references, cost budgets, and the absence of
+   code-specific instructions.
+6. The planner returns exactly one `ResearchProposal`, an advisory stop, or a
+   blocked result. The controller then binds the authorized code target and
+   execution ladder into an `ExperimentSpec` for the coder. The harness owns
+   event logging and all subsequent gates.
 
 Evaluation-driven family selection must apply the mandatory decision order in
 `research/CURRENT_RUN_IMPROVEMENT_PLAN.md` before the generic two-phase search
@@ -76,17 +78,19 @@ a distinct identity.
 - `providers.research_provider`: provider protocol and test double.
 
 The shared Pydantic schema definitions remain in `tacorank.schemas`, owned by
-Person 2. The planner imports those definitions at runtime and deliberately
-does not redefine them.
+Person 2. The planner imports the code-blind `ResearchProposal` definition at
+runtime and deliberately does not redefine it.
 
 ## Memory-schema-v1 compatibility
 
 Person 1 accepts the memory schema's planner-facing identifiers and evidence
 references: `run_YYYYMMDD_<slug>`, `exp_0000`, `ctx_planner_000000`,
-`evt_000000`, and lowercase Git commit hashes. Method cards use a first fenced
-JSON block with `schema_version: "1.0"`, followed by the required Markdown
-sections. The planner validates the contract SHA-256, parent commit identity,
+`evt_000000`. Method cards use a first fenced JSON block with
+`schema_version: "1.0"`, followed by the required Markdown sections. The
+planner validates the contract SHA-256, controller-supplied parent identity,
 evidence-event membership, and duplicate identity before returning a proposal.
+The external research model never receives commit hashes, repository paths,
+source interfaces, commands, or execution stages.
 
 The append-only event envelope, hash chain, replay/fold logic, idempotency,
 and derived run-state remain one shared harness concern. Person 1 supplies

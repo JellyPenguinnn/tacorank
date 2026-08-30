@@ -500,7 +500,14 @@ class LessonCandidate(StrictModel):
     source_commit_shas: List[NonEmptyStr] = Field(default_factory=list)
 
 
-class ExperimentSpec(StrictModel):
+class ResearchProposal(StrictModel):
+    """Code-blind research recommendation produced by Person 1.
+
+    Repository targets and execution-ladder details are deliberately absent.
+    The deterministic harness binds those implementation details only after the
+    research proposal has passed policy validation.
+    """
+
     schema_version: Literal["1.0"] = SCHEMA_VERSION
     run_id: NonEmptyStr
     experiment_id: NonEmptyStr
@@ -510,9 +517,6 @@ class ExperimentSpec(StrictModel):
     hypothesis: NonEmptyStr
     family: NonEmptyStr
     change_summary: NonEmptyStr
-    target_stage: NonEmptyStr
-    target_files: List[str]
-    fidelity_plan: List[Fidelity]
     expected_mechanism: NonEmptyStr
     success_criteria: NonEmptyStr
     falsification_condition: NonEmptyStr
@@ -543,6 +547,14 @@ class ExperimentSpec(StrictModel):
             raise ValueError("component_experiment_ids must be unique")
         return normalized
 
+
+class ExperimentSpec(ResearchProposal):
+    """Controller-bound implementation assignment consumed by the coder."""
+
+    target_stage: NonEmptyStr
+    target_files: List[str]
+    fidelity_plan: List[Fidelity]
+
     @field_validator("target_files")
     @classmethod
     def validate_target_files(cls, values: List[str]) -> List[str]:
@@ -567,7 +579,7 @@ class ExperimentSpec(StrictModel):
 
 class PlannerOutput(StrictModel):
     action: PlannerAction
-    spec: Optional[ExperimentSpec] = None
+    spec: Optional[Union[ExperimentSpec, ResearchProposal]] = None
     reason_code: NonEmptyStr
     reason: NonEmptyStr
     supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)
@@ -1180,7 +1192,10 @@ class PlannerContext(ContextDocument):
     family_history: List[PlannerExperimentSummary] = Field(default_factory=list)
     method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
     playbook: PlannerPlaybookSummary
-    target_interface_excerpts: Dict[str, NonEmptyStr]
+    # Retained as an empty, backward-compatible field so historical schema-v1
+    # ledgers still replay. New planner contexts never carry implementation
+    # interfaces; those belong exclusively to the coder boundary.
+    target_interface_excerpts: Dict[str, NonEmptyStr] = Field(default_factory=dict)
     remaining_budget: PlannerBudgetSummary
     convergence: PlannerConvergenceSummary
 
@@ -1197,8 +1212,6 @@ class PlannerContext(ContextDocument):
     def validate_planner_target_interfaces(
         cls, values: Dict[str, str]
     ) -> Dict[str, str]:
-        if not values:
-            raise ValueError("planner target interfaces must not be empty")
         normalized: Dict[str, str] = {}
         for path, excerpt in values.items():
             target = normalize_relative_path(path)

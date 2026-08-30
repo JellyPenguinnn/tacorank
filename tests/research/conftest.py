@@ -84,8 +84,8 @@ def planner_context():
                 "ensemble",
                 "other",
             ],
-            protected_paths=["evaluate.py", "contract/COMPETITION.md"],
-            editable_paths=["solution", "research"],
+            protected_paths=[],
+            editable_paths=[],
             allowed_data=[
                 "train_interactions",
                 "public_validation",
@@ -121,11 +121,7 @@ def planner_context():
         method_cards=load_method_cards(
             Path(__file__).parents[2] / "research" / "methods"
         ).cards,
-        target_interface_excerpts={
-            "solution/candidate.py": (
-                "Required candidate entrypoint: def run(invocation) -> None"
-            )
-        },
+        target_interface_excerpts={},
         remaining_budget=SimpleNamespace(
             remaining_llm_tokens=10_000,
             remaining_wall_time_seconds=10_000,

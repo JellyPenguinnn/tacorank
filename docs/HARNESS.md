@@ -8,7 +8,10 @@ TacoRank is the integration backbone for the five-person autonomous KuaiRand-Pur
 frozen contract + official baseline
                 |
                 v
-ledger-derived planner context -> DeepSeek researcher -> ExperimentSpec
+ledger-derived research feedback -> DeepSeek researcher -> ResearchProposal
+                |                                      |
+                |                                      v
+                |                     controller binds code targets + ladder
                 |                                      |
                 |                                      v
                 |                              Trae edits worktree
@@ -124,7 +127,7 @@ Production exposes no fake runtime flag. Test doubles are constructed directly b
 
 ## DeepSeek and credential boundary
 
-The researcher and pinned Trae worker use `deepseek-v4-flash` with high reasoning through separate bounded adapters. `SearchPolicy` still owns the parent, family, phase, and reviewed method card; DeepSeek supplies one atomic implementation plan inside those constraints. Invalid provider output is recorded at a durable planner checkpoint and raises a resumable error rather than becoming false convergence.
+The researcher and pinned Trae worker use `deepseek-v4-flash` with high reasoning through separate bounded adapters. `SearchPolicy` still owns the parent, family, phase, and reviewed method card. DeepSeek receives only research policy, method overviews, experiment feedback, lessons, and budget, then returns a code-blind hypothesis and intervention. It does not receive repository paths, implementation interfaces, commit lineage, pipeline stages, commands, or the execution ladder. After validation, the deterministic controller binds the authorized code targets and frozen smoke/proxy/full ladder before Trae receives the coding context. Invalid provider output is recorded at a durable planner checkpoint and raises a resumable error rather than becoming false convergence.
 
 The API key is read only from the configured environment variable. It must never appear in configuration, prompts, Git, logs, trajectories, fixtures, or artifacts.
 

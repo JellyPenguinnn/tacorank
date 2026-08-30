@@ -716,13 +716,14 @@ class Harness:
             self.stop(decision)
             return self.state()
 
-        spec = planner_output.spec
-        assert spec is not None
-        if spec.context_id != planner_context.context_id:
+        proposal = planner_output.spec
+        assert proposal is not None
+        if proposal.context_id != planner_context.context_id:
             raise ResumablePlanningError(
                 "planner proposal cites a different context; "
                 "resume from the persisted planner checkpoint"
             )
+        spec = self.context_builder.bind_implementation(proposal)
         proposal_event = self._append(
             ExperimentProposedPayload(spec=spec),
             stage="proposed",
