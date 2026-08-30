@@ -11,6 +11,7 @@ before backtracking, rather than probing every research family from baseline.
 ```json
 {
   "schema_version": "1.0",
+  "max_trials_per_method": 3,
   "rule_order": [
     "output_rejected",
     "suspicious_or_compromised",
@@ -30,11 +31,11 @@ before backtracking, rather than probing every research family from baseline.
     "temporal_history",
     "multitask",
     "duration_bias",
-    "features",
     "model",
+    "features",
+    "evaluation",
     "sampling",
     "ensemble",
-    "evaluation",
     "other"
   ],
   "method_order": {
@@ -42,8 +43,8 @@ before backtracking, rather than probing every research family from baseline.
     "temporal_history": ["temporal_history_compact"],
     "multitask": ["multitask_single_auxiliary"],
     "duration_bias": ["duration_bias_censored_watch_time"],
-    "features": ["temporal_drift_past_only"],
     "model": ["model_compact_ranker"],
+    "features": ["temporal_drift_past_only"],
     "ensemble": ["ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]
   }
@@ -53,6 +54,11 @@ before backtracking, rather than probing every research family from baseline.
 The JSON block above is the executable control surface. The harness validates
 its rule identifiers and ordering before building `PlannerContext`; the prose
 below explains the evidence semantics and research rationale for humans.
+
+`max_trials_per_method` is a global run cap, not an open tuning allowance.
+Within one direction, try every eligible method once before a second variant of
+any method, and require each repeated trial to change one documented
+implementation choice. After the cap, that method is exhausted across parents.
 
 This file tells the Planner how to turn verified evaluation feedback into the
 next research direction. It is seed knowledge, not dynamic memory. During a
@@ -95,7 +101,7 @@ Apply these rules from top to bottom. The first matching rule wins.
 | 3 | Stability is `unstable` | Confirm seeds or simplify/regularize the same mechanism. | No new family |
 | 4 | Fidelity is `smoke` or `proxy` | Promote a clear proxy improvement, or one clean result within the symmetric proxy noise band, to one bounded full-fidelity check. Prune only a regression beyond that band. | No parent promotion |
 | 5 | Full public result is trusted and improves the parent by more than `epsilon` | Accept; confirm once if stability is only `single_seed`, then deepen the same family. | Yes |
-| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, and remains within `eta` of the current validation best | Retain it as an exploratory research parent with `best_eligible = false`. Continue from the highest-scoring eligible research node, try one legal same-family refinement, then switch to an independent mechanism only after that refinement is exhausted. | Yes, exploratory |
+| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, and remains within `eta` of the current validation best | Retain it as an exploratory research parent with `best_eligible = false`. From the highest-scoring eligible research node, let the legal-choice ranker compare one bounded same-family refinement with every eligible independent mechanism. | Yes, exploratory |
 | 7 | Full public result is trusted and worse than `-epsilon` | Treat the tested mechanism as falsified under its stated conditions; do not tune it indefinitely. | Yes |
 
 Only a full, verified, clean, seed-confirmed public-validation result may create
@@ -148,7 +154,7 @@ the parent, using the contract's seed/noise tolerance.
 | positive | positive | Broad pair ordering and top-5 placement both improved. | Confirm, then refine the same family before switching. |
 | positive | negative | Broad within-user separation improved but top ranks worsened. | Try top-weighted/listwise or hybrid ranking loss; inspect top-5 errors. |
 | negative | positive | Top-5 placement improved while general positive-negative ordering degraded. | Blend listwise/top-k emphasis with pairwise loss; avoid a pure top-k overfit. |
-| near zero | near zero, predictions changed | Mechanism has little signal at current fidelity. | Return to the highest-scoring eligible research path and try one same-family refinement before moving to an independent family. |
+| near zero | near zero, predictions changed | Mechanism has little signal at current fidelity. | Return to the highest-scoring eligible research path and rank one same-family refinement together with eligible independent families; do not force the refinement to run first. |
 | any | any, predictions barely changed | Terminal null result; it does not establish that the implementation is broken. | Let the tree planner rank one bounded same-mechanism reimplementation against independent mechanisms. |
 | inconsistent across seeds | inconsistent across seeds | Variance dominates estimated gain. | Confirm or simplify; do not promote. |
 
@@ -169,12 +175,24 @@ Recommended cohorts:
 
 ## 4. Direction priority for this run
 
-The default order is expected-value per unit cost, not an instruction to try
-every item. Once a direction creates the best trusted parent, continue research
-from that branch until its legal methods are exhausted or verified evidence
-falsifies it. Only then backtrack to the next trusted branch or independent
-direction. Skip any direction whose prerequisites fail or whose estimated cost
-does not fit the remaining budget.
+The default order follows the evidence-backed priority in
+`docs/KUAIRAND_STARTER_KIT.md`: objective, user history, multi-task, duration,
+model, temporal drift, then robustness evaluation. This order is a cold-start
+prior and deterministic tie-break, not a mandatory family sweep. With no
+verified research evidence, start with pairwise objective alignment. After a
+terminal result, construct all legal choices from the strongest trusted branch
+and rank them using verified reward, uncertainty, parent score, and cost. A
+trusted improvement still justifies depth-first continuation, and an explicit
+component-metric trade-off may authorize its documented refinement. A no-gain,
+rejected, or regressed direction must compete with independent mechanisms and
+must not remain active merely because it appears earlier in `family_order`.
+Skip unmet prerequisites and keep global method trial caps binding.
+
+Convergence patience may stop the run only after every currently eligible
+starter-kit priority direction has received at least one terminal experiment.
+Otherwise continue until a frozen budget fires or the bounded global method
+portfolio is exhausted. “No proposal from the current parent” is not a stop
+condition.
 
 ### Direction 0 — baseline and evaluator parity
 
@@ -189,11 +207,15 @@ contract/evaluator hashes, and seed variance.
 If parity fails, stop research and fix the harness. A broken evaluator can make
 every later direction look productive.
 
-### Direction 1 — objective alignment: pairwise first
+### Direction 1 — guarded objective alignment: parent-preserving pairwise first
 
-**Why first:** the baseline optimizes pointwise binary log loss, while both
+**Why test it:** the baseline optimizes pointwise binary log loss, while both
 contract metrics depend only on within-user order. BPR-style pairwise logistic
 loss directly trains a positive impression to score above a negative impression.
+This is a high-risk correction, however: a raw BPR score can destroy a strong FM
+ordering even when it is clipped to a seemingly bounded absolute value. Treat
+the pairwise model as a small correction to the verified parent, never as a
+replacement scorer.
 
 **First experiment:** keep the setup-verified official FM score and all
 data/splits fixed. Train only a bounded additive residual with deterministic
@@ -211,22 +233,53 @@ zero-initializing both sides makes every latent gradient zero. Before accepting
 the implementation, require non-zero residual variance, meaningful
 within-user score variation, and repeated-item user personalization.
 
-**Do not:** pair across users, treat unexposed items as negatives, discard the
-FM parent, change the evaluator, or combine a new model architecture in the
-same experiment.
+**Mandatory residual scale contract:** fit the residual multiplier once using
+contract-permitted training rows only, without validation labels. Center the raw
+residual within user, compare its standard deviation with the verified parent
+score standard deviation, and shrink it so that:
+
+```text
+residual_std <= 0.01 * parent_score_std
+max_abs_residual <= 0.02 * parent_score_std
+candidate_score = exact_parent_score + calibrated_residual
+```
+
+The multiplier and bounds are relative to the parent scale; a fixed absolute
+clip such as `0.75` is not a valid bound. Apply the frozen training-derived
+multiplier unchanged at smoke, proxy, full, and final inference. Never tune it
+from protected validation labels.
+
+At the first available proxy diagnostics, require all of the following before
+full promotion: exact parent reconstruction before the residual is added,
+finite non-constant residuals, `spearman_vs_parent >= 0.995`, the two scale
+limits above, and repeated-item personalization. If a scale check fails, allow
+one same-mechanism repair that only reduces the multiplier or fixes parent
+wiring. Do not promote an over-scaled candidate merely because its output
+schema passes.
+
+**Do not:** pair across users, treat unexposed items as negatives, discard or
+approximately reconstruct the FM parent, add the raw BPR dot product directly,
+use a fixed absolute residual clip, change the evaluator, or combine a new model
+architecture in the same experiment.
 
 **Success:** a trusted full result exceeds the parent by more than contract
 `epsilon`, with neither component metric showing a material regression.
 
-**Falsifier:** predictions changed meaningfully, but a trusted full result fails
-to improve beyond noise. Move on instead of doing an open-ended learning-rate
-or embedding-size sweep.
+**Falsifier and retirement:** if the scale contract is satisfied and a trusted
+full result fails to improve beyond noise, the mechanism is falsified. A proxy
+regression worse than `eta`, either component metric regressing worse than
+`eta`, or `spearman_vs_parent < 0.995` is an early failure. A scale violation may
+receive the single repair above; otherwise retire this pairwise recipe for the
+rest of the run. Do not retry the same BPR mechanism from a different parent or
+perform an open-ended learning-rate, embedding-size, or clip sweep.
 
-**Second objective experiment, only when justified:** use a user-list softmax/
-ListNet-style objective or a small pairwise-plus-listwise hybrid. Prefer this
-when GAUC improves but nDCG@5 regresses, because it can put more emphasis on
-the ordered list/top ranks. All-negative and all-positive lists contain no
-binary ordering information and need explicit handling.
+**Second objective method:** test a pure user-list softmax/ListNet-style residual
+as a distinct formulation after guarded BPR, even when BPR fails. Use a
+pairwise-plus-listwise hybrid only when guarded BPR improves GAUC but regresses
+nDCG@5. Keep the exact parent path and the same residual scale contract; never
+reuse a failed or over-scaled BPR scorer as the listwise or hybrid base.
+All-negative and all-positive lists contain no binary ordering information and
+need explicit handling.
 
 ### Direction 2 — compact, leakage-safe user history
 
@@ -297,23 +350,7 @@ split, evaluator, and resource limits.
 **Falsifier:** improvement vanishes across duration cohorts, long-duration bias
 increases, or the auxiliary improves watch-time fit while primary ranking falls.
 
-### Direction 5 — temporal context and distribution drift
-
-The split is chronological, so first measure drift rather than blindly adding
-`date` and `hourmin`. Compare label rate, item/author frequency, unknown rate,
-duration mix, and baseline residuals by time bucket.
-
-Low-cost experiments, one at a time:
-
-1. recency-decayed item/author statistics computed from past data only;
-2. candidate-time × item/author interactions;
-3. recent-window versus full-window training weights.
-
-Pure global time offsets often do not change within-user order when all
-impressions share the same time context. Require an interaction that can change
-relative item scores. Never compute aggregate features with future rows.
-
-### Direction 6 — model family change
+### Direction 5 — model family change
 
 Try DeepFM, DCN, or xDeepFM only after loss, history, or multi-task evidence
 identifies useful nonlinear interactions. Existing local ablations show that
@@ -328,6 +365,22 @@ controls because it adds complexity.
 
 **Falsifier:** no trusted gain at matched budget, higher variance, or apparent
 gain caused only by extra training time/parameters.
+
+### Direction 6 — temporal context and distribution drift
+
+The split is chronological, so first measure drift rather than blindly adding
+`date` and `hourmin`. Compare label rate, item/author frequency, unknown rate,
+duration mix, and baseline residuals by time bucket.
+
+Low-cost experiments, one at a time:
+
+1. recency-decayed item/author statistics computed from past data only;
+2. candidate-time × item/author interactions;
+3. recent-window versus full-window training weights.
+
+Pure global time offsets often do not change within-user order when all
+impressions share the same time context. Require an interaction that can change
+relative item scores. Never compute aggregate features with future rows.
 
 ### Direction 7 — random-exposure robustness evaluation
 
@@ -363,6 +416,7 @@ the best member beyond noise or if one member is suspicious/unstable.
 | Pairwise objective | Both metrics improve beyond noise | Confirm once, then test one listwise/hybrid refinement or move to history. |
 | Pairwise objective | GAUC up, nDCG@5 down | Listwise/top-weighted or hybrid objective on the same representation. |
 | Pairwise objective | Meaningful predictions, no gain | Compact user history. |
+| Pairwise objective | Proxy regression beyond `eta` or parent Spearman below `0.995` | Repair once only for a demonstrated scale/wiring violation; otherwise retire this BPR recipe across all parents and move to compact history. |
 | Compact history | Clean improvement | Target-conditioned attention; retain strict cutoff. |
 | Compact history | No gain | One auxiliary task. |
 | Single auxiliary | Primary improves | Test one additional auxiliary or guarded MMoE/PLE only if task conflict is observed. |
@@ -397,10 +451,13 @@ contract, parent, evidence, method prerequisite, or budget is unresolved.
 
 Unless newer verified evidence in `PlannerContext` overrides this sequence:
 
-1. **BPR-style within-user pairwise loss on the current FM.** No new features or
-   architecture. This is the highest-value alignment test.
-2. **Listwise/hybrid objective only if pairwise shows top-5 weakness; otherwise
-   compact strict-cutoff history.** Let the metric shape decide.
+1. **Guarded BPR-style within-user residual on the current FM.** No new features
+   or architecture. Preserve the parent exactly, obey the relative residual
+   scale contract, and stop before full if the proxy parent-correlation gate
+   fails.
+2. **Pure listwise objective as an independent objective formulation.** Use a
+   hybrid only if guarded pairwise shows a top-5 trade-off. A broadly regressing
+   BPR scorer must not be reused as the listwise base.
 3. **Compact history or one auxiliary task**, whichever remains untested after
    experiment 2. Do not combine them.
 

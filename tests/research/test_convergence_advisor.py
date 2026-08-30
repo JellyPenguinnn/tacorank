@@ -29,3 +29,36 @@ def test_advisor_is_non_terminal_when_context_can_continue():
     )
 
     assert ConvergenceAdvisor().advise(context).action == "propose"
+
+
+def test_advisor_defers_patience_until_priority_coverage():
+    context = SimpleNamespace(
+        remaining_budget=SimpleNamespace(remaining_experiments=20),
+        convergence=SimpleNamespace(
+            patience=3,
+            consecutive_non_improving_full_evaluations=3,
+            full_evaluations_completed=3,
+            priority_coverage_complete=False,
+        ),
+        source_event_ids=[],
+    )
+
+    assert ConvergenceAdvisor().advise(context).action == "propose"
+
+
+def test_advisor_applies_patience_after_priority_coverage():
+    context = SimpleNamespace(
+        remaining_budget=SimpleNamespace(remaining_experiments=20),
+        convergence=SimpleNamespace(
+            patience=3,
+            consecutive_non_improving_full_evaluations=3,
+            full_evaluations_completed=3,
+            priority_coverage_complete=True,
+        ),
+        source_event_ids=["evt_000010"],
+    )
+
+    advice = ConvergenceAdvisor().advise(context)
+
+    assert advice.action == "recommend_stop"
+    assert advice.reason_code == "CONVERGENCE_PATIENCE_REACHED"

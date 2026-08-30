@@ -36,6 +36,7 @@ class ImprovementPlaybook:
     schema_version: str
     source_path: str
     source_sha256: str
+    max_trials_per_method: int
     rule_order: tuple[str, ...]
     family_order: tuple[str, ...]
     method_order: Mapping[str, tuple[str, ...]]
@@ -59,6 +60,13 @@ def load_improvement_playbook(path: str | Path, *, source_path: str | None = Non
         raise PlaybookError("improvement playbook JSON is invalid") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != "1.0":
         raise PlaybookError("improvement playbook schema_version must be 1.0")
+    max_trials_per_method = payload.get("max_trials_per_method", 1)
+    if (
+        not isinstance(max_trials_per_method, int)
+        or isinstance(max_trials_per_method, bool)
+        or not 1 <= max_trials_per_method <= 5
+    ):
+        raise PlaybookError("max_trials_per_method must be an integer from 1 to 5")
 
     def unique_strings(name: str) -> tuple[str, ...]:
         value = payload.get(name)
@@ -102,6 +110,7 @@ def load_improvement_playbook(path: str | Path, *, source_path: str | None = Non
         schema_version="1.0",
         source_path=source_path or path.as_posix(),
         source_sha256=hashlib.sha256(raw).hexdigest(),
+        max_trials_per_method=max_trials_per_method,
         rule_order=rule_order,
         family_order=family_order,
         method_order=method_order,

@@ -35,6 +35,7 @@ def test_markdown_playbook_control_block_is_executable():
     )
 
     assert playbook.rule_order[0] == "output_rejected"
+    assert playbook.max_trials_per_method == 3
     assert playbook.family_order[0] == "objective"
     assert playbook.methods_for("objective")[0] == "objective_pairwise_bpr"
     assert len(playbook.source_sha256) == 64
@@ -88,6 +89,18 @@ def test_markdown_playbook_rejects_unsafe_rule_reordering(tmp_path):
     path.write_text(control_block(rules=reordered), encoding="utf-8")
 
     with pytest.raises(PlaybookError, match="mandatory safety order"):
+        load_improvement_playbook(path)
+
+
+def test_markdown_playbook_rejects_unbounded_method_trials(tmp_path):
+    path = tmp_path / "playbook.md"
+    text = control_block().replace(
+        '"schema_version": "1.0"',
+        '"schema_version": "1.0", "max_trials_per_method": 6',
+    )
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(PlaybookError, match="max_trials_per_method"):
         load_improvement_playbook(path)
 
 

@@ -124,7 +124,32 @@ def test_validator_accepts_soft_component_for_bounded_ensemble(planner_context):
         method_card_ids=["temporal_history_compact"],
         component_experiment_ids=[],
     )
-    planner_context.family_history = [latest]
+    exhausted = [
+        make_summary(
+            "exp_pairwise",
+            family="objective",
+            method_card_ids=["objective_pairwise_bpr"],
+        ),
+        make_summary(
+            "exp_listwise",
+            family="objective",
+            method_card_ids=["objective_listwise_user_softmax"],
+        ),
+        make_summary(
+            "exp_duration",
+            family="duration_bias",
+            method_card_ids=["duration_bias_censored_watch_time"],
+        ),
+        make_summary(
+            "exp_model",
+            family="model",
+            method_card_ids=["model_compact_ranker"],
+        ),
+    ]
+    planner_context.family_history = exhausted + [latest]
+    playbook_values = vars(planner_context.playbook).copy()
+    playbook_values["max_trials_per_method"] = 1
+    planner_context.playbook = SimpleNamespace(**playbook_values)
     choice = SearchPolicy().choose(planner_context)
     spec = make_spec(
         planner_context,

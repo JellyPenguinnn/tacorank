@@ -22,9 +22,9 @@ from .search_eligibility import classify_search_eligibility
 
 DEFAULT_RULE_ORDER = REQUIRED_RULE_ORDER
 DEFAULT_FAMILY_ORDER = HIGH_VALUE_FAMILIES + (
+    "evaluation",
     "sampling",
     "ensemble",
-    "evaluation",
     "other",
 )
 DEFAULT_METHOD_ORDER = {
@@ -144,10 +144,17 @@ def _playbook_is_valid(context: Any) -> bool:
         objective_methods = tuple(str(item) for item in as_list(methods.get("objective")))
     except AttributeError:
         return False
+    raw_trial_limit = get_value(playbook, "max_trials_per_method", 1)
+    valid_trial_limit = (
+        isinstance(raw_trial_limit, int)
+        and not isinstance(raw_trial_limit, bool)
+        and 1 <= raw_trial_limit <= 5
+    )
     return (
         rules == REQUIRED_RULE_ORDER
         and bool(families)
         and len(families) == len(set(families))
+        and valid_trial_limit
         and bool(objective_methods)
         and objective_methods[0] == "objective_pairwise_bpr"
     )
@@ -193,29 +200,46 @@ def _method_for_family(
         # soft-portfolio route. Generic depth-first proposals have no such
         # component contract and must not select it.
         eligible.pop("ensemble_diverse_residual_candidate", None)
-    attempted = _attempted_methods_for_parent(context, parent_experiment_id)
+    counts = _method_attempt_counts(context)
+    trial_limit = _max_trials_per_method(context)
     if preferred is not None:
-        return None if preferred in attempted else eligible.get(preferred)
-    for method_id in _method_order(context, family):
-        if method_id in eligible and method_id not in attempted:
+        return (
+            eligible.get(preferred)
+            if counts.get(preferred, 0) < trial_limit
+            else None
+        )
+    ordered = list(_method_order(context, family))
+    ordered.extend(sorted(set(eligible) - set(ordered)))
+    declared_position = {method_id: index for index, method_id in enumerate(ordered)}
+    ordered.sort(
+        key=lambda method_id: (
+            counts.get(method_id, 0),
+            declared_position[method_id],
+        )
+    )
+    for method_id in ordered:
+        if method_id in eligible and counts.get(method_id, 0) < trial_limit:
             return eligible[method_id]
-    remaining = sorted(set(eligible) - attempted)
-    return eligible[remaining[0]] if remaining else None
+    return None
 
 
-def _attempted_methods_for_parent(
-    context: Any, parent_experiment_id: str | None
-) -> set[str]:
-    return {
-        method_id
-        for summary in as_list(get_value(context, "family_history", None))
-        if parent_experiment_id is not None
-        and str(get_value(summary, "parent_experiment_id", ""))
-        == parent_experiment_id
+def _max_trials_per_method(context: Any) -> int:
+    raw = get_value(_playbook(context), "max_trials_per_method", 1)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return value if 1 <= value <= 5 else 1
+
+
+def _method_attempt_counts(context: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for summary in as_list(get_value(context, "family_history", None)):
         for method_id in map(
             str, as_list(get_value(summary, "method_card_ids", None))
-        )
-    }
+        ):
+            counts[method_id] = counts.get(method_id, 0) + 1
+    return counts
 
 
 def _cost_tier(value: Any) -> str:
@@ -259,6 +283,29 @@ def _blocked(reason_code: str, reason: str, *, phase: str = "playbook_gate") -> 
     )
 
 
+def _portfolio_blocked(
+    context: Any, allowed: tuple[str, ...], reason: str
+) -> PolicyChoice:
+    eligible = [
+        card
+        for family in allowed
+        for card in eligible_method_cards(context, family)
+    ]
+    counts = _method_attempt_counts(context)
+    trial_limit = _max_trials_per_method(context)
+    if eligible and all(
+        counts.get(str(get_value(card, "method_id", "")), 0) >= trial_limit
+        for card in eligible
+    ):
+        return _blocked(
+            "PORTFOLIO_EXHAUSTED",
+            "Every eligible method reached the playbook's global trial cap; "
+            "the bounded research portfolio is exhausted.",
+            phase="none",
+        )
+    return _blocked("NO_ELIGIBLE_METHOD", reason, phase="none")
+
+
 def _best_parent(eligible: Sequence[ExperimentNodeView]) -> ExperimentNodeView:
     return sorted(
         eligible,
@@ -289,51 +336,24 @@ def _same_family_refinement_choice(
     family = str(parent.family or "")
     if not family or family not in allowed:
         return None
-    eligible = {
-        str(get_value(card, "method_id", "")): card
-        for card in eligible_method_cards(context, family)
-    }
-    if family == "ensemble":
-        eligible.pop("ensemble_diverse_residual_candidate", None)
-    attempted = _attempted_methods_for_parent(context, parent.experiment_id)
-    parent_methods = set(parent.method_card_ids)
-    ordered = list(_method_order(context, family))
-    ordered.extend(sorted(set(eligible) - set(ordered)))
-
-    # Prefer a distinct method within the same mechanism family. If the family
-    # exposes only one method card, permit one materially different child from
-    # that parent; duplicate-plan validation still rejects an identical plan.
-    method_id = next(
-        (
-            item
-            for item in ordered
-            if item in eligible
-            and item not in attempted
-            and item not in parent_methods
-        ),
-        None,
+    card = _method_for_family(
+        context,
+        family,
+        parent_experiment_id=parent.experiment_id,
     )
-    if method_id is None:
-        method_id = next(
-            (
-                item
-                for item in ordered
-                if item in eligible and item not in attempted
-            ),
-            None,
-        )
-    if method_id is None:
+    if card is None:
         return None
     return _proposal(
         parent=parent,
         family=family,
-        card=eligible[method_id],
+        card=card,
         phase="playbook",
         reason_code="SCORE_GUIDED_SAME_FAMILY_REFINEMENT",
         reason=(
-            "Predictions changed without a trusted gain; refine the strongest "
-            "eligible experimental path %s within family %s before introducing "
-            "an unrelated mechanism." % (parent.experiment_id, family)
+            "Predictions changed without a trusted gain; try the next distinct "
+            "bounded method or implementation variant in family %s from the "
+            "strongest eligible path %s before changing direction. Duplicate "
+            "plans remain forbidden." % (family, parent.experiment_id)
         ),
     )
 
@@ -373,6 +393,19 @@ def _latest_parent(
     )
 
 
+def _rank_legal_choices(
+    choices: Sequence[PolicyChoice],
+    context: Any,
+    rank_choices: LegalChoiceRanker | None,
+) -> PolicyChoice | None:
+    if not choices:
+        return None
+    if rank_choices is None:
+        return choices[0]
+    ranked = rank_choices(tuple(choices), context)
+    return ranked if ranked in choices else choices[0]
+
+
 def _next_independent_choice(
     context: Any,
     eligible: Sequence[ExperimentNodeView],
@@ -382,6 +415,7 @@ def _next_independent_choice(
     reason_code: str,
     reason: str,
     preferred_parent: ExperimentNodeView | None = None,
+    rank_choices: LegalChoiceRanker | None = None,
 ) -> PolicyChoice | None:
     choices = _independent_choices(
         context,
@@ -392,7 +426,7 @@ def _next_independent_choice(
         reason=reason,
         preferred_parent=preferred_parent,
     )
-    return choices[0] if choices else None
+    return _rank_legal_choices(choices, context, rank_choices)
 
 
 def _independent_choices(
@@ -407,14 +441,21 @@ def _independent_choices(
 ) -> tuple[PolicyChoice, ...]:
     """Return every legal independent-family action in deterministic order."""
 
-    tried = set(_family_history(context))
     parent = preferred_parent or _best_experimental_parent(eligible)
     ordered = [
         family
         for family in _family_order(context)
-        if family in allowed and family != latest_family
+        if family in allowed
     ]
-    ordered.sort(key=lambda family: (family in tried, _family_order(context).index(family)))
+    # ``family_order`` is a cold-start prior, not a mandatory sweep.  For a
+    # route that explicitly asks for an independent mechanism, move the most
+    # recently tested family to the end of the deterministic tie-break order.
+    # The legal-choice ranker can still select it when verified evidence says
+    # it is the strongest available action.
+    if latest_family in ordered:
+        ordered = [family for family in ordered if family != latest_family] + [
+            latest_family
+        ]
     choices = []
     for family in ordered:
         card = _method_for_family(
@@ -584,6 +625,8 @@ def _soft_prune_choice(
     latest: Any,
     eligible: Sequence[ExperimentNodeView],
     allowed: tuple[str, ...],
+    *,
+    allow_ensemble: bool = True,
 ) -> PolicyChoice | None:
     """Return one bounded refinement or ensemble action for a soft result."""
 
@@ -633,7 +676,7 @@ def _soft_prune_choice(
                 ),
             )
 
-    if ensemble_authorized and "ensemble" in allowed:
+    if allow_ensemble and ensemble_authorized and "ensemble" in allowed:
         parent = _best_parent(eligible)
         card = _method_for_family(
             context,
@@ -662,6 +705,7 @@ def _playbook_choice(
     context: Any,
     eligible: list[ExperimentNodeView],
     allowed: tuple[str, ...],
+    rank_choices: LegalChoiceRanker | None = None,
 ) -> PolicyChoice | None:
     history = as_list(get_value(context, "family_history", None))
     if not history:
@@ -725,8 +769,10 @@ def _playbook_choice(
                 "interpret it as research evidence and continue with an independent "
                 "eligible mechanism."
             ),
-        ) or _blocked(
-            "NO_ELIGIBLE_METHOD",
+            rank_choices=rank_choices,
+        ) or _portfolio_blocked(
+            context,
+            allowed,
             "The failed operational attempt produced no research result and no independent method remains.",
         )
 
@@ -769,10 +815,11 @@ def _playbook_choice(
                     latest,
                     eligible,
                     allowed,
+                    allow_ensemble=False,
                 )
                 if portfolio_choice is not None:
                     return portfolio_choice
-                return _next_independent_choice(
+                next_choice = _next_independent_choice(
                     context,
                     eligible,
                     allowed,
@@ -782,8 +829,14 @@ def _playbook_choice(
                         "The clean full result was rejected as a checkpoint and has "
                         "no authorized portfolio action; move to an independent method."
                     ),
-                ) or _blocked(
-                    "NO_ELIGIBLE_METHOD", "No independent eligible method remains."
+                    rank_choices=rank_choices,
+                )
+                if next_choice is not None:
+                    return next_choice
+                return _soft_prune_choice(
+                    context, latest, eligible, allowed
+                ) or _portfolio_blocked(
+                    context, allowed, "No independent eligible method remains."
                 )
             return _blocked(
                 "RESULT_NOT_BRANCHABLE",
@@ -796,10 +849,11 @@ def _playbook_choice(
                     latest,
                     eligible,
                     allowed,
+                    allow_ensemble=False,
                 )
                 if portfolio_choice is not None:
                     return portfolio_choice
-                return _next_independent_choice(
+                next_choice = _next_independent_choice(
                     context,
                     eligible,
                     allowed,
@@ -810,8 +864,14 @@ def _playbook_choice(
                         "evaluation; move to the next independent method."
                         + _diagnostic_suffix(latest)
                     ),
-                ) or _blocked(
-                    "NO_ELIGIBLE_METHOD", "No independent eligible method remains."
+                    rank_choices=rank_choices,
+                )
+                if next_choice is not None:
+                    return next_choice
+                return _soft_prune_choice(
+                    context, latest, eligible, allowed
+                ) or _portfolio_blocked(
+                    context, allowed, "No independent eligible method remains."
                 )
             return _blocked(
                 "FIDELITY_PROMOTION_REQUIRED",
@@ -880,23 +940,35 @@ def _playbook_choice(
                 exploration_parent,
                 allowed,
             )
-            if refinement is not None:
-                return refinement
             exploration_family = str(exploration_parent.family or family)
-            return _next_independent_choice(
+            alternatives = [
+                choice
+                for choice in _independent_choices(
+                    context,
+                    eligible,
+                    allowed,
+                    exploration_family,
+                    reason_code="MEANINGFUL_CHANGE_NO_GAIN",
+                    reason=(
+                        "The strongest eligible path changed predictions without a "
+                        "trusted gain; compare its bounded refinement with legal "
+                        "independent mechanisms using verified search evidence."
+                    ),
+                    preferred_parent=exploration_parent,
+                )
+                if choice.family != exploration_family
+            ]
+            candidates = (
+                [refinement] if refinement is not None else []
+            ) + alternatives
+            return _rank_legal_choices(
+                candidates,
                 context,
-                eligible,
+                rank_choices,
+            ) or _portfolio_blocked(
+                context,
                 allowed,
-                exploration_family,
-                reason_code="MEANINGFUL_CHANGE_NO_GAIN",
-                reason=(
-                    "The strongest eligible experimental path has no remaining "
-                    "same-family refinement; move to the next independent mechanism."
-                ),
-                preferred_parent=exploration_parent,
-            ) or _blocked(
-                "NO_ELIGIBLE_METHOD",
-                "No independent eligible method remains.",
+                "No same-family refinement or independent eligible method remains.",
             )
         if (
             rule == "trusted_improvement"
@@ -916,8 +988,26 @@ def _playbook_choice(
                 parent_experiment_id=parent.experiment_id,
             )
             if card is None:
-                return _blocked(
-                    "REQUIRED_METHOD_UNAVAILABLE",
+                card = _method_for_family(
+                    context,
+                    family,
+                    parent_experiment_id=parent.experiment_id,
+                )
+            if card is None:
+                return _next_independent_choice(
+                    context,
+                    eligible,
+                    allowed,
+                    family,
+                    reason_code="SUCCESSFUL_DIRECTION_EXHAUSTED",
+                    reason=(
+                        "The successful direction reached its bounded method cap; "
+                        "continue with the next starter-kit priority direction."
+                    ),
+                    rank_choices=rank_choices,
+                ) or _portfolio_blocked(
+                    context,
+                    allowed,
                     "No eligible method can confirm or refine the successful family.",
                 )
             return _proposal(
@@ -943,7 +1033,10 @@ def _playbook_choice(
                     "The tested mechanism regressed beyond tolerance; move to an "
                     "independent method." + _diagnostic_suffix(latest)
                 ),
-            ) or _blocked("NO_ELIGIBLE_METHOD", "No independent eligible method remains.")
+                rank_choices=rank_choices,
+            ) or _portfolio_blocked(
+                context, allowed, "No independent eligible method remains."
+            )
     return None
 
 
@@ -972,7 +1065,6 @@ class SearchPolicy:
         graph = GraphView.from_context(context)
         eligible = list(graph.eligible_parents())
         allowed = _allowed_families(context)
-        history = _family_history(context)
         if not eligible:
             return _blocked(
                 "NO_ELIGIBLE_PARENT",
@@ -1008,52 +1100,41 @@ class SearchPolicy:
         if no_op_candidates is not None:
             if no_op_candidates:
                 return self._rank(no_op_candidates, context)
-            return _blocked(
-                "NO_ELIGIBLE_METHOD",
+            return _portfolio_blocked(
+                context,
+                allowed,
                 "The latest candidate was a no-op and no legal reimplementation "
                 "or independent method remains.",
             )
 
-        routed = _playbook_choice(context, eligible, allowed)
+        routed = _playbook_choice(
+            context,
+            eligible,
+            allowed,
+            rank_choices=self._rank,
+        )
         if routed is not None:
             return routed
 
         frontier = _depth_first_frontier(graph, eligible, self.frontier_limit)
-        recent = set(history[-2:])
-        for parent in frontier:
-            depth: list[PolicyChoice] = []
-            for family in allowed:
-                card = _method_for_family(
-                    context,
-                    family,
-                    parent_experiment_id=parent.experiment_id,
-                )
-                if card is None:
-                    continue
-                depth.append(
-                    _proposal(
-                        parent=parent,
-                        family=family,
-                        card=card,
-                        phase="depth",
-                        reason_code="SCORE_GUIDED_DEPTH_FIRST",
-                        reason=(
-                            "Continue depth-first from trusted branch %s using legal "
-                            "method %s; backtrack only after this branch is exhausted."
-                            % (parent.experiment_id, get_value(card, "method_id", ""))
-                        ),
-                    )
-                )
-            depth.sort(
-                key=lambda choice: (
-                    choice.family in recent,
-                    allowed.index(choice.family),
-                )
-            )
-            if depth:
-                return self._rank(depth, context)
-        return _blocked(
-            "NO_ELIGIBLE_METHOD",
+        parent = frontier[0] if frontier else _best_parent(eligible)
+        choices = _independent_choices(
+            context,
+            eligible,
+            allowed,
+            "",
+            reason_code="ADAPTIVE_SCORE_GUIDED_DEPTH_FIRST",
+            reason=(
+                "Rank every legal direction from the strongest trusted branch using "
+                "verified rewards, uncertainty, parent score, and cost. Treat the "
+                "starter-kit order only as a cold-start tie-break."
+            ),
+            preferred_parent=parent,
+        )
+        if choices:
+            return self._rank(choices, context)
+        return _portfolio_blocked(
+            context,
+            allowed,
             "No candidate method satisfies status, data, prerequisite, prohibition and family gates.",
-            phase="none",
         )

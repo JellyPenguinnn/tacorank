@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+from types import SimpleNamespace
 from urllib.error import HTTPError
 
 import pytest
@@ -199,7 +200,32 @@ def test_deepseek_provider_preserves_policy_owned_ensemble_components(
         prediction_spearman_vs_parent=0.6,
         method_card_ids=["temporal_history_compact"],
     )
-    planner_context.family_history = [component]
+    exhausted = [
+        make_summary(
+            "exp_pairwise",
+            family="objective",
+            method_card_ids=["objective_pairwise_bpr"],
+        ),
+        make_summary(
+            "exp_listwise",
+            family="objective",
+            method_card_ids=["objective_listwise_user_softmax"],
+        ),
+        make_summary(
+            "exp_duration",
+            family="duration_bias",
+            method_card_ids=["duration_bias_censored_watch_time"],
+        ),
+        make_summary(
+            "exp_model",
+            family="model",
+            method_card_ids=["model_compact_ranker"],
+        ),
+    ]
+    planner_context.family_history = exhausted + [component]
+    playbook_values = vars(planner_context.playbook).copy()
+    playbook_values["max_trials_per_method"] = 1
+    planner_context.playbook = SimpleNamespace(**playbook_values)
     planner_context.refinement_frontier_ids = []
     planner_context.ensemble_candidate_ids = ["exp_0001"]
     choice = SearchPolicy().choose(planner_context)

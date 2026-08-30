@@ -19,6 +19,7 @@ from ..recovery.classifier import classify_failure
 from ..recovery.fingerprints import fingerprint_result
 from ..research.code_blind import redact_implementation_references
 from ..research.eda import PlannerEdaToolbox
+from ..orchestrator.convergence import priority_family_coverage
 from ..research.playbook import load_improvement_playbook
 from ..research.portfolio import MethodCard, load_method_cards
 from ..research.search_eligibility import classify_search_eligibility
@@ -804,6 +805,9 @@ class ContextBuilder:
                 summary, eligibility_context
             ).ensemble_eligible
         ]
+        required_families, tested_families, coverage_complete = (
+            priority_family_coverage(events, self.config)
+        )
         return {
             "contract_sha256": self.verified_contract.contract_sha256,
             "contract_summary": contract_summary,
@@ -822,6 +826,7 @@ class ContextBuilder:
                 schema_version=playbook.schema_version,
                 source_path=playbook.source_path,
                 source_sha256=playbook.source_sha256,
+                max_trials_per_method=playbook.max_trials_per_method,
                 rule_order=list(playbook.rule_order),
                 family_order=list(playbook.family_order),
                 method_order={
@@ -848,6 +853,9 @@ class ContextBuilder:
                     state.consecutive_non_improving_full_evaluations
                 ),
                 full_evaluations_completed=state.full_evaluations_completed,
+                priority_families_required=list(required_families),
+                priority_families_tested=list(tested_families),
+                priority_coverage_complete=coverage_complete,
             ),
         }
 
