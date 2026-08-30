@@ -47,6 +47,9 @@ _REVIEWED_DOTENV_VERSION = "1.2.2"
 TRAE_DEEPSEEK_REASONING_MARKER = (
     "TacoRank: force DeepSeek Responses reasoning effort and preserve reasoning items"
 )
+TRAE_DEEPSEEK_TOOL_JSON_MARKER = (
+    "TacoRank: recover malformed DeepSeek tool arguments inside the bounded agent loop"
+)
 TRAE_DOCKER_EDIT_TOOL_MARKER = (
     "TacoRank: normalize and shell-quote command-specific edit arguments"
 )
@@ -84,10 +87,14 @@ class CodingWorkerError(RuntimeError):
         summary: str,
         *,
         output_tail: Optional[str] = None,
+        resource_delta: Any = None,
+        diagnostic_artifacts: Sequence[Any] = (),
     ) -> None:
         self.code = code
         self.summary = summary
         self.output_tail = output_tail
+        self.resource_delta = resource_delta
+        self.diagnostic_artifacts = tuple(diagnostic_artifacts)
         super().__init__(f"{code}: {summary}")
 
 
@@ -359,7 +366,20 @@ class TraeCodingWorker:
         experiment_id = _context_text(context, "experiment_id")
         parent = _context_text(context, "parent_commit_sha")
         try:
-            record = self.worktrees.create(run_id, experiment_id, parent)
+            target = self.worktrees.path_for(run_id, experiment_id)
+            if identity.attempt == 1:
+                record = self.worktrees.create(run_id, experiment_id, parent)
+            elif target.exists():
+                record = self.worktrees.attach(
+                    run_id, experiment_id, parent, require_clean=True
+                )
+            else:
+                record = self.worktrees.create(
+                    run_id,
+                    experiment_id,
+                    parent,
+                    reuse_existing_branch=True,
+                )
         except GitOperationError as exc:
             raise CodingWorkerError(exc.code, str(exc)) from exc
         return await asyncio.to_thread(
@@ -542,22 +562,31 @@ class TraeCodingWorker:
                     redactor=self.redactor,
                 )
                 if process.timed_out:
-                    raise CodingWorkerError(
+                    raise self._process_failure(
                         "TRAE_TIMEOUT",
                         f"Trae exceeded the {wall_time_limit_seconds}s wall limit",
                         output_tail=process.output_tail,
+                        started=started,
+                        process_output_path=process_output_path,
+                        artifact_prefix=artifact_prefix,
                     )
                 if process.output_limited:
-                    raise CodingWorkerError(
+                    raise self._process_failure(
                         "TRAE_OUTPUT_LIMIT",
                         "Trae process output exceeded its hard byte limit",
                         output_tail=process.output_tail,
+                        started=started,
+                        process_output_path=process_output_path,
+                        artifact_prefix=artifact_prefix,
                     )
                 if process.exit_code != 0:
-                    raise CodingWorkerError(
+                    raise self._process_failure(
                         "TRAE_PROCESS_FAILED",
                         f"Trae exited with code {process.exit_code}",
                         output_tail=process.output_tail,
+                        started=started,
+                        process_output_path=process_output_path,
+                        artifact_prefix=artifact_prefix,
                     )
 
                 try:
@@ -566,7 +595,14 @@ class TraeCodingWorker:
                         max_bytes=self.config.max_trajectory_bytes,
                     )
                 except TrajectoryParseError as exc:
-                    raise CodingWorkerError(exc.code, str(exc)) from exc
+                    raise self._process_failure(
+                        exc.code,
+                        str(exc),
+                        output_tail=process.output_tail,
+                        started=started,
+                        process_output_path=process_output_path,
+                        artifact_prefix=artifact_prefix,
+                    ) from exc
                 trajectory_bytes = self._redacted_trajectory_bytes(
                     parsed,
                     prompt,
@@ -585,17 +621,30 @@ class TraeCodingWorker:
                             trajectory_bytes,
                             content_type="application/json",
                         )
-                    except GitOperationError as artifact_error:
+                        process_written = self._retain_process_log(
+                            process_output_path,
+                            f"{artifact_prefix}/trae_process.log",
+                        )
+                    except (
+                        CodingWorkerError,
+                        GitOperationError,
+                        OSError,
+                    ) as artifact_error:
                         raise CodingWorkerError(
                             "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
                             "validated Trae failure evidence could not be retained",
+                            resource_delta=self._resource_delta(started, parsed),
                         ) from artifact_error
                     diagnostic = (exc.output_tail or "").strip()
-                    artifact_note = "diagnostic_artifact=" + failure_written.path
                     raise CodingWorkerError(
                         exc.code,
                         exc.summary,
-                        output_tail=(diagnostic + "\n" + artifact_note).strip(),
+                        output_tail=diagnostic or None,
+                        resource_delta=self._resource_delta(started, parsed),
+                        diagnostic_artifacts=(
+                            self._artifact_ref(failure_written, "trajectory"),
+                            self._artifact_ref(process_written, "log"),
+                        ),
                     ) from exc
             except BaseException as primary_error:
                 try:
@@ -666,22 +715,10 @@ class TraeCodingWorker:
         except GitOperationError as exc:
             raise CodingWorkerError(exc.code, str(exc)) from exc
 
-        wall_time_ms = max(0, int((time.monotonic() - started) * 1000))
         diff_artifact = self._artifact_ref(diff_written, "diff")
         trajectory_artifact = self._artifact_ref(trajectory_written, "trajectory")
         factories = self._schema_factories()
-        resource_delta = factories.resource_delta(
-            llm_input_tokens=parsed.usage.input_tokens,
-            llm_output_tokens=parsed.usage.output_tokens,
-            token_measurement="provider",
-            wall_time_ms=wall_time_ms,
-            cpu_time_ms=0,
-            gpu_time_ms=0,
-            gpu_count=0,
-            peak_rss_mb=None,
-            peak_gpu_memory_mb=None,
-            manual_interventions=0,
-        )
+        resource_delta = self._resource_delta(started, parsed)
         return factories.patch_candidate(
             schema_version="1.0",
             run_id=record.run_id,
@@ -701,6 +738,78 @@ class TraeCodingWorker:
             model_id=self.config.model_id,
             steps_used=parsed.steps_used,
             resource_delta=resource_delta,
+        )
+
+    def _resource_delta(
+        self, started: float, parsed: Optional[ParsedTrajectory] = None
+    ) -> Any:
+        usage = parsed.usage if parsed is not None else None
+        return self._schema_factories().resource_delta(
+            llm_input_tokens=usage.input_tokens if usage is not None else 0,
+            llm_output_tokens=usage.output_tokens if usage is not None else 0,
+            token_measurement="provider" if usage is not None else "none",
+            wall_time_ms=max(0, int((time.monotonic() - started) * 1000)),
+            cpu_time_ms=0,
+            gpu_time_ms=0,
+            gpu_count=0,
+            peak_rss_mb=None,
+            peak_gpu_memory_mb=None,
+            manual_interventions=0,
+        )
+
+    def _retain_process_log(self, source: Path, relative_path: str) -> WrittenArtifact:
+        try:
+            raw = source.read_bytes()
+        except OSError as error:
+            raise CodingWorkerError(
+                "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                "Trae process output could not be retained",
+            ) from error
+        if len(raw) > self.config.max_process_output_bytes:
+            raw = raw[-self.config.max_process_output_bytes :]
+        rendered = self.redactor.redact(
+            raw.decode("utf-8", errors="replace")
+        ).encode("utf-8")
+        if self.redactor.contains_known_secret(rendered):
+            raise CodingWorkerError(
+                "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                "Trae process output redaction failed",
+            )
+        return write_artifact(
+            self.artifact_repository_root,
+            relative_path,
+            rendered,
+            content_type="text/plain; charset=utf-8",
+        )
+
+    def _process_failure(
+        self,
+        code: str,
+        summary: str,
+        *,
+        output_tail: str,
+        started: float,
+        process_output_path: Path,
+        artifact_prefix: str,
+    ) -> CodingWorkerError:
+        try:
+            written = self._retain_process_log(
+                process_output_path,
+                f"{artifact_prefix}/trae_process.log",
+            )
+        except (CodingWorkerError, GitOperationError, OSError):
+            return CodingWorkerError(
+                "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                "Trae process failure evidence could not be retained",
+                resource_delta=self._resource_delta(started),
+            )
+        reference = self._artifact_ref(written, "log")
+        return CodingWorkerError(
+            code,
+            summary,
+            output_tail=output_tail.strip() or None,
+            resource_delta=self._resource_delta(started),
+            diagnostic_artifacts=(reference,),
         )
 
     def _artifact_ref(self, artifact: WrittenArtifact, kind: str) -> Any:
@@ -1839,9 +1948,13 @@ class TraeCodingWorker:
                 ) from exc
             if (
                 TRAE_DEEPSEEK_REASONING_MARKER not in reasoning_source
+                or TRAE_DEEPSEEK_TOOL_JSON_MARKER not in reasoning_source
                 or 'reasoning={"effort": "high"}' not in reasoning_source
                 or 'output_block.type == "reasoning"' not in reasoning_source
                 or "content += message_content" not in reasoning_source
+                or "except (json.JSONDecodeError, TypeError, RecursionError)"
+                not in reasoning_source
+                or "if not isinstance(tool_arguments, dict)" not in reasoning_source
             ):
                 raise CodingWorkerError(
                     "TRAE_RUNTIME_IDENTITY_MISMATCH",

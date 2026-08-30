@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"temporal_history_compact","family":"temporal_history","status":"candidate","tags":["sequence","history","temporal"],"cost_tier":"medium","prerequisites":["strict_temporal_cutoff"],"allowed_data":["train_interactions","date","user_id","video_id","author_id"],"prohibition_conditions":["unreliable_event_ordering"],"sources":[]}
+{"schema_version":"1.0","method_id":"temporal_history_compact","family":"temporal_history","status":"candidate","tags":["sequence","history","temporal"],"cost_tier":"medium","prerequisites":["baseline_parity","strict_temporal_cutoff"],"allowed_data":["train_interactions","date","user_id","video_id","author_id","long_view","verified_predictions"],"prohibition_conditions":["unreliable_event_ordering"],"sources":[]}
 ```
 
 ## Mechanism
@@ -28,7 +28,10 @@ The source data has no reliable event ordering.
 
 ## Minimal implementation
 
-Deterministic truncation and padding of a compact recent-history window.
+Build a deterministic compact history from earlier positive (`long_view=1`)
+training interactions, with negative impressions used only as explicit
+negative evidence. Add a bounded similarity/affinity residual to the supplied
+FM score; do not replace the parent with an uncalibrated fixed heuristic.
 
 ## Sources
 

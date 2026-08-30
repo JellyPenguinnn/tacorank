@@ -230,8 +230,8 @@ def test_transient_initial_coding_failure_retries_and_persists_redacted_tail(
     failure = next(
         event for event in events if event.event_type == EventType.ADAPTER_FAILED
     )
-    assert failure.payload.result.diagnostic_artifact is not None
-    diagnostic = failure.payload.result.diagnostic_artifact
+    assert len(failure.payload.result.diagnostic_artifacts) == 1
+    diagnostic = failure.payload.result.diagnostic_artifacts[0]
     content = (harness.config.repository_root / diagnostic.path).read_text(
         encoding="utf-8"
     )

@@ -45,6 +45,10 @@ entrypoint named by target_interfaces; helper files are allowed only in addition
 that entrypoint. Never invent a replacement entrypoint such as solution/train.py.
 Use only the selected method card's allowed_data after its prerequisites and
 prohibition checks pass, and only evidence event IDs present in the supplied context.
+Treat diagnostic_metrics as label-free implementation evidence: use them to address
+collapsed residuals, missing personalization, or excessive divergence from the
+setup-verified FM parent. Never call a frozen evaluator result "baseline parity"
+unless baseline_parity is explicitly present in contract.research_capabilities.
 
 Required JSON fields:
 {

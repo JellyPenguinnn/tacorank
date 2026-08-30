@@ -120,6 +120,82 @@ def fixed_evaluation_request(attempt, seed, seed_event_ids=()):
 
 
 class ProtectedAdapterTests(unittest.TestCase):
+    def test_service_records_label_free_personalization_diagnostics(self):
+        predictions = prediction_batch(
+            ["u1", "u1", "u2", "u2"],
+            [0.1, 0.9, 0.1, 0.9],
+            ["v1", "v2", "v1", "v2"],
+            "diagnostic_predictions",
+        )
+        gate = gate_evidence(predictions)
+        metric = MetricSet(
+            {"GAUC": 0.5, "nDCG@5": 0.5}, "primary", 0.5
+        )
+        result = evaluation_service(FixedScoreAdapter(0.5), gate).evaluate(
+            EvaluationInputs(
+                run_id="run_x",
+                experiment_id="exp_0001",
+                attempt=1,
+                output_gate=gate,
+                predictions=predictions,
+                population=Population.PUBLIC_VALIDATION,
+                fidelity=Fidelity.FULL,
+                seed=11,
+                public_query_index=1,
+                evaluator_sha256="a" * 64,
+                contract_sha256="b" * 64,
+                data_manifest_sha256="c" * 64,
+                labels=[0, 1, 0, 1],
+                baseline=metric,
+                parent=metric,
+                previous_best=metric,
+                parent_scores=[0.2, 0.8, 0.2, 0.8],
+                baseline_scores=[0.2, 0.8, 0.2, 0.8],
+            )
+        )
+
+        self.assertEqual(result.diagnostic_metrics["user_rankable_fraction"], 1.0)
+        self.assertEqual(
+            result.diagnostic_metrics["item_personalized_fraction"], 0.0
+        )
+        self.assertGreater(result.diagnostic_metrics["parent_residual_std"], 0.0)
+        self.assertEqual(
+            result.to_canonical().diagnostic_metrics,
+            dict(result.diagnostic_metrics),
+        )
+
+    def test_constant_candidate_keeps_baseline_rank_diagnostic_typed(self):
+        predictions = prediction_batch(["u", "u", "u"], [0.5, 0.5, 0.5])
+        gate = gate_evidence(predictions)
+        metric = MetricSet(
+            {"GAUC": 0.5, "nDCG@5": 0.5}, "primary", 0.5
+        )
+
+        result = evaluation_service(FixedScoreAdapter(0.5), gate).evaluate(
+            EvaluationInputs(
+                run_id="run_x",
+                experiment_id="exp_0001",
+                attempt=1,
+                output_gate=gate,
+                predictions=predictions,
+                population=Population.PUBLIC_VALIDATION,
+                fidelity=Fidelity.FULL,
+                seed=11,
+                public_query_index=1,
+                evaluator_sha256="a" * 64,
+                contract_sha256="b" * 64,
+                data_manifest_sha256="c" * 64,
+                labels=[0, 1, 0],
+                baseline=metric,
+                parent=metric,
+                previous_best=metric,
+                parent_scores=[0.1, 0.2, 0.3],
+                baseline_scores=[0.1, 0.2, 0.3],
+            )
+        )
+
+        self.assertEqual(result.diagnostic_metrics["spearman_vs_fm_baseline"], 0.0)
+
     def test_official_evaluator_matches_independent_metrics(self):
         adapter = create_evaluator_adapter(ROOT)
         users = ["u1", "u1", "u1", "u2", "u2", "u3"]

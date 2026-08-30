@@ -140,6 +140,7 @@ class EvaluationResult:
                 spearman_vs_parent=self.prediction_change.spearman_vs_parent,
                 changed_row_fraction=self.prediction_change.changed_row_fraction,
             ),
+            diagnostic_metrics=dict(self.diagnostic_metrics),
             trust=CanonicalTrustAssessment(
                 verdict=self.trust.verdict,
                 stability=self.trust.stability,

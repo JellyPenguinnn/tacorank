@@ -98,7 +98,11 @@ def planner_context():
                 "long_view",
                 "verified_predictions",
             ],
-            research_capabilities=[],
+            research_capabilities=[
+                "baseline_parity",
+                "objective_data_frame_verified",
+                "verified_best_prediction",
+            ],
             active_prohibitions=[],
             data_manifest_sha256="b" * 64,
             evaluator_sha256="c" * 64,

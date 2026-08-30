@@ -390,32 +390,45 @@ class Harness:
         }[stage]
         error_class = str(getattr(error, "code", None) or type(error).__name__).strip()
         summary = str(getattr(error, "summary", None) or str(error)).strip()
-        safe_summary = normalize_text(summary)[:800] or error_class
-        diagnostic_artifact = None
-        output_tail = getattr(error, "output_tail", None)
+        output_tail = str(getattr(error, "output_tail", None) or "").strip()
+        combined = summary + (("\n" + output_tail) if output_tail else "")
+        safe_summary = (
+            normalize_text(SecretRedactor().redact(combined))[:800] or error_class
+        )
+        diagnostic_artifacts = list(
+            getattr(error, "diagnostic_artifacts", ()) or ()
+        )
         artifact_store = getattr(self.event_store, "artifact_store", None)
-        if output_tail and artifact_store is not None:
+        if output_tail and artifact_store is not None and not diagnostic_artifacts:
             try:
-                safe_tail = SecretRedactor().redact(str(output_tail))[-64 * 1024:]
+                safe_tail = SecretRedactor().redact(output_tail)[-64 * 1024:]
                 digest = canonical_sha256(safe_tail)
-                diagnostic_artifact = artifact_store.write(
-                    artifact_id="trae-failure-%s" % digest[:24],
-                    kind=ArtifactKind.LOG,
-                    relative_path=(
-                        "artifacts/%s/%s/attempt_%d/trae-failure-%s.log"
-                        % (
-                            self.config.run_id,
-                            experiment_id,
-                            max(1, int(attempt)),
-                            digest[:24],
-                        )
-                    ),
-                    content=(safe_tail.rstrip() + "\n").encode("utf-8"),
-                    content_type="text/plain; charset=utf-8",
+                diagnostic_artifacts.append(
+                    artifact_store.write(
+                        artifact_id="trae-failure-%s" % digest[:24],
+                        kind=ArtifactKind.LOG,
+                        relative_path=(
+                            "artifacts/%s/%s/attempt_%d/trae-failure-%s.log"
+                            % (
+                                self.config.run_id,
+                                experiment_id,
+                                max(1, int(attempt)),
+                                digest[:24],
+                            )
+                        ),
+                        content=(safe_tail.rstrip() + "\n").encode("utf-8"),
+                        content_type="text/plain; charset=utf-8",
+                    )
                 )
             except Exception:
                 # Failure evidence must not mask the original adapter error.
-                diagnostic_artifact = None
+                diagnostic_artifacts = []
+        raw_delta = getattr(error, "resource_delta", None)
+        resource_delta = (
+            ResourceDelta.model_validate(raw_delta)
+            if raw_delta is not None
+            else ResourceDelta()
+        )
         result = AdapterFailureResult(
             run_id=self.config.run_id,
             experiment_id=experiment_id,
@@ -425,7 +438,8 @@ class Harness:
             error_class=error_class,
             error_fingerprint=fingerprint_failure(error_class, safe_summary),
             error_summary=safe_summary,
-            diagnostic_artifact=diagnostic_artifact,
+            diagnostic_artifacts=diagnostic_artifacts,
+            resource_delta=resource_delta,
         )
         return self._append(
             AdapterFailedPayload(result=result),

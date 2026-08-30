@@ -85,6 +85,27 @@ def _metric_delta(summary: Any, *names: str) -> float | None:
     return None
 
 
+def _diagnostic_suffix(summary: Any) -> str:
+    values = get_value(summary, "diagnostic_metrics", None) or {}
+    if not isinstance(values, dict):
+        try:
+            values = dict(values)
+        except (TypeError, ValueError):
+            return ""
+    preferred = (
+        "spearman_vs_fm_baseline",
+        "user_rankable_fraction",
+        "item_personalized_fraction",
+        "parent_residual_std",
+    )
+    rendered = []
+    for name in preferred:
+        value = _number(values.get(name))
+        if value is not None:
+            rendered.append("%s=%.6g" % (name, value))
+    return " Diagnostics: " + ", ".join(rendered) + "." if rendered else ""
+
+
 def _allowed_families(context: Any) -> tuple[str, ...]:
     contract = get_value(context, "contract_summary", None)
     allowed = get_value(contract, "allowed_families", None)
@@ -427,6 +448,7 @@ def _playbook_choice(
     gauc_delta = _metric_delta(latest, "gauc")
     ndcg_delta = _metric_delta(latest, "ndcg@5", "ndcg")
     family = str(get_value(latest, "family", ""))
+    status = _normalized(get_value(latest, "status", None))
     method_ids = {
         str(item) for item in as_list(get_value(latest, "method_card_ids", None))
     }
@@ -440,6 +462,27 @@ def _playbook_choice(
         and prediction_change is not None
     )
     parent = _latest_parent(latest, eligible)
+
+    if (
+        status == "invalid"
+        and get_value(latest, "primary_score", None) is None
+        and get_value(latest, "metric_set", None) is None
+    ):
+        return _next_independent_choice(
+            context,
+            eligible,
+            allowed,
+            family,
+            reason_code="OPERATIONAL_FAILURE_UNTESTED",
+            reason=(
+                "The latest experiment ended before verified evaluation; do not "
+                "interpret it as research evidence and continue with an independent "
+                "eligible mechanism."
+            ),
+        ) or _blocked(
+            "NO_ELIGIBLE_METHOD",
+            "The failed operational attempt produced no research result and no independent method remains.",
+        )
 
     for rule in _rule_order(context):
         if rule == "output_rejected" and output_accepted is False:
@@ -536,6 +579,7 @@ def _playbook_choice(
                     reason=(
                         "The latest mechanism was terminally rejected before full "
                         "evaluation; move to the next independent method."
+                        + _diagnostic_suffix(latest)
                     ),
                 ) or _blocked(
                     "NO_ELIGIBLE_METHOD", "No independent eligible method remains."
@@ -662,7 +706,10 @@ def _playbook_choice(
                 allowed,
                 family,
                 reason_code="TRUSTED_FULL_REGRESSION",
-                reason="The tested mechanism regressed beyond tolerance; move to an independent method.",
+                reason=(
+                    "The tested mechanism regressed beyond tolerance; move to an "
+                    "independent method." + _diagnostic_suffix(latest)
+                ),
             ) or _blocked("NO_ELIGIBLE_METHOD", "No independent eligible method remains.")
     return None
 

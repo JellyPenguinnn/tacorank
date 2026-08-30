@@ -155,6 +155,8 @@ def build_coding_prompt(
         _json_block({"authoritative_target_files": target_files}),
         "Begin by viewing the authoritative target files directly; do not list the repository root or survey unrelated directories.",
         "The interface excerpts and method cards below are the supplied integration context. Inspect one non-target file only when a concrete missing symbol or schema blocks the edit.",
+        "When the interface supplies setup-verified FM scores, preserve them as the parent and implement the approved mechanism as a bounded residual unless the ExperimentSpec explicitly requires replacement.",
+        "Before task_done, review the edited score path for full/representative training coverage, non-zero trainable gradients, user-conditioned score variation, correct feature semantics, deterministic seeds, and finite fallback scores.",
         "The symbolic allowed_command_ids are controller-owned post-patch checks, not shell tools available in this coding action. Do not search for or invoke them.",
         "Use the next editing-capable tool call after the target view to make the smallest coherent edit, verify the edited target if needed, and then call task_done.",
         "",

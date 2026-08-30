@@ -17,6 +17,17 @@ def test_policy_probes_untried_high_value_family_from_baseline(planner_context):
     assert choice.method_card_id == "objective_pairwise_bpr"
 
 
+def test_clean_evaluator_baseline_does_not_imply_executable_parent_parity(
+    planner_context,
+):
+    planner_context.contract_summary.research_capabilities = []
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "blocked"
+    assert choice.reason_code == "NO_ELIGIBLE_METHOD"
+
+
 def context_with_latest(planner_context, latest, *, allowed_families=None):
     root = make_summary("exp_0000", score=0.5946)
     contract = SimpleNamespace(**vars(planner_context.contract_summary))
