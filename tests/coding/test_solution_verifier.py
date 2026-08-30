@@ -136,6 +136,90 @@ def test_verifier_retries_malformed_json_once_and_accounts_both_calls() -> None:
     assert "code, severity, path, and message" in retry_prompt
 
 
+def test_verifier_normalizes_missing_empty_required_changes_on_acceptance() -> None:
+    calls = 0
+
+    def transport(_url, _headers, _payload, _timeout):
+        nonlocal calls
+        calls += 1
+        return _response(
+            {
+                "accepted": True,
+                "summary": "The implementation matches the approved plan.",
+                "findings": [],
+            }
+        )
+
+    result = _request(
+        DeepSeekSolutionVerifier(
+            api_key="secret",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            transport=transport,
+        )
+    )
+
+    assert result.accepted
+    assert result.required_changes == ()
+    assert calls == 1
+
+
+@pytest.mark.parametrize("marker", [True, []])
+def test_verifier_ignores_consistent_required_changes_empty_marker(marker) -> None:
+    def transport(_url, _headers, _payload, _timeout):
+        return _response(
+            {
+                "accepted": True,
+                "summary": "The implementation matches the approved plan.",
+                "findings": [],
+                "required_changes": [],
+                "required_changes_empty": marker,
+            }
+        )
+
+    result = _request(
+        DeepSeekSolutionVerifier(
+            api_key="secret",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            transport=transport,
+        )
+    )
+
+    assert result.accepted
+    assert result.required_changes == ()
+
+
+def test_verifier_does_not_default_required_changes_for_rejection() -> None:
+    def transport(_url, _headers, _payload, _timeout):
+        return _response(
+            {
+                "accepted": False,
+                "summary": "The planned mechanism is missing.",
+                "findings": [
+                    {
+                        "code": "MECHANISM_MISSING",
+                        "severity": "error",
+                        "path": "solution/candidate.py",
+                        "message": "The residual is absent.",
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(SolutionVerifierError) as failure:
+        _request(
+            DeepSeekSolutionVerifier(
+                api_key="secret",
+                model="deepseek-v4-flash",
+                base_url="https://api.deepseek.com",
+                transport=transport,
+            )
+        )
+
+    assert failure.value.code == "SOLUTION_VERIFIER_MALFORMED"
+
+
 def test_verifier_retry_identifies_finding_key_mismatch_and_proposed_fix() -> None:
     responses = [
         _response(

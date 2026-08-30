@@ -59,7 +59,12 @@ def test_artifact_root_rejects_existing_symlink_components(tmp_path: Path) -> No
     real_root = repository / "real-artifacts"
     linked_root = repository / "artifacts"
     real_root.mkdir(parents=True)
-    linked_root.symlink_to(real_root, target_is_directory=True)
+    try:
+        linked_root.symlink_to(real_root, target_is_directory=True)
+    except OSError as error:
+        if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
 
     with pytest.raises(ExecutionTestArtifactError, match="symbolic link"):
         TestArtifactStore(

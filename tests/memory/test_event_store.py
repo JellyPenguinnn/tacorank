@@ -76,7 +76,10 @@ def test_backward_compatible_defaults_do_not_rewrite_old_ledger(repository):
     payload_hash = canonical_sha256(legacy["payload"])
     legacy["idempotency_key"] = "r:run:start:0:%s" % payload_hash
     legacy["event_hash"] = canonical_sha256(event_hash_input(legacy))
-    path.write_text(canonical_dumps(legacy) + "\n", encoding="utf-8")
+    # Write the ledger's canonical LF framing even on Windows. ``Path.write_text``
+    # translates the newline to CRLF there, which is intentionally noncanonical
+    # for the append-only JSONL format.
+    path.write_bytes((canonical_dumps(legacy) + "\n").encode("utf-8"))
 
     restored = store.read_events()[0]
     assert restored.payload.convergence_epsilon == 0.002

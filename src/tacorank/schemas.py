@@ -1962,12 +1962,27 @@ def payload_artifacts(payload: EventPayload) -> List[ArtifactRef]:
                 visit(item)
 
     visit(payload)
-    unique: Dict[str, ArtifactRef] = {}
+    # ``sha256-<digest>`` identifiers name content, not a single filesystem
+    # path.  Empty stdout and telemetry files therefore legitimately share an
+    # artifact_id while remaining distinct references that must both be
+    # verified.  Reject only an actual content-identity contradiction.
+    content_identities: Dict[str, Tuple[str, int]] = {}
+    unique: Dict[Tuple[str, str, str, str, int, str], ArtifactRef] = {}
     for item in found:
-        previous = unique.get(item.artifact_id)
-        if previous is not None and previous != item:
+        content_identity = (item.sha256, item.size_bytes)
+        previous = content_identities.get(item.artifact_id)
+        if previous is not None and previous != content_identity:
             raise ValueError("conflicting payload artifacts share artifact_id %r" % item.artifact_id)
-        unique[item.artifact_id] = item
+        content_identities[item.artifact_id] = content_identity
+        key = (
+            item.artifact_id,
+            item.path,
+            item.kind.value,
+            item.sha256,
+            item.size_bytes,
+            item.content_type or "",
+        )
+        unique[key] = item
     return [unique[key] for key in sorted(unique)]
 
 

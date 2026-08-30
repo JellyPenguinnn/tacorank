@@ -382,6 +382,7 @@ def _completion_document(
 def _validate_document(
     document: Mapping[str, Any],
 ) -> tuple[bool, str, Tuple[SolutionFinding, ...], Tuple[str, ...]]:
+    document = _normalize_document(document)
     expected_keys = {"accepted", "summary", "findings", "required_changes"}
     if set(document) != expected_keys:
         raise ValueError(_schema_key_error("verifier JSON", document, expected_keys))
@@ -405,6 +406,45 @@ def _validate_document(
     if not accepted and (not errors or not required):
         raise ValueError("rejected review requires an error and a required change")
     return accepted, summary.strip(), findings, required
+
+
+def _normalize_document(document: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Normalize only semantically redundant verifier schema variations.
+
+    DeepSeek occasionally omits the empty ``required_changes`` list for an
+    accepted review or adds a boolean ``required_changes_empty`` marker.  Both
+    forms carry no additional authority, so canonicalize them before applying
+    the strict semantic checks below.  Rejected or ambiguous reviews remain
+    fail-closed.
+    """
+
+    normalized = dict(document)
+    accepted = normalized.get("accepted")
+    findings = normalized.get("findings")
+    if (
+        accepted is True
+        and "required_changes" not in normalized
+        and isinstance(findings, list)
+    ):
+        normalized["required_changes"] = []
+
+    if "required_changes_empty" in normalized:
+        marker = normalized.get("required_changes_empty")
+        required = normalized.get("required_changes")
+        marker_is_consistent = (
+            isinstance(marker, bool) and marker == (len(required) == 0)
+            if isinstance(required, list)
+            else False
+        )
+        # Some JSON-mode completions redundantly emit an empty list under the
+        # marker name.  It is equivalent only when the canonical list is also
+        # present and empty.
+        marker_is_consistent = marker_is_consistent or (
+            marker == [] and required == []
+        )
+        if marker_is_consistent:
+            normalized.pop("required_changes_empty")
+    return normalized
 
 
 def _finding(value: Any) -> SolutionFinding:
