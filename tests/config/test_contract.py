@@ -59,6 +59,36 @@ def test_deepseek_configuration_rejects_unsafe_values(config, field, value, matc
         RunConfig.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "field,value,match",
+    [
+        (
+            "literature_base_url",
+            "http://api.openalex.org",
+            "OpenAlex HTTPS origin",
+        ),
+        (
+            "literature_base_url",
+            "https://example.com",
+            "OpenAlex HTTPS origin",
+        ),
+        (
+            "literature_base_url",
+            "https://user:secret@api.openalex.org",
+            "credential-free",
+        ),
+    ],
+)
+def test_literature_configuration_rejects_unsafe_values(
+    config, field, value, match
+):
+    payload = config.model_dump(mode="python")
+    payload[field] = value
+
+    with pytest.raises(ValueError, match=match):
+        RunConfig.model_validate(payload)
+
+
 def test_coding_token_limit_can_be_explicitly_unbounded(config):
     payload = config.model_dump(mode="python")
     payload["coding_token_limit"] = None

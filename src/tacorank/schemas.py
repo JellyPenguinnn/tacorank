@@ -512,6 +512,42 @@ class LessonCandidate(StrictModel):
         )
 
 
+class LiteratureEvidence(StrictModel):
+    """Bounded scholarly evidence retrieved by the online planner skill."""
+
+    evidence_id: NonEmptyStr
+    provider: Literal["openalex"] = "openalex"
+    paper_id: NonEmptyStr
+    title: NonEmptyStr
+    abstract: NonEmptyStr
+    year: Optional[int] = Field(default=None, ge=1800, le=2100)
+    authors: List[NonEmptyStr] = Field(default_factory=list)
+    venue: Optional[NonEmptyStr] = None
+    citation_count: int = Field(default=0, ge=0)
+    influential_citation_count: int = Field(default=0, ge=0)
+    url: NonEmptyStr
+    query: NonEmptyStr
+
+    @field_validator("evidence_id")
+    @classmethod
+    def validate_evidence_id(cls, value: str) -> str:
+        return _validate_id(value, "literature_evidence_id")
+
+    @field_validator("authors")
+    @classmethod
+    def validate_authors(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("literature evidence authors must be unique")
+        return values
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        if not re.fullmatch(r"https://[^\s/?#]+(?:/[^\s]*)?", value):
+            raise ValueError("literature evidence URL must use HTTPS")
+        return value
+
+
 class ResearchProposal(StrictModel):
     """Code-blind research recommendation produced by Person 1.
 
@@ -539,6 +575,7 @@ class ResearchProposal(StrictModel):
     # leave this empty.
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+    literature_evidence: List[LiteratureEvidence] = Field(default_factory=list)
     duplicate_key: NonEmptyStr
 
     @field_validator("run_id", "experiment_id", "context_id")
@@ -558,6 +595,16 @@ class ResearchProposal(StrictModel):
         if len(normalized) != len(set(normalized)):
             raise ValueError("component_experiment_ids must be unique")
         return normalized
+
+    @field_validator("literature_evidence")
+    @classmethod
+    def validate_literature_evidence(
+        cls, values: List[LiteratureEvidence]
+    ) -> List[LiteratureEvidence]:
+        identifiers = [value.evidence_id for value in values]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("literature_evidence must not contain duplicates")
+        return values
 
 
 class ExperimentSpec(ResearchProposal):

@@ -46,6 +46,7 @@ TacoRank is a deterministic, event-sourced harness for autonomous recommender-sy
 ```text
 frozen contract and official FM baseline
   -> ledger-derived planner context
+  -> bounded keyless OpenAlex evidence for the selected method
   -> DeepSeek research proposal
   -> Trae edit in a disposable Git worktree
   -> DeepSeek implementation review and bounded Trae revision (at most 5 reviews)
@@ -60,7 +61,7 @@ frozen contract and official FM baseline
   -> final Gate B and official submission check
 ```
 
-The deterministic controller owns workflow state, budgets, recovery routing, promotion, rollback, convergence, final selection, and ledger appends. DeepSeek proposes a bounded research plan. Trae is an edit-only coding worker. Before sealing a patch, a separate DeepSeek verifier checks plan-to-code fidelity and may return concrete corrections for at most five internal passes. This verifier is not Gate A, does not receive protected metrics or hidden labels, and does not consume Waihong's two external recovery repairs. Role components return canonical typed records and cannot independently mutate workflow state.
+The deterministic controller owns workflow state, budgets, recovery routing, promotion, rollback, convergence, final selection, and ledger appends. After policy selects a legal method, the planner's bounded online literature skill retrieves a small keyless OpenAlex snapshot without sending run data or metrics; the DeepSeek proposal must cite that exact evidence. Paper text is untrusted data and cannot override policy. DeepSeek proposes a bounded research plan. Trae is an edit-only coding worker and neither coding nor candidate execution receives network access. Before sealing a patch, a separate DeepSeek verifier checks plan-to-code fidelity and may return concrete corrections for at most five internal passes. This verifier is not Gate A, does not receive protected metrics or hidden labels, and does not consume Waihong's two external recovery repairs. Role components return canonical typed records and cannot independently mutate workflow state.
 
 Authoritative surfaces are:
 
@@ -206,7 +207,8 @@ Before setup, confirm:
 - control-plane Python is 3.9+;
 - Python 3.12 is available for Trae;
 - a local Docker-compatible daemon is running and reachable through a local Unix socket or Docker Desktop Windows named pipe;
-- the human has authorized live DeepSeek use and exported `DEEPSEEK_API_KEY`; and
+- the human has authorized live DeepSeek use and exported `DEEPSEEK_API_KEY`;
+- outbound HTTPS access to the keyless OpenAlex Works API is available; and
 - official KuaiRand-Pure data is present inside this checkout, or setup is authorized to download it.
 
 Safe checks:
@@ -271,7 +273,7 @@ Require exit code 0 and JSON containing:
 {"ledger_created": false, "runtime": "live", "status": "passed"}
 ```
 
-Also verify that `runs/$RUN_ID/events.jsonl` does not yet exist. Preflight checks the clean Git baseline and submodule, frozen contracts, full data manifest, official evaluator and FM baseline, executable candidate parity on all routes, DeepSeek access, pinned Trae installation, Docker isolation, read-only edit tools, execution environment, and output quota.
+Also verify that `runs/$RUN_ID/events.jsonl` does not yet exist. Preflight checks the clean Git baseline and submodule, frozen contracts, full data manifest, official evaluator and FM baseline, executable candidate parity on all routes, DeepSeek access, keyless OpenAlex search access, pinned Trae installation, Docker isolation, read-only edit tools, execution environment, and output quota.
 
 ### 5. Start and allow the actual loop to finish
 
@@ -390,6 +392,7 @@ Use the exact immutable configurations generated for that run:
 | Python 3.12 or Docker is missing | Install only with authorization, or pass canonical executable paths. |
 | Docker daemon/socket preflight fails | Start or repair the approved local daemon, then rerun preflight. |
 | DeepSeek authentication/model check fails | Confirm only that the shell variable is present; ask the human to correct or rotate the key. Never inspect or print it. |
+| OpenAlex preflight or lookup fails | Preserve run evidence and verify outbound HTTPS/rate-limit status. Do not fabricate or hand-edit literature evidence. |
 | Setup directory already exists | Choose a new run/deployment/runtime identity after preserving the existing directory. |
 | Run ID already has a ledger | Do not reuse it. Inspect/validate it or select a new run ID. |
 | `resume` rejects the phase | Preserve evidence; the state is ambiguous and requires operator review. |

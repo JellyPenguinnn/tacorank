@@ -15,6 +15,7 @@ from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.schemas import (
     ArtifactKind,
     CostEstimate,
+    LiteratureEvidence,
     ResearchProposal,
 )
 
@@ -209,6 +210,19 @@ def test_controller_binds_codeblind_proposal_to_coder_contract(
 ):
     harness.bootstrap(baseline_evaluation)
     context = harness.context_builder.build_planner(harness.events())
+    literature = LiteratureEvidence(
+        evidence_id="lit_paper_001",
+        paper_id="W1234567890",
+        title="Bayesian Personalized Ranking from Implicit Feedback",
+        abstract="Pairwise ranking optimizes relative preference ordering.",
+        year=2009,
+        authors=["Steffen Rendle"],
+        venue="UAI",
+        citation_count=1000,
+        influential_citation_count=100,
+        url="https://openalex.org/W1234567890",
+        query="Bayesian personalized ranking recommender systems",
+    )
     values = {
         "run_id": context.run_id,
         "experiment_id": "exp_001",
@@ -229,6 +243,7 @@ def test_controller_binds_codeblind_proposal_to_coder_contract(
         ),
         "method_card_ids": ["objective_pairwise_bpr"],
         "evidence_event_ids": list(context.source_event_ids),
+        "literature_evidence": [literature],
     }
     values["duplicate_key"] = compute_duplicate_key(values)
 
@@ -242,6 +257,7 @@ def test_controller_binds_codeblind_proposal_to_coder_contract(
         "solution/train.py",
         "solution/inference.py",
     ]
+    assert spec.literature_evidence == [literature]
     assert [fidelity.value for fidelity in spec.fidelity_plan] == [
         "smoke",
         "proxy",

@@ -13,8 +13,9 @@ from tacorank.providers import deepseek as deepseek_module
 from tacorank.providers.deepseek import DeepSeekResearchProvider
 from tacorank.providers.research_provider import ProviderError, ProviderRequest
 from tacorank.research.duplicate_detection import compute_duplicate_key
+from tacorank.research.literature import OpenAlexLiteratureSkill
 from tacorank.research.search_policy import SearchPolicy
-from tacorank.schemas import TokenMeasurement
+from tacorank.schemas import LiteratureEvidence, ResearchProposal, TokenMeasurement
 
 from .conftest import make_summary
 
@@ -80,6 +81,22 @@ def output_factory(action, spec, reason_code, reason, supporting_event_ids):
         "reason": reason,
         "supporting_event_ids": supporting_event_ids,
     }
+
+
+def literature_evidence():
+    return LiteratureEvidence(
+        evidence_id="lit_paper_001",
+        paper_id="W1234567890",
+        title="Bayesian Personalized Ranking from Implicit Feedback",
+        abstract="Pairwise ranking optimizes relative preference ordering.",
+        year=2009,
+        authors=["Steffen Rendle"],
+        venue="UAI",
+        citation_count=1000,
+        influential_citation_count=100,
+        url="https://openalex.org/W1234567890",
+        query="Bayesian personalized ranking recommender systems",
+    )
 
 
 def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_context):
@@ -215,6 +232,45 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert provider.resource_delta.llm_input_tokens == 101
     assert provider.resource_delta.llm_output_tokens == 37
     assert provider.resource_delta.token_measurement == TokenMeasurement.PROVIDER
+
+
+def test_deepseek_provider_grounds_plan_in_retrieved_literature(planner_context):
+    calls = []
+    evidence = literature_evidence()
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, timeout
+        calls.append(payload)
+        return response(
+            candidate(
+                literature_evidence_ids=[
+                    evidence.evidence_id,
+                    "lit_invented_id",
+                ]
+            )
+        )
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(
+            ProviderRequest(
+                planner_context,
+                choice,
+                literature_evidence=(evidence,),
+            )
+        )
+    )
+
+    assert result["literature_evidence"] == [evidence.model_dump(mode="json")]
+    ResearchProposal.model_validate(result)
+    prompt = json.loads(calls[0]["messages"][1]["content"])
+    assert prompt["literature_research"]["required"] is True
+    assert prompt["literature_research"]["papers"] == [
+        evidence.model_dump(mode="json")
+    ]
+    assert "untrusted scientific evidence" in calls[0]["messages"][0]["content"]
+    assert "lit_invented_id" not in json.dumps(result)
 
 
 def test_deepseek_provider_preserves_policy_owned_ensemble_components(
@@ -441,6 +497,18 @@ def test_cli_selects_deepseek_without_putting_secret_in_config(config, monkeypat
     assert isinstance(planner, ResearchPlanner)
     assert isinstance(planner.provider, DeepSeekResearchProvider)
     assert "secret-key" not in json.dumps(configured.canonical_dict(), sort_keys=True)
+
+
+def test_cli_enables_keyless_openalex_skill(config, monkeypatch):
+    configured = config.model_copy(
+        update={"research_provider": "deepseek", "literature_research_enabled": True}
+    )
+    monkeypatch.setenv(configured.deepseek_api_key_env, "secret-key")
+    planner = _planner_for(configured)
+
+    assert isinstance(planner.literature_skill, OpenAlexLiteratureSkill)
+    serialized_config = json.dumps(configured.canonical_dict(), sort_keys=True)
+    assert "secret-key" not in serialized_config
 
 
 def test_cli_fails_closed_when_deepseek_key_is_missing(config, monkeypatch):

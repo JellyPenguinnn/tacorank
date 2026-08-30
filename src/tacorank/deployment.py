@@ -322,6 +322,12 @@ def setup_live_deployment(
         "deepseek_max_output_tokens": 8192,
         "deepseek_thinking_enabled": True,
         "deepseek_reasoning_effort": "high",
+        "literature_research_enabled": True,
+        "literature_provider": "openalex",
+        "literature_base_url": "https://api.openalex.org",
+        "literature_timeout_seconds": 20,
+        "literature_max_papers": 3,
+        "literature_min_citation_count": 5,
     }
     _write_json_exclusive(run_path, run_payload)
     return {

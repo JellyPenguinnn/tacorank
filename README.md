@@ -99,6 +99,7 @@ Only the controller may append events or change workflow state. Role components 
 | Python | 3.12.x | Isolated pinned Trae runtime created by setup |
 | Docker | Running Docker-compatible daemon | Hardened Trae tools and CPU candidate execution |
 | DeepSeek | `DEEPSEEK_API_KEY` with model access | Research planning, Trae coding, and bounded implementation review |
+| OpenAlex | Outbound HTTPS; no API key | Bounded paper evidence for each live research proposal |
 | KuaiRand-Pure | Local official data, or network access for setup download | Training, evaluation, and submission generation |
 
 The live workflow is CPU-only. On macOS, Docker Desktop or a Docker-compatible daemon such as Colima is sufficient. Native Windows PowerShell is also supported with Docker Desktop in Linux-container mode. Trae tool calls use the same reviewed stateless Docker-exec bridge on Windows, macOS, and Linux; they do not depend on a host pseudo-terminal or `pexpect.spawn`.
@@ -453,7 +454,7 @@ architecture. If the data directory is already complete, omit
 directory. macOS uses Docker Desktop's local Unix socket and the same stateless
 Docker-exec bridge as Windows, without changing its existing socket behavior.
 
-Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, pinned Trae install/config/runtime, credential presence and DeepSeek model access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
+Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, pinned Trae install/config/runtime, credential presence and DeepSeek model access, keyless OpenAlex search access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
 
 After a run starts, inspect or rebuild its state with:
 
