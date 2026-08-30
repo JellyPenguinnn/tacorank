@@ -64,6 +64,7 @@ export async function POST(request: Request) {
         run_id: runId,
         started_at: startedAt,
         pid: null,
+        stop_requested_at: null,
       };
       await writeLaunchRecord(launchRecord);
       const log = openSync(logPath, 'a');

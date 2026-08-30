@@ -6,8 +6,10 @@ type Json = Record<string, unknown>;
 type Event = { event_id?: string; seq?: number; timestamp?: string; event_type?: string; payload?: Json };
 type Run = {
   run_id: string; source: 'ledger' | 'launch'; status: string; phase: string; is_live: boolean; launch_error: string | null;
+  can_stop: boolean; stop_requested_at: string | null;
   started_at: string | null; updated_at: string | null;
   experiments_proposed: number; best_experiment_id: string | null; best_primary_score: number | null;
+  best_primary_fidelity: string | null;
   baseline_primary_score: number | null; stop_reason_code: string | null; final_experiment_id: string | null; event_count: number;
   current_experiment_id: string | null; current_attempt: number | null; current_fidelity: string | null;
   stage_started_at: string | null; configured_timeout_seconds: number | null; estimated_deadline: string | null;
@@ -99,7 +101,9 @@ export default function Home() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [confirmStart, setConfirmStart] = useState(false);
+  const [confirmStop, setConfirmStop] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [now, setNow] = useState(() => Date.now());
 
@@ -159,6 +163,24 @@ export default function Home() {
     finally { setApiKey(''); setStarting(false); }
   }, [apiKey, refresh]);
 
+  const stop = useCallback(async (runId: string) => {
+    setStopping(true); setError('');
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm_run_id: runId }),
+      });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? 'Could not stop the run.');
+      setConfirmStop(null);
+      setNotice(`Stop requested for ${runId}. The last durable ledger evidence will be preserved.`);
+      await refresh(runId);
+      await load(runId);
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Could not stop the run.'); }
+    finally { setStopping(false); }
+  }, [load, refresh]);
+
   const selectedDetail = detail?.summary.run_id === selectedId ? detail : null;
   const current = selectedDetail?.summary ?? runs.find((run) => run.run_id === selectedId) ?? null;
   const delta = current?.best_primary_score != null && current.baseline_primary_score != null ? current.best_primary_score - current.baseline_primary_score : null;
@@ -188,12 +210,12 @@ export default function Home() {
     </aside>
 
     <section className="workspace dashboard-workspace">
-      <header className="topbar dashboard-topbar"><div><p className="eyebrow">Autonomous research dashboard</p><h1>{current?.run_id ?? 'TacoRank runs'}</h1></div><button className="refresh-button" type="button" onClick={() => { void refresh(selectedId); if (selectedId) void load(selectedId); }}>↻ Refresh</button></header>
+      <header className="topbar dashboard-topbar"><div><p className="eyebrow">Autonomous research dashboard</p><h1>{current?.run_id ?? 'TacoRank runs'}</h1></div><div className="topbar-actions">{current && (current.can_stop || current.status === 'stopping') && <button className="stop-button" type="button" onClick={() => setConfirmStop(current.run_id)} disabled={stopping || current.status === 'stopping'}>{current.status === 'stopping' ? '■ Stopping…' : '■ Stop run'}</button>}<button className="refresh-button" type="button" onClick={() => { void refresh(selectedId); if (selectedId) void load(selectedId); }}>↻ Refresh</button></div></header>
       {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => setError('')}>×</button></div>}
       {notice && <div className="notice-banner"><span>{notice}</span><button type="button" onClick={() => setNotice('')}>×</button></div>}
 
       {!current ? <section className="empty-dashboard"><span>◎</span><h2>No run selected</h2><p>Start a production run or wait for a ledger-backed run to appear.</p></section> : <>
-        <section className="run-hero"><div><span className={`status-badge ${current.status}`}><i />{humanize(current.status)}</span><p className="hero-kicker">Current phase</p><h2>{humanize(current.phase)}</h2><p>{current.source === 'launch' ? `Launch reserved ${formatTime(current.started_at)} · waiting for the first ledger event` : `Last durable evidence ${formatTime(current.updated_at)} · ${current.event_count} ledger events`}</p></div><div className="hero-score"><span>BEST PRIMARY</span><strong>{formatScore(current.best_primary_score)}</strong><small>{delta === null ? current.source === 'launch' ? 'Available after baseline verification' : 'Baseline unavailable' : `${delta >= 0 ? '+' : ''}${delta.toFixed(6)} vs FM baseline`}</small></div></section>
+        <section className="run-hero"><div><span className={`status-badge ${current.status}`}><i />{humanize(current.status)}</span><p className="hero-kicker">Current phase</p><h2>{humanize(current.phase)}</h2><p>{current.source === 'launch' ? `Launch reserved ${formatTime(current.started_at)} · waiting for the first ledger event` : `Last durable evidence ${formatTime(current.updated_at)} · ${current.event_count} ledger events`}</p></div><div className="hero-score"><span>BEST PRIMARY</span><strong>{formatScore(current.best_primary_score)}</strong><small>{current.best_experiment_id === null ? 'Waiting for an experiment evaluation · baseline excluded' : `${current.best_experiment_id}${current.best_primary_fidelity ? ` · ${humanize(current.best_primary_fidelity)}` : ''}${delta === null ? '' : ` · ${delta >= 0 ? '+' : ''}${delta.toFixed(6)} vs FM`}`}</small></div></section>
         {current.launch_error && <div className="launch-error" role="alert"><strong>Setup failed before the ledger started.</strong><span>{current.launch_error}</span></div>}
         <section className="runtime-panel" aria-label="Current iteration runtime and progress">
           <div className="runtime-grid">
@@ -203,7 +225,7 @@ export default function Home() {
             <article><span>Stage timeout</span><strong>{current.configured_timeout_seconds === null ? 'Not configured' : formatDuration(current.configured_timeout_seconds)}</strong><small>{current.status === 'interrupted' ? `Deadline passed ${formatTime(current.estimated_deadline)}` : deadlineDelta === null ? 'No stage deadline' : deadlineDelta >= 0 ? `${formatDuration(deadlineDelta)} remaining` : `${formatDuration(Math.abs(deadlineDelta))} overdue`}</small></article>
             <article><span>Last ledger event</span><strong>{current.last_event_type ?? (current.source === 'launch' ? 'Waiting' : '—')}</strong><small>{current.last_event_id ? `${current.last_event_id} · ${formatDuration(lastEventAge)} ago` : 'Ledger has not started yet'}</small></article>
           </div>
-          {current.source === 'launch' ? <div className={`launch-progress ${current.status}`}><i>{current.status === 'failed' ? '!' : '…'}</i><div><span>{current.status === 'failed' ? 'Setup stopped' : 'Setup & preflight'}</span><small>{current.status === 'failed' ? 'Review the launcher error above, then start a fresh run.' : 'The reserved run will switch to ledger data automatically.'}</small></div></div> : <><div className="progress-heading"><div><span>Current progress</span><strong>{current.status === 'interrupted' ? 'Interrupted' : current.phase === 'recovery' ? 'Bounded recovery' : PROGRESS_STEPS[activeProgress]}</strong></div><small>{current.status === 'interrupted' ? `${humanize(current.phase)} · no active controller` : `Step ${activeProgress + 1} of ${PROGRESS_STEPS.length} · ${humanize(current.phase)}`}</small></div><div className="progress-track">
+          {current.source === 'launch' ? <div className={`launch-progress ${current.status}`}><i>{['failed', 'interrupted'].includes(current.status) ? '!' : current.status === 'stopping' ? '■' : '…'}</i><div><span>{current.status === 'stopping' ? 'Stopping setup' : ['failed', 'interrupted'].includes(current.status) ? 'Setup stopped' : 'Setup & preflight'}</span><small>{current.status === 'stopping' ? 'Waiting for the launcher and active worker to exit.' : current.status === 'interrupted' ? 'Stopped by the operator; no ledger evidence was fabricated.' : current.status === 'failed' ? 'Review the launcher error above, then start a fresh run.' : 'The reserved run will switch to ledger data automatically.'}</small></div></div> : <><div className="progress-heading"><div><span>Current progress</span><strong>{current.status === 'stopping' ? 'Stopping' : current.status === 'interrupted' ? 'Interrupted' : current.phase === 'recovery' ? 'Bounded recovery' : PROGRESS_STEPS[activeProgress]}</strong></div><small>{current.status === 'stopping' ? `${humanize(current.phase)} · stop requested` : current.status === 'interrupted' ? `${humanize(current.phase)} · no active controller` : `Step ${activeProgress + 1} of ${PROGRESS_STEPS.length} · ${humanize(current.phase)}`}</small></div><div className="progress-track">
             {PROGRESS_STEPS.map((step, index) => <div key={step} className={`progress-step ${index < activeProgress ? 'complete' : index === activeProgress ? current.status === 'interrupted' || current.phase === 'recovery' ? 'recovery' : 'active' : ''}`}><i>{index < activeProgress ? '✓' : index + 1}</i><span>{step}</span></div>)}
           </div></>}
         </section>
@@ -225,5 +247,6 @@ export default function Home() {
     </section>
 
     {confirmStart && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !starting) { setApiKey(''); setConfirmStart(false); } }}><section className="start-modal" role="dialog" aria-modal="true" aria-labelledby="start-title"><form onSubmit={(event) => { event.preventDefault(); void start(); }}><span className="modal-icon">▶</span><p className="eyebrow">Production workflow</p><h2 id="start-title">Start a new live run?</h2><p>This launches setup, non-mutating preflight, the paid DeepSeek + Trae loop, final submission checking, and ledger validation. It uses a fresh run ID and may run for hours.</p><label className="api-key-field"><span>DeepSeek API key</span><input type="password" name="deepseek-api-key" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="Paste your API key" autoComplete="off" autoCapitalize="none" spellCheck={false} autoFocus required disabled={starting || !canStart} /><small>The key is used only for this launch. It is not saved in browser storage, run metadata, or API responses.</small></label>{!canStart && <div className="credential-note">A script-managed live run is already active. Open the latest run to monitor it.</div>}<div className="modal-actions"><button type="button" className="cancel-button" onClick={() => { setApiKey(''); setConfirmStart(false); }} disabled={starting}>Cancel</button><button type="submit" className="start-button modal-start" disabled={starting || !canStart || !apiKey.trim()}>{starting ? 'Launching…' : 'Start production run'}</button></div></form></section></div>}
+    {confirmStop && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !stopping) setConfirmStop(null); }}><section className="start-modal stop-modal" role="dialog" aria-modal="true" aria-labelledby="stop-title"><form onSubmit={(event) => { event.preventDefault(); void stop(confirmStop); }}><span className="modal-icon stop-icon">■</span><p className="eyebrow">Interrupt live workflow</p><h2 id="stop-title">Stop this run?</h2><p>This interrupts the controller and active worker for <code>{confirmStop}</code>. Durable ledger evidence is preserved, but the run is not finalized and may not be resumable from its current phase.</p><div className="stop-warning"><strong>No result will be fabricated.</strong><span>The dashboard will mark the operational run interrupted after its process exits.</span></div><div className="modal-actions"><button type="button" className="cancel-button" onClick={() => setConfirmStop(null)} disabled={stopping}>Keep running</button><button type="submit" className="stop-button modal-stop" disabled={stopping}>{stopping ? 'Stopping…' : 'Stop this run'}</button></div></form></section></div>}
   </main>;
 }
