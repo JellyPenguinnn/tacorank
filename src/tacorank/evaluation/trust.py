@@ -112,15 +112,6 @@ def assess_trust(
         )
     if (
         evidence.parent_delta > 0
-        and evidence.internal_proxy_delta is not None
-        and evidence.internal_proxy_delta < 0
-    ):
-        return _assessment(
-            Verdict.SUSPICIOUS, Stability.NOT_APPLICABLE,
-            Integrity.INCONCLUSIVE, ["PROXY_FULL_SIGN_CONFLICT"], aggregate
-        )
-    if (
-        evidence.parent_delta > 0
         and evidence.unbiased_audit_delta is not None
         and evidence.unbiased_audit_delta <= 0
     ):
@@ -203,6 +194,13 @@ def assess_trust(
 
 def _directional_flags(evidence: TrustEvidence, config: TrustConfig) -> list:
     flags = []
+    if (
+        evidence.internal_proxy_delta is not None
+        and evidence.parent_delta * evidence.internal_proxy_delta < 0
+    ):
+        # Proxy and full use different samples.  A sign change is useful
+        # generalization evidence, but is not an integrity failure by itself.
+        flags.append("PROXY_FULL_DIRECTION_CONFLICT")
     deltas = list(evidence.metric_deltas.values())
     if deltas and min(deltas) < 0 < max(deltas):
         flags.append("METRIC_DIRECTION_CONFLICT")

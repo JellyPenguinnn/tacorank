@@ -583,6 +583,39 @@ def test_directionally_positive_parent_prevents_premature_search_stop(
     assert choice.family != "objective"
 
 
+def test_near_best_exploratory_parent_continues_depth_first(planner_context):
+    root = make_summary("exp_0000", score=0.601468756352959)
+    exploratory = make_summary(
+        "exp_0003",
+        parent_experiment_id="exp_0000",
+        family="duration_bias",
+        score=0.6014212941699442,
+        decision="accept",
+        parent_eligible=True,
+        trust_verdict="inconclusive",
+        stability="confirmed",
+        parent_delta=-0.0000474621830148,
+        prediction_change=0.8,
+        method_card_ids=["duration_bias_censored_watch_time"],
+    )
+    context = SimpleNamespace(
+        contract_summary=SimpleNamespace(**vars(planner_context.contract_summary)),
+        baseline=root,
+        current_best=root,
+        eligible_frontier=[root, exploratory],
+        family_history=[exploratory],
+        method_cards=planner_context.method_cards,
+        playbook=planner_context.playbook,
+    )
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
+    assert choice.parent.experiment_id == "exp_0003"
+    assert choice.family != "duration_bias"
+
+
 def test_playbook_deepens_trusted_improvement(planner_context):
     latest = make_summary(
         "exp_0001",
