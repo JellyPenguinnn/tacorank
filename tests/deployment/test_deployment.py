@@ -502,6 +502,7 @@ def test_runtime_import_inventory_is_bound_to_built_image(
                 "pydantic",
                 "tacorank",
                 "yaml",
+                "_sysconfigdata__linux_aarch64-linux-gnu",
             }
         )
         return json.dumps(roots)
@@ -512,6 +513,7 @@ def test_runtime_import_inventory_is_bound_to_built_image(
     )
 
     assert "solution" in roots
+    assert "_sysconfigdata__linux_aarch64-linux-gnu" not in roots
     assert set(deployment_module.RUNTIME_REQUIRED_IMPORTS) != set(roots)
     assert observed["label"] == "Docker runtime import verification"
     assert observed["args"][1:9] == (

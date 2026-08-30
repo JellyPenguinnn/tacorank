@@ -1276,14 +1276,18 @@ def _runtime_image_import_roots(
         or len(discovered) > 10_000
         or not all(
             isinstance(value, str)
-            and value.isidentifier()
             and len(value) <= 200
+            and "\x00" not in value
             for value in discovered
         )
         or len(discovered) != len(set(discovered))
     ):
         raise DeploymentError("Docker runtime import inventory is malformed")
-    roots = set(discovered)
+    # ``pkgutil`` may report interpreter-internal filenames such as
+    # ``_sysconfigdata__linux_aarch64-linux-gnu``. They are loadable through
+    # importlib but cannot appear as an AST import root, so omit them from the
+    # Gate A allowlist instead of rejecting an otherwise valid runtime image.
+    roots = {value for value in discovered if value.isidentifier()}
     roots.update(RUNTIME_SOURCE_IMPORT_ROOTS)
     required_roots = {name.split(".", 1)[0] for name in RUNTIME_REQUIRED_IMPORTS}
     if not required_roots.issubset(roots):
