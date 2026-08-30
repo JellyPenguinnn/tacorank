@@ -33,6 +33,14 @@ class ProcessLaunchError(RuntimeError):
     """Raised when the executor cannot create the reviewed child process."""
 
 
+class OutputQuotaExceeded(ProcessLaunchError):
+    """Raised when allowlisted runtime output exceeds its hard byte quota."""
+
+
+class DiskSpaceExhausted(ProcessLaunchError):
+    """Raised when output extraction cannot write because storage is full."""
+
+
 _SECRET_PATTERNS = (
     re.compile(
         r"(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret)"
@@ -649,7 +657,7 @@ def _extract_bounded_tar(
                             "container output archive contains a duplicate member"
                         )
                     if member.size < 0 or total_bytes + member.size > specification.max_bytes:
-                        raise ProcessLaunchError(
+                        raise OutputQuotaExceeded(
                             "container output archive exceeds the hard byte limit"
                         )
                     source = archive.extractfile(member)
@@ -723,7 +731,14 @@ def _extract_bounded_tar(
                 created.unlink()
             except FileNotFoundError:
                 pass
-        raise ProcessLaunchError("container output extraction failed") from extraction_errors[0]
+        first = extraction_errors[0]
+        if isinstance(first, OutputQuotaExceeded):
+            raise first
+        if isinstance(first, OSError) and first.errno == errno.ENOSPC:
+            raise DiskSpaceExhausted(
+                "container output extraction ran out of disk space"
+            ) from first
+        raise ProcessLaunchError("container output extraction failed") from first
 
 
 def _normalize_output_relative_path(value: str) -> str:

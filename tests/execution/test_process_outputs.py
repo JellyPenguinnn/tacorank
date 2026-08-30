@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from tacorank.execution.process import (
+    OutputQuotaExceeded,
     ProcessLaunchError,
     ProcessLauncher,
     _extract_bounded_tar,
@@ -69,6 +70,21 @@ def test_bounded_container_output_extraction_accepts_only_allowlisted_file(
     )
 
     assert (destination / "predictions.csv").read_bytes() == b"scores\n"
+
+
+def test_bounded_container_output_extraction_reports_quota_exhaustion(
+    tmp_path: Path,
+) -> None:
+    destination = (tmp_path / "outputs").resolve()
+    destination.mkdir()
+
+    with pytest.raises(OutputQuotaExceeded, match="hard byte limit"):
+        _extract_bounded_tar(
+            _spec(destination, _archive("artifacts/predictions.csv", b"x" * 2048)),
+            {},
+        )
+
+    assert not tuple(destination.iterdir())
 
 
 def test_live_runtime_output_is_extracted_before_supervisor_release(

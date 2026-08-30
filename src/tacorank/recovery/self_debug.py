@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 from .classifier import FailureClassification
 
@@ -31,7 +31,7 @@ def build_self_debug_instructions(
     remaining_budget: int,
     *,
     target_files: Iterable[str] = (),
-    success_check: str | None = None,
+    success_check: Optional[str] = None,
 ) -> str:
     """Build diagnostic instructions that constrain repair scope and objective drift."""
     spec = _get(context, "original_experiment_spec")
@@ -52,7 +52,7 @@ def build_self_debug_instructions(
         f"expected mechanism. The exact accepted patch is commit {commit}. Failure class "
         f"{classification.failure_class} has fingerprint {classification.fingerprint}; evidence: "
         f"{classification.evidence or 'no additional safe trace text'}.{previous} First explain the fault "
-        f"briefly, then patch {targets}. Preserve {contract}; do not edit protected evaluators, data "
+        f"briefly. Before invoking any edit tool, emit `DIAGNOSIS:`, `REPAIR_PLAN:`, and `VERIFICATION:` lines in the trajectory, then patch {targets}. Preserve {contract}; do not edit protected evaluators, data "
         f"loaders, contracts, or command configuration. Make {check} pass. This is repair attempt "
         f"{repair_attempt} of {_get(context, 'max_repair_attempts', default=2)}; "
         f"{remaining_budget} repair attempt(s) remain after this decision."

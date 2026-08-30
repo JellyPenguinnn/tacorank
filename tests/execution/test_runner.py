@@ -15,7 +15,11 @@ from tacorank.execution import CanonicalArtifactStoreAdapter
 from tacorank.execution.commands import CommandProfile, CommandRegistry, ExpectedArtifact
 from tacorank.execution.artifacts import RunArtifactManager, verify_execution_seal
 from tacorank.execution.interfaces import default_model_factory
-from tacorank.execution.runner import InvalidRunRequest
+from tacorank.execution.runner import (
+    InvalidRunRequest,
+    _normalize_exit,
+    _observer_outcome,
+)
 from tacorank.run_layout import run_artifact_root
 from tacorank.schemas import RunResult, TelemetrySample
 
@@ -33,6 +37,17 @@ PREDICTION = ExpectedArtifact(
     kind="predictions",
     content_type="text/csv",
 )
+
+
+def test_disk_quota_failures_have_specific_terminal_normalization() -> None:
+    outcome = _normalize_exit(
+        1,
+        "OSError: [Errno 28] No space left on device",
+        (),
+        {"ExitCode": 1},
+    )
+    assert outcome[0:2] == ("infrastructure_error", "DISK_QUOTA_EXHAUSTED")
+    assert _observer_outcome("DISK_LOW") == "infrastructure_error"
 
 
 def test_successful_run_is_sealed_observed_and_hash_addressed(

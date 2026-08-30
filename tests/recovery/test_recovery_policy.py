@@ -60,6 +60,8 @@ def test_candidate_code_failure_gets_focused_first_repair():
     assert "Pairwise training" in decision.instructions
     assert "abc123" in decision.instructions
     assert "solution/train.py" in decision.instructions
+    assert "before invoking any edit tool" in decision.instructions.lower()
+    assert "REPAIR_PLAN:" in decision.instructions
 
 
 def test_repair_budget_is_hard_capped_and_attempt_is_never_zero():
@@ -120,6 +122,16 @@ def test_integrity_registry_covers_path_data_and_output_boundaries():
     }
     assert expected.issubset(DELIBERATE_INTEGRITY_CODES)
     assert "TRAE_LAUNCH_FAILED" in TRANSIENT_CODING_ERROR_CODES
+
+
+def test_disk_quota_failure_abandons_without_same_commit_retry():
+    result = run_failure("infrastructure_error", "No space left on device")
+    result.error_class = "DISK_SPACE_EXHAUSTED"
+    classification = classify_failure(result)
+    assert classification.disk_quota_failure
+    decision = decide(result)
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "DISK_QUOTA_EXHAUSTED"
 
 
 @pytest.mark.parametrize("dimension", ["wall_time_seconds", "token", "gpu_seconds"])

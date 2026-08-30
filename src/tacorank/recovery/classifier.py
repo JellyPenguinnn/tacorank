@@ -19,6 +19,17 @@ TRANSIENT_CODING_ERROR_CODES = frozenset(
     }
 )
 
+DISK_QUOTA_ERROR_CODES = frozenset(
+    {
+        "DISK_QUOTA_EXHAUSTED",
+        "DISK_SPACE_EXHAUSTED",
+        "DISK_LOW",
+        "OBSERVED_DISK_FREE_FLOOR",
+        "OUTPUT_QUOTA_EXCEEDED",
+        "ENOSPC",
+    }
+)
+
 
 @dataclass(frozen=True)
 class FailureClassification:
@@ -29,6 +40,7 @@ class FailureClassification:
     deliberate_integrity_violation: bool = False
     made_progress: bool = False
     transient_coding_failure: bool = False
+    disk_quota_failure: bool = False
 
 
 def _value(value: Any) -> Any:
@@ -137,6 +149,19 @@ def classify_failure(result: Any) -> FailureClassification:
         and str(getattr(result, "error_class", "")).strip().upper()
         in TRANSIENT_CODING_ERROR_CODES
     )
+    error_code = str(getattr(result, "error_class", "")).strip().upper()
+    disk_quota = error_code in DISK_QUOTA_ERROR_CODES or any(
+        marker in lower_evidence
+        for marker in (
+            "no space left",
+            "disk quota",
+            "storage is full",
+            "disk free floor",
+            "enospc",
+        )
+    )
+    if disk_quota and getattr(result, "failure_stage", None) != "coding":
+        failure_class, reason = "infrastructure_error", "DISK_QUOTA_EXHAUSTED"
     return FailureClassification(
         failure_class=failure_class,
         reason_code=reason,
@@ -145,4 +170,5 @@ def classify_failure(result: Any) -> FailureClassification:
         deliberate_integrity_violation=deliberate,
         made_progress=made_progress,
         transient_coding_failure=transient_coding,
+        disk_quota_failure=disk_quota,
     )
