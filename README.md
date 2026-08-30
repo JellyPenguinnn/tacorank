@@ -394,6 +394,23 @@ new hash-bound deployment. Native Windows uses Docker
 Desktop's local `npipe://` endpoint; keep Docker Desktop in Linux-container
 mode (the WSL2 backend is recommended).
 
+For a reproducible end-to-end run, the repository also includes
+`run-new-live.ps1`. It creates a unique deployment/runtime/run identity, so it
+does not collide with an earlier attempt. From the repository root, export the
+key in the same PowerShell session and run:
+
+```powershell
+$env:DEEPSEEK_API_KEY = "your-key"
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\run-new-live.ps1 -DownloadData
+```
+
+Omit `-DownloadData` only when the required files are already present under
+`KuaiRand-Pure\data`. The script fails before setup if the tracked checkout or
+starter-kit submodule is dirty, Docker is unavailable, Python 3.12 cannot be
+found, or the API-key variable is missing. It prints the final status and runs
+`validate-ledger` before reporting success; it never prints the key.
+
 ### macOS
 
 Run from a clean checkout with Docker Desktop running:
