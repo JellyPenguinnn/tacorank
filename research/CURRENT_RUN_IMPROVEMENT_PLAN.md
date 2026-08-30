@@ -90,21 +90,27 @@ Apply these rules from top to bottom. The first matching rule wins.
 | Priority | Evidence condition | Required response | Research branch? |
 | --- | --- | --- | --- |
 | 0 | `output.checked.accepted = false` | Fix or abandon the output/contract failure through recovery. | No |
-| 1 | Trust integrity is `compromised`, or verdict is `suspicious` | Quarantine the result; investigate data, evaluator, or leakage. | No |
+| 1 | Trust integrity is `compromised`, or verdict is `suspicious` because of concrete evaluator, alignment, contract, forbidden-input, or output evidence | Quarantine the result; investigate data, evaluator, or leakage. A proxy/full direction change alone is advisory, not an integrity failure. | No |
 | 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Verify that the patch affected logits, gradients, and intended rows. | No |
 | 3 | Stability is `unstable` | Confirm seeds or simplify/regularize the same mechanism. | No new family |
 | 4 | Fidelity is `smoke` or `proxy` | Promote a clear proxy improvement, or one clean result within the symmetric proxy noise band, to one bounded full-fidelity check. Prune only a regression beyond that band. | No parent promotion |
 | 5 | Full public result is trusted and improves the parent by more than `epsilon` | Accept; confirm once if stability is only `single_seed`, then deepen the same family. | Yes |
-| 6 | Full public result changes predictions meaningfully but gain is within `[-epsilon, +epsilon]` | If the confirmed seed mean is directionally positive by more than two standard errors, retain it as a research parent but not validation best; otherwise treat it as inconclusive/noise. Move to the next independent mechanism from the best eligible parent. | Yes |
+| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, and remains within `eta` of the current validation best | Retain it as an exploratory research parent, keep `best_eligible = false`, and continue DFS from that node with a legal independent mechanism. | Yes, exploratory |
 | 7 | Full public result is trusted and worse than `-epsilon` | Treat the tested mechanism as falsified under its stated conditions; do not tune it indefinitely. | Yes |
 
-Only a full, verified, public-validation result with `trust.verdict = accepted`
-and `trust.integrity = clean` may create a future parent. A clean proxy score
-that improves clearly or remains within the symmetric noise band can justify
-one full-fidelity evaluation, but never a new trusted branch by itself.
-Confirmed positive direction below the Ladder threshold may guide DFS as a
-parent, but `best_eligible` remains false until the candidate clears the full
-`eta` threshold against the current validation best.
+Only a full, verified, clean, seed-confirmed public-validation result may create
+a future parent. Accepted results are trusted parents. An inconclusive result
+may be an explicitly marked exploratory parent only while its confirmed mean
+remains within `eta` of the current validation best. A proxy result can justify
+full evaluation but never becomes a parent by itself. Exploratory parents keep
+`best_eligible = false`; only the full Ladder threshold can update validation
+best.
+
+A proxy/full direction change is recorded as
+`PROXY_FULL_DIRECTION_CONFLICT`. Because proxy and full use different samples,
+that flag is advisory and seed confirmation continues. Hash, contract,
+alignment, forbidden-input, and output-integrity failures remain quarantine
+conditions.
 
 ### Hard prune, soft prune, and portfolio retention
 
