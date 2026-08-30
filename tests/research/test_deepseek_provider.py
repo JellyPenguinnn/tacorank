@@ -77,6 +77,11 @@ def output_factory(action, spec, reason_code, reason, supporting_event_ids):
 
 def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_context):
     calls = []
+    planner_context.data_profile = {
+        "profile_sha256": "d" * 64,
+        "train_rows": 4,
+        "score_rows": 2,
+    }
 
     def transport(url, headers, payload, timeout):
         calls.append((url, headers, payload, timeout))
@@ -118,6 +123,12 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
             "Required candidate entrypoint: def run(invocation) -> None"
         )
     }
+    assert prompt_document["context"]["data_profile"] == {
+        "profile_sha256": "d" * 64,
+        "train_rows": 4,
+        "score_rows": 2,
+    }
+    assert "read-only aggregate" in payload["messages"][0]["content"]
     assert "solution/train.py" in payload["messages"][0]["content"]
     assert "secret-key" not in json.dumps(payload)
     assert timeout == 120

@@ -23,6 +23,7 @@ from .orchestrator.router import Harness
 from .orchestrator.state_machine import validator
 from .providers import DeepSeekResearchProvider, ProviderError
 from .reporting import rebuild_views
+from .research.eda import PlannerEdaToolbox
 from .run_layout import RunLayout
 from .schemas import EvaluationResult
 
@@ -122,11 +123,18 @@ def _runtime(
     baseline = built.baseline
     planner = _planner_for(config)
     planner.provider.preflight()
+    eda_toolbox = PlannerEdaToolbox(live.input_roots["candidate_full"])
+    eda_toolbox.inspect()
     harness = Harness(
         config=config,
         verified_contract=verified,
         event_store=store,
-        context_builder=ContextBuilder(config, verified, artifacts),
+        context_builder=ContextBuilder(
+            config,
+            verified,
+            artifacts,
+            eda_toolbox=eda_toolbox,
+        ),
         planner=planner,
         **adapters,
     )
@@ -292,6 +300,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 live_config_path=args.live_config,
             )
             if args.command == "preflight":
+                eda_toolbox = harness.context_builder.eda_toolbox
+                if eda_toolbox is None:
+                    raise ContractError("planner EDA toolbox is unavailable")
+                data_profile = eda_toolbox.inspect()
                 print(
                     json.dumps(
                         {
@@ -299,6 +311,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             "status": "passed",
                             "runtime": "live",
                             "research_provider": config.research_provider,
+                            "planner_data_profile_sha256": data_profile.profile_sha256,
                             "baseline_primary": baseline.metric_set.primary_score,
                             "ledger_created": False,
                         },

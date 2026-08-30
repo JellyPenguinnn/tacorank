@@ -989,6 +989,136 @@ class ExperimentDecision(StrictModel):
         return self
 
 
+class PlannerEdaNumericSummary(StrictModel):
+    """Bounded numeric distribution emitted by the planner EDA toolbox."""
+
+    count: int = Field(gt=0)
+    minimum: float
+    p25: float
+    p50: float
+    p75: float
+    p90: float
+    p95: float
+    p99: float
+    maximum: float
+    mean: float
+
+    @model_validator(mode="after")
+    def validate_quantile_order(self) -> "PlannerEdaNumericSummary":
+        ordered = (
+            self.minimum,
+            self.p25,
+            self.p50,
+            self.p75,
+            self.p90,
+            self.p95,
+            self.p99,
+            self.maximum,
+        )
+        if any(left > right for left, right in zip(ordered, ordered[1:])):
+            raise ValueError("planner EDA numeric quantiles must be ordered")
+        return self
+
+
+class PlannerEdaRateSlice(StrictModel):
+    """One aggregate training-label slice; never an individual data row."""
+
+    value: NonEmptyStr
+    row_count: int = Field(gt=0)
+    positive_count: int = Field(ge=0)
+    positive_rate: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_positive_count(self) -> "PlannerEdaRateSlice":
+        if self.positive_count > self.row_count:
+            raise ValueError("planner EDA positives cannot exceed slice rows")
+        return self
+
+
+class PlannerEdaOverlapSummary(StrictModel):
+    """Distinct score entities seen in the training view."""
+
+    score_distinct_count: int = Field(ge=0)
+    seen_in_train_count: int = Field(ge=0)
+    unseen_in_train_count: int = Field(ge=0)
+    seen_in_train_rate: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_overlap_counts(self) -> "PlannerEdaOverlapSummary":
+        if (
+            self.seen_in_train_count + self.unseen_in_train_count
+            != self.score_distinct_count
+        ):
+            raise ValueError("planner EDA overlap counts must cover score entities")
+        return self
+
+
+class PlannerDataProfile(StrictModel):
+    """Hash-bound aggregate EDA available before a research proposal is made."""
+
+    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    profile_sha256: str
+    source_view: Literal["candidate_full"] = "candidate_full"
+    tool_ids: List[NonEmptyStr]
+    train_file_sha256: str
+    score_file_sha256: str
+    train_columns: List[NonEmptyStr]
+    score_columns: List[NonEmptyStr]
+    train_rows: int = Field(gt=0)
+    score_rows: int = Field(gt=0)
+    train_date_min: int
+    train_date_max: int
+    score_date_min: int
+    score_date_max: int
+    train_positive_count: int = Field(ge=0)
+    train_positive_rate: float = Field(ge=0.0, le=1.0)
+    train_cardinalities: Dict[NonEmptyStr, int]
+    score_cardinalities: Dict[NonEmptyStr, int]
+    train_missing_counts: Dict[NonEmptyStr, int]
+    score_missing_counts: Dict[NonEmptyStr, int]
+    train_duration_ms: PlannerEdaNumericSummary
+    score_duration_ms: PlannerEdaNumericSummary
+    train_interactions_per_entity: Dict[
+        NonEmptyStr, PlannerEdaNumericSummary
+    ]
+    score_entity_overlap: Dict[NonEmptyStr, PlannerEdaOverlapSummary]
+    train_long_view_by_tab: List[PlannerEdaRateSlice]
+    train_long_view_by_date: List[PlannerEdaRateSlice]
+
+    @field_validator("profile_sha256", "train_file_sha256", "score_file_sha256")
+    @classmethod
+    def validate_eda_hashes(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("planner EDA identities must be lowercase sha256")
+        return value
+
+    @field_validator("tool_ids", "train_columns", "score_columns")
+    @classmethod
+    def validate_unique_eda_values(cls, values: List[str]) -> List[str]:
+        if not values or len(values) != len(set(values)):
+            raise ValueError("planner EDA lists must be non-empty and unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_eda_profile(self) -> "PlannerDataProfile":
+        if self.train_positive_count > self.train_rows:
+            raise ValueError("planner EDA positives cannot exceed training rows")
+        if self.train_date_min > self.train_date_max:
+            raise ValueError("planner EDA training date range is invalid")
+        if self.score_date_min > self.score_date_max:
+            raise ValueError("planner EDA score date range is invalid")
+        canonical = json.dumps(
+            self.model_dump(mode="json", exclude={"profile_sha256"}),
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if hashlib.sha256(canonical).hexdigest() != self.profile_sha256:
+            raise ValueError("planner EDA profile hash does not match its contents")
+        return self
+
+
 class PlannerContractSummary(StrictModel):
     """Machine-readable subset of the frozen contract used by Person 1."""
 
@@ -1178,6 +1308,7 @@ class PlannerContext(ContextDocument):
     method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
     playbook: PlannerPlaybookSummary
     target_interface_excerpts: Dict[str, NonEmptyStr]
+    data_profile: Optional[PlannerDataProfile] = None
     remaining_budget: PlannerBudgetSummary
     convergence: PlannerConvergenceSummary
 

@@ -45,6 +45,11 @@ entrypoint named by target_interfaces; helper files are allowed only in addition
 that entrypoint. Never invent a replacement entrypoint such as solution/train.py.
 Use only the selected method card's allowed_data after its prerequisites and
 prohibition checks pass, and only evidence event IDs present in the supplied context.
+The context data_profile was computed before this request by fixed read-only aggregate
+EDA tools over candidate_full/train.csv and the unlabeled candidate_full/score.csv.
+Use its observed distributions, sparsity, temporal shift, and entity overlap to ground
+the hypothesis. Target-rate aggregates apply only to training rows; never infer or
+claim score-row labels from them.
 
 Required JSON fields:
 {
@@ -260,6 +265,7 @@ class DeepSeekResearchProvider:
             "target_interfaces": _jsonable(
                 get_value(context, "target_interface_excerpts", {})
             ),
+            "data_profile": _jsonable(get_value(context, "data_profile", None)),
             "remaining_budget": _jsonable(get_value(context, "remaining_budget", None)),
             "convergence": _jsonable(get_value(context, "convergence", None)),
             "source_event_ids": _jsonable(get_value(context, "source_event_ids", [])),

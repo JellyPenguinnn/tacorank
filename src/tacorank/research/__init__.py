@@ -1,6 +1,7 @@
 """Person 1 research-planning primitives."""
 
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
+from .eda import PlannerEdaError, PlannerEdaToolbox
 from .graph_view import ExperimentNodeView, GraphView
 from .linucb import LinUCBLegalChoiceRanker
 from .convergence_advisor import ConvergenceAdvice, ConvergenceAdvisor
@@ -22,6 +23,8 @@ __all__ = [
     "GraphView",
     "LinUCBLegalChoiceRanker",
     "MethodCard",
+    "PlannerEdaError",
+    "PlannerEdaToolbox",
     "PlanValidator",
     "PolicyChoice",
     "PruneDisposition",
