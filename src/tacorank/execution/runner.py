@@ -463,10 +463,14 @@ class ExecutionRunner:
                     )
         except BaseException as error:
             telemetry_error = error
+            detail = str(error).strip()
+            summary = "telemetry collection failed"
+            if detail:
+                summary = f"{summary}: {type(error).__name__}: {detail}"
             termination = (
                 "infrastructure_error",
                 "TELEMETRY_FAILURE",
-                "telemetry collection failed",
+                summary,
             )
 
         try:

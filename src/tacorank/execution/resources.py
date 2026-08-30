@@ -102,7 +102,12 @@ class DockerStatsUsageReader:
         # The Docker client can be running a few milliseconds before the daemon
         # has registered the named container. Retry only initial discovery;
         # telemetry loss after the first successful sample remains fail-closed.
-        attempts = 3 if self._previous_monotonic is None else 1
+        # Docker Desktop may take several hundred milliseconds to register a
+        # just-started container with ``docker stats`` (especially through the
+        # Windows named-pipe backend).  Give initial discovery a bounded grace
+        # window; once a sample has been observed, telemetry loss remains
+        # fail-closed.
+        attempts = 6 if self._previous_monotonic is None else 1
         budget = self.specification.timeout_seconds
         if timeout_seconds is not None:
             budget = min(budget, max(0.0, timeout_seconds))
@@ -118,7 +123,7 @@ class DockerStatsUsageReader:
                     env=dict(self.specification.environment),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                     check=False,
                     text=True,
                     shell=False,
@@ -128,7 +133,8 @@ class DockerStatsUsageReader:
             except (OSError, subprocess.SubprocessError) as error:
                 if attempt + 1 == attempts:
                     raise RuntimeMetricsError(
-                        "Docker candidate telemetry failed"
+                        "Docker candidate telemetry failed: "
+                        f"{type(error).__name__}: {error}"
                     ) from error
             else:
                 lines = [
@@ -136,11 +142,19 @@ class DockerStatsUsageReader:
                 ]
                 if completed.returncode == 0 and len(lines) == 1:
                     return lines[0]
+                if attempt + 1 == attempts:
+                    detail = completed.stderr.strip()
+                    if detail:
+                        detail = " " + detail[-512:]
+                    raise RuntimeMetricsError(
+                        "Docker candidate telemetry unavailable "
+                        f"(exit {completed.returncode}).{detail}"
+                    )
             if attempt + 1 < attempts:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                time.sleep(min(0.05, remaining))
+                time.sleep(min(0.2, remaining))
         raise RuntimeMetricsError("Docker candidate telemetry is unavailable")
 
 
