@@ -168,7 +168,11 @@ class RunConfig(StrictModel):
     deepseek_model: NonEmptyStr = "deepseek-v4-flash"
     deepseek_base_url: NonEmptyStr = "https://api.deepseek.com"
     deepseek_api_key_env: NonEmptyStr = "DEEPSEEK_API_KEY"
-    deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
+    deepseek_timeout_seconds: int = Field(default=300, gt=0, le=600)
+    research_planning_max_attempts: int = Field(default=2, gt=0, le=3)
+    research_planning_retry_backoff_seconds: float = Field(
+        default=1.0, ge=0.0, le=30.0
+    )
     deepseek_max_output_tokens: int = Field(default=8_192, gt=0)
     deepseek_thinking_enabled: bool = True
     deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"

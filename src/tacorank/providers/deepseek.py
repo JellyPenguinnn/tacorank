@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import json
 import logging
 import re
@@ -20,7 +21,12 @@ from ..research.code_blind import redact_implementation_references
 from ..research.duplicate_detection import compute_duplicate_key
 from ..research.graph_view import as_list, get_value
 from ..schemas import ResourceDelta, TokenMeasurement
-from .research_provider import ProviderError, ProviderRequest
+from .research_provider import (
+    ProviderError,
+    ProviderRequest,
+    ProviderTimeoutError,
+    TransientProviderError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -317,11 +323,20 @@ def default_chat_transport(
             body = response.read()
     except HTTPError as exc:
         detail = exc.read(2_048).decode("utf-8", errors="replace").strip()
-        raise ProviderError("DeepSeek HTTP %d: %s" % (exc.code, detail or "request failed")) from exc
+        error_type = (
+            TransientProviderError
+            if exc.code in {408, 429, 500, 502, 503, 504}
+            else ProviderError
+        )
+        raise error_type(
+            "DeepSeek HTTP %d: %s" % (exc.code, detail or "request failed")
+        ) from exc
     except URLError as exc:
-        raise ProviderError("DeepSeek connection failed: %s" % exc.reason) from exc
+        raise TransientProviderError(
+            "DeepSeek connection failed: %s" % exc.reason
+        ) from exc
     except TimeoutError as exc:
-        raise ProviderError("DeepSeek request timed out") from exc
+        raise ProviderTimeoutError("DeepSeek request timed out") from exc
 
     try:
         decoded = json.loads(body)
@@ -361,15 +376,28 @@ class DeepSeekResearchProvider:
         self.thinking_enabled = thinking_enabled
         self.reasoning_effort = reasoning_effort
         self.transport = transport or default_chat_transport
-        self._last_candidate: Optional[Dict[str, Any]] = None
-        self._input_tokens = 0
-        self._output_tokens = 0
+        self._last_candidate: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+            "deepseek_last_candidate", default=None
+        )
+        self._input_tokens: ContextVar[Optional[int]] = ContextVar(
+            "deepseek_input_tokens", default=None
+        )
+        self._output_tokens: ContextVar[Optional[int]] = ContextVar(
+            "deepseek_output_tokens", default=None
+        )
+        self._last_completed_input_tokens = 0
+        self._last_completed_output_tokens = 0
 
     @property
     def resource_delta(self) -> ResourceDelta:
+        input_tokens = self._input_tokens.get()
+        output_tokens = self._output_tokens.get()
+        if input_tokens is None or output_tokens is None:
+            input_tokens = self._last_completed_input_tokens
+            output_tokens = self._last_completed_output_tokens
         return ResourceDelta(
-            llm_input_tokens=self._input_tokens,
-            llm_output_tokens=self._output_tokens,
+            llm_input_tokens=input_tokens,
+            llm_output_tokens=output_tokens,
             token_measurement=TokenMeasurement.PROVIDER,
         )
 
@@ -480,7 +508,9 @@ class DeepSeekResearchProvider:
         if validation_errors:
             payload["repair"] = {
                 "validation_errors": list(validation_errors),
-                "previous_candidate": _research_candidate(self._last_candidate),
+                "previous_candidate": _research_candidate(
+                    self._last_candidate.get()
+                ),
                 "instruction": _repair_instruction(validation_errors),
             }
         return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -531,8 +561,14 @@ class DeepSeekResearchProvider:
         usage = response.get("usage")
         if not isinstance(usage, Mapping):
             return
-        self._input_tokens += _nonnegative_int(usage.get("prompt_tokens"), 0)
-        self._output_tokens += _nonnegative_int(usage.get("completion_tokens"), 0)
+        self._input_tokens.set(
+            (self._input_tokens.get() or 0)
+            + _nonnegative_int(usage.get("prompt_tokens"), 0)
+        )
+        self._output_tokens.set(
+            (self._output_tokens.get() or 0)
+            + _nonnegative_int(usage.get("completion_tokens"), 0)
+        )
 
     def _content(self, response: Mapping[str, Any]) -> Mapping[str, Any]:
         choices = response.get("choices")
@@ -671,20 +707,22 @@ class DeepSeekResearchProvider:
                 get_value(request.context, "context_id", None),
             )
         normalized = self._normalize(self._content(response), request)
-        self._last_candidate = normalized
+        self._last_candidate.set(normalized)
+        self._last_completed_input_tokens = self._input_tokens.get() or 0
+        self._last_completed_output_tokens = self._output_tokens.get() or 0
         logger.info(
             "deepseek_planner_response model=%s experiment_id=%s input_tokens=%d output_tokens=%d",
             self.model,
             normalized["experiment_id"],
-            self._input_tokens,
-            self._output_tokens,
+            self._input_tokens.get() or 0,
+            self._output_tokens.get() or 0,
         )
         return normalized
 
     async def generate(self, request: ProviderRequest) -> Dict[str, Any]:
-        self._input_tokens = 0
-        self._output_tokens = 0
-        self._last_candidate = None
+        self._input_tokens.set(0)
+        self._output_tokens.set(0)
+        self._last_candidate.set(None)
         return await self._complete(request, None)
 
     async def repair(

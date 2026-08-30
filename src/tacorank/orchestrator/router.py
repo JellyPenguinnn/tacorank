@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+import logging
 import re
-from typing import Deque, Optional, Sequence, Tuple
+from typing import Awaitable, Callable, Deque, Optional, Sequence, Tuple, TypeVar
 
 from ..config import RunConfig, VerifiedContract
 from ..coding.redaction import SecretRedactor
@@ -13,6 +14,7 @@ from ..context.builder import ContextBuilder
 from ..memory.canonical_json import canonical_sha256
 from ..memory.event_store import DuplicateIdempotencyKey, EventStore, LedgerError
 from ..memory.projections import project
+from ..providers.research_provider import TransientProviderError
 from ..recovery.fingerprints import fingerprint_failure, fingerprint_result, normalize_text
 from ..reporting import rebuild_views
 from ..run_layout import RunLayout
@@ -96,6 +98,10 @@ class ResumablePlanningError(OrchestrationError):
     replace the planner and resume from the persisted ``planner_context``
     without marking the run stopped or fabricating a recovery event.
     """
+
+
+logger = logging.getLogger(__name__)
+PlannerResult = TypeVar("PlannerResult")
 
 
 class Harness:
@@ -258,6 +264,13 @@ class Harness:
                 parallel_directions=self.config.parallel_directions,
                 synthesize_parallel_improvements=(
                     self.config.synthesize_parallel_improvements
+                ),
+                deepseek_timeout_seconds=self.config.deepseek_timeout_seconds,
+                research_planning_max_attempts=(
+                    self.config.research_planning_max_attempts
+                ),
+                research_planning_retry_backoff_seconds=(
+                    self.config.research_planning_retry_backoff_seconds
                 ),
                 wall_time_limit_seconds=self.config.wall_time_limit_seconds,
                 token_limit=self.config.token_limit,
@@ -1504,6 +1517,35 @@ class Harness:
         start = max(numbers, default=0) + 1
         return ["exp_%03d" % value for value in range(start, start + count)]
 
+    async def _request_planner_with_retry(
+        self,
+        operation: Callable[[], Awaitable[PlannerResult]],
+        *,
+        label: str,
+    ) -> PlannerResult:
+        attempts = self.config.research_planning_max_attempts
+        for attempt in range(1, attempts + 1):
+            try:
+                return await operation()
+            except TransientProviderError:
+                if attempt >= attempts:
+                    raise
+                delay = (
+                    self.config.research_planning_retry_backoff_seconds
+                    * attempt
+                )
+                logger.warning(
+                    "research_planner_transient_retry label=%s attempt=%d "
+                    "max_attempts=%d delay_seconds=%.3f",
+                    label,
+                    attempt,
+                    attempts,
+                    delay,
+                )
+                if delay > 0:
+                    await asyncio.sleep(delay)
+        raise AssertionError("planner retry loop exhausted without a result")
+
     async def _prepare_parallel_round(self, count: int):
         events = self.events()
         stop = stop_decision(project(events), events, self.config)
@@ -1523,13 +1565,24 @@ class Harness:
                 return await self.planner.propose(planner_context)
             return await propose(planner_context, index, count)
 
-        outputs = []
         try:
-            # The DeepSeek research adapter tracks bounded repair state and
-            # token usage per call, so seal its seven outputs serially before
-            # starting the concurrent coding/execution fan-out.
-            for index in range(count):
-                outputs.append(await request(index))
+            results = await asyncio.gather(
+                *(
+                    self._request_planner_with_retry(
+                        lambda index=index: request(index),
+                        label="parallel_direction_%d_of_%d"
+                        % (index + 1, count),
+                    )
+                    for index in range(count)
+                ),
+                return_exceptions=True,
+            )
+            failures = [
+                item for item in results if isinstance(item, Exception)
+            ]
+            if failures:
+                raise failures[0]
+            outputs = results
         except Exception as failure:
             self._record_planning_failure(
                 context_id=planner_context.context_id,
@@ -1732,8 +1785,11 @@ class Harness:
                 "parallel synthesis requires a synthesis-capable research planner"
             )
         try:
-            output = await propose(
-                planner_context, list(component_experiment_ids)
+            output = await self._request_planner_with_retry(
+                lambda: propose(
+                    planner_context, list(component_experiment_ids)
+                ),
+                label="parallel_round_synthesis",
             )
         except Exception as error:
             self._record_planning_failure(

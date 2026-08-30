@@ -1643,6 +1643,11 @@ class RunStartedPayload(StrictModel):
     max_experiments: int = Field(gt=0)
     parallel_directions: int = Field(default=1, gt=0, le=7)
     synthesize_parallel_improvements: bool = True
+    deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
+    research_planning_max_attempts: int = Field(default=1, gt=0, le=3)
+    research_planning_retry_backoff_seconds: float = Field(
+        default=0.0, ge=0.0, le=30.0
+    )
     wall_time_limit_seconds: int = Field(gt=0)
     token_limit: Optional[int] = Field(default=None, gt=0)
     gpu_seconds_limit: Optional[int] = Field(default=None, gt=0)

@@ -48,7 +48,7 @@ After completing [installation](#installation) and [deployment setup](#configura
   --live-config .tacorank/deployment/live-adapters.json
 ```
 
-This is the canonical end-to-end entry point. Production deployments seal seven distinct research directions from one ledger snapshot, run Trae and candidate execution in independent worktrees concurrently, evaluate each lane with serialized protected-query authority, and synthesize all independently accepted improvements into one newly gated candidate. The next round starts from durable post-synthesis memory. Frozen convergence and resource rules still own stopping and final selection.
+This is the canonical end-to-end entry point. Production deployments request seven distinct research directions concurrently from one ledger snapshot, retry typed transient provider failures once, and atomically seal the complete batch before starting Trae. Trae and candidate execution then run in independent worktrees concurrently, each lane is evaluated with serialized protected-query authority, and all independently accepted improvements are synthesized into one newly gated candidate. The next round starts from durable post-synthesis memory. Frozen convergence and resource rules still own stopping and final selection.
 
 ## Agent-assisted operation
 
