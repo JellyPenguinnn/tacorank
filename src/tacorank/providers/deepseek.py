@@ -52,6 +52,12 @@ collapsed residuals, missing personalization, or excessive divergence from the
 setup-verified FM parent. Never call a frozen evaluator result "baseline parity"
 unless baseline_parity is explicitly present in contract.research_capabilities.
 
+The context data_profile was computed before this request by fixed read-only aggregate
+EDA tools over the candidate-visible training and unlabeled scoring views. Use its
+observed distributions, sparsity, temporal shift, and entity overlap to ground the
+hypothesis. Target-rate aggregates apply only to training rows; never infer or claim
+score-row labels from them.
+
 Required JSON fields:
 {
   "hypothesis": "specific falsifiable hypothesis",
@@ -397,6 +403,7 @@ class DeepSeekResearchProvider:
                 _research_method(item)
                 for item in as_list(get_value(context, "method_cards", []))
             ],
+            "data_profile": _jsonable(get_value(context, "data_profile", None)),
             "remaining_budget": _jsonable(get_value(context, "remaining_budget", None)),
             "convergence": _jsonable(get_value(context, "convergence", None)),
             "source_event_ids": _jsonable(get_value(context, "source_event_ids", [])),

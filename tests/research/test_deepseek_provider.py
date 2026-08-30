@@ -74,6 +74,11 @@ def output_factory(action, spec, reason_code, reason, supporting_event_ids):
 
 def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_context):
     calls = []
+    planner_context.data_profile = {
+        "profile_sha256": "d" * 64,
+        "train_rows": 4,
+        "score_rows": 2,
+    }
     planner_context.baseline.diagnostic_metrics = {
         "user_rankable_fraction": 1.0,
     }
@@ -121,6 +126,12 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert prompt_document["context"]["baseline"]["diagnostic_metrics"] == {
         "user_rankable_fraction": 1.0,
     }
+    assert prompt_document["context"]["data_profile"] == {
+        "profile_sha256": "d" * 64,
+        "train_rows": 4,
+        "score_rows": 2,
+    }
+    assert "read-only aggregate" in payload["messages"][0]["content"]
     assert all(
         "implementation_targets" not in card
         for card in prompt_document["context"]["method_cards"]
