@@ -135,6 +135,39 @@ def _violation_codes(result: Any) -> set[str]:
     }
 
 
+def _prediction_change_evidence(change: Any) -> str:
+    """Render how far a no-op candidate sat from its parent, if measured.
+
+    Only within-user ordering is scored, so within_user_rank_change is the
+    number that matters; the others are reported because a candidate can move
+    every score numerically while reordering nothing.
+    """
+
+    if change is None:
+        return ""
+    parts = []
+    for name in (
+        "within_user_rank_change",
+        "changed_row_fraction",
+        "spearman_vs_parent",
+    ):
+        value = getattr(change, name, None)
+        if value is None:
+            continue
+        try:
+            parts.append("%s=%.6g" % (name, float(value)))
+        except (TypeError, ValueError):
+            continue
+    if not parts:
+        return ""
+    return (
+        "measured distance from parent: "
+        + ", ".join(parts)
+        + "; only within-user ordering is scored, so the residual must reorder "
+        "items inside a user's list, not merely shift every score"
+    )
+
+
 def classify_failure(result: Any) -> FailureClassification:
     """Classify a supported result without consulting hidden metrics or an LLM."""
     stage = str(_value(getattr(result, "failure_stage", ""))).strip().lower()
@@ -157,7 +190,17 @@ def classify_failure(result: Any) -> FailureClassification:
         if verdict != "no_op":
             raise ValueError("only an evaluation verdict of no_op is a recovery input")
         failure_class, reason = "no_op", "NO_OP_WIRING"
-        evidence = " ".join(getattr(trust, "flags", ()) or ()) or "verified prediction no-op"
+        # Flag names alone tell the coding worker that nothing changed but not
+        # by how much, and it has no shell to measure the gap itself. Carry the
+        # measured distance from the parent so the repair has a target instead
+        # of another blind guess.
+        evidence = " ".join(
+            [
+                " ".join(getattr(trust, "flags", ()) or ())
+                or "verified prediction no-op",
+                _prediction_change_evidence(getattr(result, "prediction_change", None)),
+            ]
+        ).strip()
         owner = "coding_worker"
         trae_repairable = True
     elif hasattr(result, "outcome"):
