@@ -32,6 +32,8 @@ Build a deterministic compact history from earlier positive (`long_view=1`)
 training interactions, with negative impressions used only as explicit
 negative evidence. Add a bounded similarity/affinity residual to the supplied
 FM score; do not replace the parent with an uncalibrated fixed heuristic.
+The FM values are unconstrained ranking scores, not probabilities: bound only
+the residual and never clip, sigmoid, normalize, or rescale the combined score.
 
 ## Sources
 

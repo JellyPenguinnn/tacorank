@@ -46,6 +46,7 @@ OUTPUT_CHECK_ORDER = (
     "duplicate_preservation",
     "finite_scores",
     "score_diversity",
+    "score_concentration",
     "artifact_identity",
     "producer_commit",
     "protected_data",
@@ -132,6 +133,7 @@ class OutputContract:
     require_contiguous_row_id: bool = True
     forbidden_columns: Tuple[str, ...] = ()
     minimum_unique_scores: int = 2
+    maximum_single_score_fraction: float = 1.0
 
     def __post_init__(self) -> None:
         names = tuple(column.name for column in self.columns)
@@ -145,6 +147,14 @@ class OutputContract:
             raise ValueError("row_id_column must be present in output columns")
         if self.minimum_unique_scores < 1:
             raise ValueError("minimum_unique_scores must be positive")
+        if (
+            isinstance(self.maximum_single_score_fraction, bool)
+            or not isinstance(self.maximum_single_score_fraction, (int, float))
+            or not 0.0 < float(self.maximum_single_score_fraction) <= 1.0
+        ):
+            raise ValueError(
+                "maximum_single_score_fraction must be in the interval (0, 1]"
+            )
         for index, row in enumerate(self.expected_rows):
             missing = [name for name in self.identity_columns if name not in row]
             if missing:
@@ -380,6 +390,24 @@ class OutputGate:
                     _field(artifact_ref, "path"),
                 )
             )
+        if scores:
+            most_common_count = Counter(scores).most_common(1)[0][1]
+            concentration = most_common_count / len(scores)
+            if concentration > self.contract.maximum_single_score_fraction:
+                findings.append(
+                    PolicyViolation(
+                        ViolationCode.OUTPUT_DEGENERATE_SCORES,
+                        "score_concentration",
+                        (
+                            "one score value occupies {:.2%} of prediction rows, "
+                            "above the frozen {:.2%} limit"
+                        ).format(
+                            concentration,
+                            self.contract.maximum_single_score_fraction,
+                        ),
+                        _field(artifact_ref, "path"),
+                    )
+                )
 
         for finding in _deduplicate_findings(findings):
             statuses[finding.check] = "fail"

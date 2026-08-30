@@ -55,6 +55,8 @@ class CoderContextLike(Protocol):
     allowed_command_ids: Sequence[str]
     selected_method_cards: Sequence[Any]
     active_lessons: Sequence[Any]
+    coding_invariants: Sequence[str]
+    prior_result_summaries: Sequence[Any]
     step_limit: int
     token_limit: Optional[int]
     wall_time_limit_seconds: int
@@ -112,6 +114,10 @@ def build_coding_prompt(
     token_limit = _optional_positive_int(context, "token_limit")
     wall_limit = _positive_int(context, "wall_time_limit_seconds")
     target_files = _validated_paths(spec_document.get("target_files"), "target_files")
+    coding_invariants = _json_value(getattr(context, "coding_invariants", ()))
+    prior_result_summaries = _json_value(
+        getattr(context, "prior_result_summaries", ())
+    )
 
     sections = [
         "# TacoRank bounded coding task",
@@ -156,6 +162,8 @@ def build_coding_prompt(
         "Begin by viewing the authoritative target files directly; do not list the repository root or survey unrelated directories.",
         "The interface excerpts and method cards below are the supplied integration context. Inspect one non-target file only when a concrete missing symbol or schema blocks the edit.",
         "When the interface supplies setup-verified FM scores, preserve them as the parent and implement the approved mechanism as a bounded residual unless the ExperimentSpec explicitly requires replacement.",
+        "The supplied FM scores are unconstrained real-valued ranking scores, not probabilities. Never sigmoid, clip to [0,1], normalize, or rescale the FM parent or a parent-plus-residual result. Bound only the residual on the parent's original scale.",
+        "Prior-result summaries are mandatory implementation constraints. Use them to avoid repeating score collapse, excessive parent divergence, missing personalization, or loss of within-user rankability.",
         "Before task_done, review the edited score path for full/representative training coverage, non-zero trainable gradients, user-conditioned score variation, correct feature semantics, deterministic seeds, and finite fallback scores.",
         "The symbolic allowed_command_ids are controller-owned post-patch checks, not shell tools available in this coding action. Do not search for or invoke them.",
         "Use the next editing-capable tool call after the target view to make the smallest coherent edit, verify the edited target if needed, and then call task_done.",
@@ -168,6 +176,12 @@ def build_coding_prompt(
         "",
         "## Selected method cards",
         _json_block(_json_value(_required_attribute(context, "selected_method_cards"))),
+        "",
+        "## Score-scale and implementation invariants",
+        _json_block(coding_invariants),
+        "",
+        "## Approved prior-result constraints",
+        _json_block(prior_result_summaries),
         "",
         "## Applicable lessons",
         _json_block(_json_value(_required_attribute(context, "active_lessons"))),

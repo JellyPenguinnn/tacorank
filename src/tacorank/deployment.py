@@ -104,8 +104,11 @@ def setup_trae_deployment(
                 "date is an integer YYYYMMDD value; "
                 "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
                 "and never exposes long_view. fm_baseline_predictions.csv is the "
-                "setup-verified official FM score for every score.csv row. Preserve "
-                "it as the strong parent and add only a bounded train-only residual "
+                "setup-verified official FM score for every score.csv row. These are "
+                "unconstrained real-valued ranking scores, not probabilities. Never "
+                "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
+                "parent-plus-residual result. Preserve it as the strong parent and "
+                "add only a bounded train-only residual on the original score scale "
                 "unless the approved hypothesis explicitly replaces the parent. "
                 "Training dates strictly precede score dates. Preserve contiguous "
                 "score row_id order, duplicate rows, finite deterministic scores, "
@@ -306,6 +309,7 @@ def setup_live_deployment(
         ],
         "active_research_prohibitions": [],
         "prediction_change_no_op_threshold": 0.001,
+        "max_single_score_fraction": 0.5,
         "target_interface_excerpts": {
             "solution/candidate.py": (
                 "Required candidate entrypoint: def run(invocation: "
@@ -319,8 +323,11 @@ def setup_live_deployment(
                 "and never exposes long_view. fm_baseline_predictions.csv contains "
                 "the setup-verified official FM score aligned one-to-one with "
                 "score.csv; fm_baseline_predictions.sha256 authenticates it. The "
-                "baseline candidate reproduces these bytes exactly. Keep this FM "
-                "score as the strong parent and learn one bounded train-only residual "
+                "baseline candidate reproduces these bytes exactly. FM scores are "
+                "unconstrained real-valued ranking scores, not probabilities. Never "
+                "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
+                "parent-plus-residual result. Keep this FM score as the strong parent "
+                "and learn one bounded train-only residual on the original score scale "
                 "unless the approved ExperimentSpec explicitly tests replacement. "
                 "Do not reinterpret duration_ms as watch time: it is video duration. "
                 "Training dates strictly precede score dates. Preserve contiguous "

@@ -170,6 +170,9 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert "parent_commit_sha" not in serialized_prompt
     assert "target_files" not in payload["messages"][0]["content"]
     assert "pipeline stages" in payload["messages"][0]["content"]
+    system_prompt = " ".join(payload["messages"][0]["content"].split())
+    assert "bounded additive residual" in system_prompt
+    assert "do not propose clipping" in system_prompt
     assert "secret-key" not in json.dumps(payload)
     assert timeout == 120
     assert provider.resource_delta.llm_input_tokens == 101

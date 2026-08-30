@@ -148,6 +148,16 @@ def _coding_inputs(secret: str = "") -> tuple[SimpleNamespace, dict[str, object]
         allowed_command_ids=("candidate_smoke",),
         selected_method_cards=(),
         active_lessons=({"summary": f"Never print {secret}"},) if secret else (),
+        coding_invariants=(
+            "FM scores are unconstrained ranking scores; never clip them.",
+        ),
+        prior_result_summaries=(
+            {
+                "experiment_id": "exp0",
+                "parent_delta": -0.04,
+                "diagnostic_metrics": {"spearman_vs_fm_baseline": 0.67},
+            },
+        ),
         step_limit=4,
         token_limit=50,
         wall_time_limit_seconds=10,
@@ -168,6 +178,9 @@ def test_coding_prompt_is_exact_bounded_and_credential_free() -> None:
     assert '"authoritative_target_files": [\n    "solution/model.py"\n  ]' in prompt
     assert "do not list the repository root" in prompt
     assert "controller-owned post-patch checks" in prompt
+    assert "unconstrained real-valued ranking scores" in prompt
+    assert '"parent_delta": -0.04' in prompt
+    assert '"spearman_vs_fm_baseline": 0.67' in prompt
     assert "then call task_done" in prompt
 
     changed_spec = dict(spec, hypothesis="different")
