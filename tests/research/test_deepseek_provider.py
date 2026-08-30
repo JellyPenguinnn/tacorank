@@ -365,6 +365,69 @@ def test_deepseek_provider_derives_later_campaign_treatment_boundary(
     assert validation.accepted, validation.errors
 
 
+def test_deepseek_provider_binds_latest_prior_evaluation_when_citation_is_invalid(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = {
+        "campaign_id": "depth_test",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 3},
+        "family_method_card_ids": {"objective": ["objective_pairwise_bpr"]},
+        "family_directives": {"objective": "Adapt from prior evidence."},
+    }
+    prior = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    prior.campaign_id = "depth_test"
+    prior.variant_id = "objective_01"
+    prior.evaluation_event_id = "evt_000010"
+    prior.variant_parameters = {
+        "formulation": "bpr",
+        "embedding_dim": 8,
+        "learning_rate": 0.01,
+        "epochs": 2,
+        "negative_count": 2,
+        "l2": 0.0001,
+        "residual_scale": 0.05,
+        "max_train_rows": 100000,
+    }
+    planner_context.family_history = [prior]
+    planner_context.source_event_ids.append("evt_000010")
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, payload, timeout
+        return response(
+            candidate(
+                variant_instruction="Increase BPR negatives from two to four.",
+                variant_parameters={"negative_count": 4},
+                hypothesis_evidence={
+                    "observation": "The prior BPR result remained within noise.",
+                    "source_evaluation_event_ids": ["evt_999999"],
+                    "expected_metric_effects": {"GAUC": 0.001},
+                },
+            )
+        )
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(ProviderRequest(planner_context, choice))
+    )
+
+    assert result["hypothesis_evidence"]["source_evaluation_event_ids"] == [
+        "evt_000010"
+    ]
+    assert "evt_000010" in result["evidence_event_ids"]
+    validation = PlanValidator().validate(
+        result, planner_context, choice=choice
+    )
+    assert validation.accepted, validation.errors
+
+
 def test_deepseek_provider_preserves_policy_owned_ensemble_components(
     planner_context,
 ):

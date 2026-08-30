@@ -1,15 +1,17 @@
 {
-  "campaign_id": "objective_temporal_50_v1",
+  "campaign_id": "objective_temporal_features_50_v2",
   "family_order": [
+    "features",
     "objective",
     "temporal_history"
   ],
   "family_budgets": {
-    "objective": 25,
-    "temporal_history": 25
+    "features": 20,
+    "objective": 15,
+    "temporal_history": 15
   },
-  "minimum_family_full_evaluations": 25,
-  "family_convergence_patience": 25,
+  "minimum_family_full_evaluations": 15,
+  "family_convergence_patience": 15,
   "family_method_card_ids": {
     "objective": [
       "objective_pairwise_bpr",
@@ -17,10 +19,14 @@
     ],
     "temporal_history": [
       "temporal_history_compact"
+    ],
+    "features": [
+      "features_history_affinity"
     ]
   },
   "family_directives": {
     "objective": "Investigate only the verified BPR and full-observed-listwise capabilities. Declare every active typed parameter, adapt values from prior confidence intervals and execution-conformance diagnostics, and do not claim an implementation distinction that is absent from the capability contract.",
-    "temporal_history": "Investigate the verified strictly past temporal-history capability. Adapt only its declared active decay, shrinkage, residual-scale, and training-row parameters; do not vary inactive capacity or optimizer knobs."
+    "temporal_history": "Investigate the verified strictly past temporal-history capability. Adapt only its declared active decay, shrinkage, residual-scale, and training-row parameters; do not vary inactive capacity or optimizer knobs.",
+    "features": "Investigate only the verified point-in-time history-affinity capability. Use candidate-conditioned tag, author, duration, tab, time, and item-age signals with strict temporal cutoffs; adapt declared regularization, shrinkage, residual-scale, and training parameters without adding known-negative static user or item fields."
   }
 }

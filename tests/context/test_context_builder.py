@@ -7,7 +7,9 @@ import pytest
 
 from tacorank.context.builder import (
     ContextBuildError,
+    _execution_conformant,
     _mentions_protected_validation_arm,
+    _planner_primary_score,
     _planner_parent_metric_deltas,
 )
 from tacorank.context.redaction import redact
@@ -54,6 +56,17 @@ def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_e
     assert "fidelity_plan" not in first.content
     assert "implementation_targets" not in first.content
     assert "commit_sha" not in first.content
+
+
+def test_planner_uses_training_conformance_and_aggregate_seed_score():
+    evaluation = SimpleNamespace(
+        diagnostic_metrics={"training_implementation_conformant": 1.0},
+        trust=SimpleNamespace(seed_mean=0.6123),
+    )
+    metric_set = SimpleNamespace(primary_score=0.6010)
+
+    assert _execution_conformant(evaluation) is True
+    assert _planner_primary_score(evaluation, metric_set) == 0.6123
 
 
 def test_planner_history_preserves_complete_evaluation_evidence(

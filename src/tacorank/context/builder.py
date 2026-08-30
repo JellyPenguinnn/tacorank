@@ -93,6 +93,23 @@ def _planner_diagnostic_metrics(result: object) -> Dict[str, float]:
     }
 
 
+def _planner_primary_score(evaluation: object, metric_set: object) -> float:
+    trust = getattr(evaluation, "trust", None)
+    seed_mean = getattr(trust, "seed_mean", None)
+    return float(
+        seed_mean if seed_mean is not None else metric_set.primary_score
+    )
+
+
+def _execution_conformant(evaluation: object) -> bool:
+    metrics = dict(getattr(evaluation, "diagnostic_metrics", {}) or {})
+    value = metrics.get(
+        "training_implementation_conformant",
+        metrics.get("implementation_conformant"),
+    )
+    return value == 1.0
+
+
 def _planner_failure_hypotheses(result: object) -> List[str]:
     diagnostics = getattr(result, "diagnostics", None)
     if diagnostics is None:
@@ -772,7 +789,11 @@ class ContextBuilder:
                     output_accepted=(output.accepted if output else None),
                     output_checks=(dict(output.checks) if output else {}),
                     output_violations=(list(output.violations) if output else []),
-                    primary_score=(metric_set.primary_score if metric_set else None),
+                    primary_score=(
+                        _planner_primary_score(evaluation, metric_set)
+                        if metric_set is not None
+                        else None
+                    ),
                     metric_set=metric_set,
                     metric_deltas=metric_deltas,
                     baseline_delta=evaluation.baseline_delta if evaluation else None,
@@ -806,11 +827,7 @@ class ContextBuilder:
                     trial_type=spec.trial_type,
                     implementation_id=spec.implementation_id,
                     execution_conformant=bool(
-                        evaluation
-                        and evaluation.diagnostic_metrics.get(
-                            "implementation_conformant"
-                        )
-                        == 1.0
+                        evaluation and _execution_conformant(evaluation)
                     ),
                     method_card_ids=list(spec.method_card_ids),
                     component_experiment_ids=list(spec.component_experiment_ids),

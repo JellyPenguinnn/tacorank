@@ -731,11 +731,14 @@ class DeepSeekResearchProvider:
                     reference=reference,
                 )
 
-        prior_evaluation_ids = {
-            str(get_value(summary, "evaluation_event_id", ""))
-            for summary in as_list(get_value(context, "family_history", None))
-            if get_value(summary, "evaluation_event_id", None)
-        }
+        prior_evaluation_ids_in_order = list(
+            dict.fromkeys(
+                str(get_value(summary, "evaluation_event_id", ""))
+                for summary in as_list(get_value(context, "family_history", None))
+                if get_value(summary, "evaluation_event_id", None)
+            )
+        )
+        prior_evaluation_ids = set(prior_evaluation_ids_in_order)
         raw_hypothesis_evidence = raw.get("hypothesis_evidence")
         hypothesis_evidence = None
         if prior_evaluation_ids and isinstance(raw_hypothesis_evidence, Mapping):
@@ -747,6 +750,8 @@ class DeepSeekResearchProvider:
                 )
                 if str(item) in prior_evaluation_ids
             ]
+            if not cited:
+                cited = [prior_evaluation_ids_in_order[-1]]
             changed, held = treatment_partition(
                 variant_parameters, reference, active_parameters
             )

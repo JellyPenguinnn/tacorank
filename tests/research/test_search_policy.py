@@ -232,6 +232,52 @@ def test_campaign_enumerates_all_fifty_slots_before_exhaustion(planner_context):
     assert exhausted.reason_code == "CAMPAIGN_EXHAUSTED"
 
 
+def test_feature_first_campaign_selects_history_affinity_immediately(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = [
+        "features",
+        "objective",
+        "temporal_history",
+    ]
+    planner_context.contract_summary.allowed_data.extend(
+        [
+            "time_ms",
+            "hourmin",
+            "item_tags",
+            "upload_date",
+            "point_in_time_history_features",
+        ]
+    )
+    planner_context.contract_summary.research_capabilities.extend(
+        ["strict_temporal_cutoff", "history_affinity_features_legal"]
+    )
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="objective_temporal_features_50_v2",
+        family_order=["features", "objective", "temporal_history"],
+        family_budgets={"features": 20, "objective": 15, "temporal_history": 15},
+        family_method_card_ids={
+            "features": ["features_history_affinity"],
+            "objective": ["objective_pairwise_bpr"],
+            "temporal_history": ["temporal_history_compact"],
+        },
+        family_directives={
+            "features": "Adapt point-in-time history affinity.",
+            "objective": "Adapt objective parameters.",
+            "temporal_history": "Adapt temporal parameters.",
+        },
+        minimum_family_full_evaluations=15,
+        family_convergence_patience=15,
+    )
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "propose"
+    assert choice.family == "features"
+    assert choice.method_card_id == "features_history_affinity"
+    assert choice.variant_id == "features_01"
+
+
 def test_clean_evaluator_baseline_does_not_imply_executable_parent_parity(
     planner_context,
 ):

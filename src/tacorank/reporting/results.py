@@ -30,6 +30,15 @@ from ..schemas import (
 from .resources import ResourceSummary
 
 
+def _reported_primary_score(node: object) -> Optional[float]:
+    trust = getattr(node, "trust", None)
+    seed_mean = getattr(trust, "seed_mean", None)
+    if seed_mean is not None:
+        return float(seed_mean)
+    metric_set = getattr(node, "metric_set", None)
+    return None if metric_set is None else float(metric_set.primary_score)
+
+
 def render_metric_table(
     named_results: Mapping[str, EvaluationResult],
 ) -> str:
@@ -577,8 +586,8 @@ def render_summary(events: Sequence[Event]) -> str:
                 node.status.value,
                 node.highest_fidelity.value if node.highest_fidelity else "—",
                 (
-                    "%.8f" % node.metric_set.primary_score
-                    if node.metric_set is not None
+                    "%.8f" % _reported_primary_score(node)
+                    if _reported_primary_score(node) is not None
                     else "—"
                 ),
                 (
@@ -621,10 +630,10 @@ def render_summary(events: Sequence[Event]) -> str:
             ]
             best = max(
                 full_nodes,
-                key=lambda node: node.metric_set.primary_score,
+                key=lambda node: _reported_primary_score(node),
                 default=None,
             )
-            best_score = best.metric_set.primary_score if best is not None else None
+            best_score = _reported_primary_score(best) if best is not None else None
             baseline_delta = (
                 best_score - state.baseline_primary_score
                 if best_score is not None and state.baseline_primary_score is not None
@@ -755,6 +764,7 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                 "status": "accepted",
                 "highest_fidelity": payload.evaluation.fidelity.value,
                 "metric_set": payload.metric_set.model_dump(mode="json"),
+                "primary_score": payload.metric_set.primary_score,
                 "trust": payload.evaluation.trust.model_dump(mode="json"),
                 "diagnostics": payload.evaluation.diagnostics.model_dump(mode="json"),
                 "metrics_artifact": (
@@ -837,6 +847,7 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                     if node.metric_set is not None
                     else None
                 ),
+                "primary_score": _reported_primary_score(node),
                 "trust": (
                     node.trust.model_dump(mode="json")
                     if node.trust is not None
@@ -910,8 +921,7 @@ def _render_graph(payload: dict) -> str:
         "| --- | --- | --- | --- | --- | ---: |",
     ]
     for node in payload["nodes"]:
-        metric_set = node["metric_set"]
-        score = metric_set["primary_score"] if metric_set is not None else None
+        score = node.get("primary_score")
         lines.append(
             "| %s | %s | %s | %s | %s | %s |"
             % (
@@ -991,7 +1001,7 @@ def _render_experiment(node: dict, events: Sequence[Event]) -> str:
                 "",
                 "## Result",
                 "",
-                "Primary: `%.8f`" % metric_set["primary_score"],
+                "Primary: `%.8f`" % node["primary_score"],
                 "",
                 "```json",
                 json.dumps(metric_set, ensure_ascii=False, sort_keys=True, indent=2),
@@ -1088,8 +1098,7 @@ def _render_direction(direction: dict, node_by_id: Mapping[str, dict]) -> str:
     ]
     for experiment_id in direction["experiment_ids"]:
         node = node_by_id[experiment_id]
-        metric_set = node["metric_set"]
-        score = metric_set["primary_score"] if metric_set is not None else None
+        score = node.get("primary_score")
         lines.append(
             "| [%s](experiments/%s.md) | %s | %s | %s |"
             % (
