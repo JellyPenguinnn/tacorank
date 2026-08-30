@@ -101,7 +101,7 @@ Only the controller may append events or change workflow state. Role components 
 | DeepSeek | `DEEPSEEK_API_KEY` with model access | Research planning, Trae coding, and bounded implementation review |
 | KuaiRand-Pure | Local official data, or network access for setup download | Training, evaluation, and submission generation |
 
-The live workflow is CPU-only. On macOS, Docker Desktop or a Docker-compatible daemon such as Colima is sufficient.
+The live workflow is CPU-only. On macOS, Docker Desktop or a Docker-compatible daemon such as Colima is sufficient. Native Windows PowerShell is also supported with Docker Desktop in Linux-container mode. Trae tool calls use the same reviewed stateless Docker-exec bridge on Windows, macOS, and Linux; they do not depend on a host pseudo-terminal or `pexpect.spawn`.
 
 ## Installation
 
@@ -392,7 +392,11 @@ Run `setup-live` only once for a deployment directory; if one already exists,
 choose new `--deployment-dir` and `--runtime-dir` values. Each setup creates a
 new hash-bound deployment. Native Windows uses Docker
 Desktop's local `npipe://` endpoint; keep Docker Desktop in Linux-container
-mode (the WSL2 backend is recommended).
+mode (the WSL2 backend is recommended). Newly generated deployments patch the
+pinned Trae runtime to use bounded stateless Docker exec, translate host paths
+to POSIX container paths, and verify both the patch and the container `timeout`
+command during preflight. Deployments generated before this compatibility patch
+must not be reused; create a new deployment and run ID.
 
 For a reproducible end-to-end run, the repository also includes
 `run-new-live.ps1`. It creates a unique deployment/runtime/run identity, so it
@@ -445,7 +449,8 @@ On Apple Silicon, Docker Desktop should use its default Linux/ARM64 engine;
 the pinned runtime image must be available for the selected Docker
 architecture. If the data directory is already complete, omit
 `--download-data`. Do not run `setup-live` twice against the same deployment
-directory. macOS uses Docker Desktop's local Unix socket.
+directory. macOS uses Docker Desktop's local Unix socket and the same stateless
+Docker-exec bridge as Windows, without changing its existing socket behavior.
 
 Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, pinned Trae install/config/runtime, credential presence and DeepSeek model access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
 
@@ -487,6 +492,7 @@ Production never falls back to fake adapters. Deterministic fakes remain behind 
 | `setup-live` reports a dirty checkout | Preserve or commit intended tracked changes, then rerun setup from the exact clean commit that should anchor the experiment. |
 | Python 3.12 or Docker cannot be found | Pass absolute executable paths with `setup-live --python312 ... --docker ...`. |
 | Docker preflight cannot reach the daemon | Start Docker Desktop or the configured compatible daemon, then rerun `preflight`. |
+| Trae reports `pexpect` has no `spawn` | The deployment predates the cross-platform Docker bridge. Preserve its evidence, update TacoRank, and create a fresh `setup-live` deployment and run ID. |
 | DeepSeek authentication or model preflight fails | Export a valid `DEEPSEEK_API_KEY` in the current shell; never place it in a tracked file. |
 | The run identifier already has a ledger | Choose a new `--run-id` in `setup-live`; completed ledgers are immutable and are not reused for new runs. |
 | `resume` rejects the current phase | The last durable state is mid-adapter and ambiguous. Preserve the ledger and evidence for operator review instead of fabricating a result. |

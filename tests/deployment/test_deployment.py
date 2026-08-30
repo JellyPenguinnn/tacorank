@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -315,6 +316,81 @@ def test_patch_trae_read_only_attach_reuses_pre_mounted_tools(
     compile(patched, str(docker_manager), "exec")
 
 
+def test_patch_trae_docker_exec_is_cross_platform_and_bounded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    docker_manager = site_packages / "trae_agent/agent/docker_manager.py"
+    docker_manager.parent.mkdir(parents=True)
+    docker_manager.write_text(
+        '''class DockerException(Exception):
+    pass
+
+class DockerManager:
+    def start(self):
+            self._copy_tools_to_container()
+            # if self.interactive:
+            self._start_persistent_shell()
+
+    def execute(self, command: str, timeout: int = 300):
+        # if self.interactive:
+        return self._execute_interactive(command, timeout)
+        # else:
+        #     return self._execute_stateless(command)
+
+    def _start_persistent_shell(self):
+        pass
+''',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        deployment_module, "_trae_site_packages", lambda runtime: site_packages
+    )
+
+    deployment_module._patch_trae_cross_platform_docker_exec(
+        tmp_path / "runtime"
+    )
+
+    patched = docker_manager.read_text(encoding="utf-8")
+    assert deployment_module.TRAE_STATELESS_DOCKER_MARKER in patched
+    assert "return self._execute_stateless(command, timeout)" in patched
+    assert '"timeout", "--signal=KILL"' in patched
+    assert "workdir=self.container_workspace" in patched
+    assert "self._start_persistent_shell()" not in patched.split(
+        "def _start_persistent_shell", 1
+    )[0]
+    compile(patched, str(docker_manager), "exec")
+    namespace = {}
+    exec(compile(patched, str(docker_manager), "exec"), namespace)
+    calls = []
+
+    class Container:
+        def exec_run(self, argv, *, workdir):
+            calls.append((argv, workdir))
+            return SimpleNamespace(exit_code=0, output=b"portable output\n")
+
+    manager = namespace["DockerManager"]()
+    manager.container = Container()
+    manager.container_workspace = "/workspace"
+    code, output = manager.execute("printf portable", timeout=7)
+
+    assert code == 0
+    assert output == "portable output"
+    assert calls == [
+        (
+            [
+                "timeout",
+                "--signal=KILL",
+                "7s",
+                "/bin/bash",
+                "-lc",
+                "printf portable",
+            ],
+            "/workspace",
+        )
+    ]
+
+
 def test_patch_trae_deepseek_reasoning_is_explicit_and_continuous(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -427,6 +503,10 @@ def test_patch_trae_docker_edit_tool_filters_and_quotes_arguments(
 import os
 
 class Executor:
+    def translate(self, relative_path):
+            container_path = os.path.join(self._container_workspace_dir, relative_path)
+            return os.path.normpath(container_path)
+
     def run(self, processed_args, sub_command):
                 executable_path = f"{self._docker_manager.CONTAINER_TOOLS_PATH}/edit_tool"
                 cmd_parts = [executable_path, sub_command]
@@ -455,7 +535,16 @@ class Executor:
     assert '"view": ("path", "view_range")' in patched
     assert "for key in command_arguments" in patched
     assert "shlex.join(cmd_parts)" in patched
+    assert "posixpath.join(" in patched
+    assert 'relative_path.replace(os.sep, "/")' in patched
     compile(patched, str(executor), "exec")
+    namespace = {}
+    exec(compile(patched, str(executor), "exec"), namespace)
+    instance = namespace["Executor"]()
+    instance._container_workspace_dir = "/workspace"
+    assert instance.translate(os.path.join("solution", "candidate.py")) == (
+        "/workspace/solution/candidate.py"
+    )
 
 
 def test_generated_trae_yaml_uses_v4_flash() -> None:

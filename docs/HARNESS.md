@@ -96,6 +96,14 @@ Execution, Gate A, Gate B, and adapter failures enter the bounded recovery route
 
 The pinned DeepSeek Responses client catches malformed or truncated function arguments before Trae executes them and asks for one smaller valid JSON call inside the existing step budget. The implementation verifier likewise retries malformed or truncated JSON once in a compact form before failing closed. An unsuccessful coding trajectory retains a redacted trajectory and process log when available, provider token usage, and elapsed wall time in `adapter.failed`. Any failure that remains after the internal solver/verifier loop is routed through Waihong's unchanged bounded self-recovery policy; only classified transient coding failures receive its one same-commit retry, and all other abandon or stop outcomes remain policy-owned. Generated experiment reports expose these failure and recovery records without changing ledger authority.
 
+The pinned Trae Docker manager is patched during setup to use bounded stateless
+Docker exec rather than an interactive host pseudo-terminal. The same reviewed
+path works through Docker Desktop's Windows named pipe and macOS/Linux Unix
+socket, always starts commands in `/workspace`, converts host paths to POSIX
+container paths, and applies an in-container timeout. Runtime identity checks
+require this patch, while preflight verifies the timeout utility and read-only
+tool mount before any research ledger is created.
+
 Resource failures are typed and fail closed. OOM and hard memory-limit signals may use an allowlisted runtime adjustment; disk-full, `ENOSPC`, output-quota, and storage-floor signals abandon the experiment without retrying or asking the coding worker to make an unrelated patch. The controller records the stable reason code and an operational lesson, so an operator can reclaim space or choose a fresh runtime before resuming. Evidence and prior run directories are never deleted automatically.
 
 Self-debugging is a bounded plan-before-edit handoff. Trae receives the original hypothesis and mechanism, accepted commit, failure class and fingerprint, safe evidence, prior attempts, target files, contract boundaries, and remaining repair budget. Its instructions require a brief diagnosis and concise repair plan before editing, followed by the smallest scoped patch and the existing Gate A/smoke check. The controller still treats the worker as untrusted: it does not accept a claimed plan as proof, and only Gate A plus the subsequent execution/evaluation results can authorize the next recovery transition.

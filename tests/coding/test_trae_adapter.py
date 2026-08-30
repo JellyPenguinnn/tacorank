@@ -450,6 +450,12 @@ def _production_worker(parts: SimpleNamespace) -> tuple[TraeCodingWorker, Path]:
         source = package_root / relative
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text("# reviewed pinned source fixture\n", encoding="utf-8")
+    (package_root / "agent" / "docker_manager.py").write_text(
+        "# TacoRank: use cross-platform bounded stateless Docker exec\n"
+        "# self._execute_stateless(command, timeout)\n"
+        '# ["timeout", "--signal=KILL"]\n',
+        encoding="utf-8",
+    )
     docker = root / "docker"
     docker.write_text("#!/usr/bin/env python3\n" + _FAKE_DOCKER, encoding="utf-8")
     docker.chmod(0o755)
@@ -998,7 +1004,40 @@ def test_production_preflight_executes_read_only_mounted_tool(
         "type=bind,src=%s,dst=/agent_tools,readonly,bind-propagation=rprivate"
         % (parts.config.trae_runtime_root / "trae_agent" / "dist")
     ) in calls[1]
+    entrypoint = calls[1].index("--entrypoint")
+    assert calls[1][entrypoint + 1] == "/bin/sh"
+    assert calls[1][-2:] == [
+        "-c",
+        "command -v timeout >/dev/null && /agent_tools/edit_tool --help",
+    ]
     assert calls[2] == ["start", "--attach", container_id]
+
+
+def test_runtime_preflight_requires_cross_platform_docker_bridge(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    worker, _ = _production_worker(parts)
+    manager = (
+        parts.config.trae_runtime_root
+        / "trae_agent"
+        / "agent"
+        / "docker_manager.py"
+    )
+    manager.write_text("# unpatched pinned source\n", encoding="utf-8")
+    parts.config = replace(
+        parts.config,
+        trae_runtime_manifest_sha256=hash_trae_runtime_package(
+            parts.config.trae_runtime_root
+        ),
+    )
+    worker = _worker(parts)
+
+    with pytest.raises(CodingWorkerError) as failure:
+        worker._verify_runtime_root()
+
+    assert failure.value.code == "TRAE_RUNTIME_IDENTITY_MISMATCH"
+    assert "cross-platform Docker bridge is missing" in str(failure.value)
 
 
 def test_local_preflight_does_not_require_provider_credential(

@@ -205,7 +205,7 @@ Before setup, confirm:
 - the pinned submodule is initialized at the recorded commit;
 - control-plane Python is 3.9+;
 - Python 3.12 is available for Trae;
-- a local Docker-compatible daemon is running and reachable through a Unix socket;
+- a local Docker-compatible daemon is running and reachable through a local Unix socket or Docker Desktop Windows named pipe;
 - the human has authorized live DeepSeek use and exported `DEEPSEEK_API_KEY`; and
 - official KuaiRand-Pure data is present inside this checkout, or setup is authorized to download it.
 

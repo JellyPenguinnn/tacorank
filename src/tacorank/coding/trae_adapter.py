@@ -65,6 +65,9 @@ TRAE_DEEPSEEK_TOOL_JSON_MARKER = (
 TRAE_DOCKER_EDIT_TOOL_MARKER = (
     "TacoRank: normalize and shell-quote command-specific edit arguments"
 )
+TRAE_STATELESS_DOCKER_MARKER = (
+    "TacoRank: use cross-platform bounded stateless Docker exec"
+)
 _PINNED_IMAGE_RE = re.compile(r"^(?:[^\s@]+@)?sha256:([0-9a-f]{64})$")
 _CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _DEFAULT_REVIEWED_TOOLS = (
@@ -1890,9 +1893,13 @@ class TraeCodingWorker:
             "--pull",
             "never",
             "--entrypoint",
-            "/agent_tools/edit_tool",
+            "/bin/sh",
             image,
-            "--help",
+            "-c",
+            (
+                "command -v timeout >/dev/null && "
+                "/agent_tools/edit_tool --help"
+            ),
         )
         try:
             created = self._run_docker_cli(
@@ -2652,6 +2659,23 @@ class TraeCodingWorker:
                 "TRAE_RUNTIME_IDENTITY_MISMATCH",
                 "Trae Docker tool assets differ from the reviewed manifest",
             )
+        docker_manager = root / "trae_agent" / "agent" / "docker_manager.py"
+        try:
+            docker_manager_source = docker_manager.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise CodingWorkerError(
+                "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                "reviewed cross-platform Docker bridge is unavailable",
+            ) from exc
+        if (
+            TRAE_STATELESS_DOCKER_MARKER not in docker_manager_source
+            or "self._execute_stateless(command, timeout)" not in docker_manager_source
+            or '"timeout", "--signal=KILL"' not in docker_manager_source
+        ):
+            raise CodingWorkerError(
+                "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                "reviewed cross-platform Docker bridge is missing",
+            )
         if self.config.provider_base_url == "https://api.deepseek.com":
             reasoning_client = (
                 root / "trae_agent" / "utils" / "llm_clients" / "openai_client.py"
@@ -2689,6 +2713,7 @@ class TraeCodingWorker:
                 TRAE_DOCKER_EDIT_TOOL_MARKER not in edit_source
                 or "command_arguments =" not in edit_source
                 or "shlex.join(cmd_parts)" not in edit_source
+                or "posixpath.join(" not in edit_source
             ):
                 raise CodingWorkerError(
                     "TRAE_RUNTIME_IDENTITY_MISMATCH",
