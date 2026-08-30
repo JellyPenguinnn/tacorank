@@ -190,6 +190,9 @@ def test_coding_prompt_is_exact_bounded_and_credential_free() -> None:
     assert '"rank": 8' in prompt
     assert "Optional planner parameter suggestions" in prompt
     assert "not as an exact implementation contract" in prompt
+    assert "suggestions are not a search program" in prompt
+    assert "never a Cartesian sweep" in prompt
+    assert "copy an exact value from a historical result" in prompt
     assert "Do not choose or reinterpret the hypothesis" in prompt
     assert "max_provider_tokens: `50`" in prompt
     assert '"authoritative_target_files": [\n    "solution/model.py"\n  ]' in prompt

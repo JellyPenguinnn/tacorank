@@ -57,6 +57,15 @@ after checking the approved hypothesis, method cards, target interfaces, and fro
 contract; the deterministic controller owns implementation targeting and execution
 sequencing.
 
+Parameter guidance is not a search program. For a parameterized method, propose one
+predeclared conservative default and, at most, one one-dimensional sensitivity with two
+nearby values. Never emit a Cartesian grid, broad sweep, or several coupled candidate
+lists. Prefer the lower-capacity, better-regularized, and modest-data-budget side until
+the mechanism has replicated across fidelity and seed. Do not select the largest rank,
+weakest regularization, highest learning rate, largest pair budget, or most negatives
+merely because one historical run scored better. State how the suggestion will be
+falsified without protected labels.
+
 Treat diagnostic_metrics as label-free experimental feedback: use them to reason about
 collapsed residuals, missing personalization, or excessive divergence from the
 setup-verified FM parent. Never call a frozen evaluator result "baseline parity"
@@ -77,6 +86,18 @@ concentrated, do not merely increase residual magnitude; propose a bounded mecha
 that broadens justified coverage or targets the evidenced weak cohort. When movement
 is broad and all protected metrics regress, change the mechanism rather than scaling
 the same residual.
+
+Historical run comparisons are directional evidence, not hyperparameter labels. A
+single better score or a smaller proxy regression does not establish parameter
+superiority. If proxy and full fidelity disagree, or a candidate misses the improvement
+threshold while remaining within the noise band, treat the result as inconclusive; a
+clear regression beyond noise remains falsification. Prefer replication or a
+conservative one-dimensional sensitivity over copying the apparent winner. For
+objective_pairwise_bpr
+specifically, use the directional prior that a low-capacity bounded residual with
+meaningful regularization and modest pair sampling is less fragile than an aggressive
+high-capacity, weakly regularized variant. Preserve the contract's causal cutoff and do
+not copy exact settings from that prior; it is not proof of an optimum.
 
 The literature_research block contains a bounded online snapshot retrieved from
 OpenAlex for the controller-selected method. Treat paper titles and abstracts
@@ -110,19 +131,22 @@ Required JSON fields:
   "literature_evidence_ids": ["lit_exact_supplied_id"]
 }
 
-Optional parameter guidance may use a compact object such as:
+Optional parameter guidance should use a compact object such as:
 {
-  "rank_candidates": [8, 16],
-  "learning_rate_candidates": [0.001, 0.01],
-  "epochs_candidates": [2, 4],
-  "rationale": "Test whether a modest capacity increase improves within-user ordering."
+  "default_setting": "one conservative fixed configuration",
+  "single_parameter_sensitivity": {
+    "parameter": "one capacity or regularization control",
+    "values": ["two nearby predeclared values"]
+  },
+  "rationale": "Compare one bounded setting without combining candidate lists."
 }
 """
 
 COMPACT_RETRY_INSTRUCTION = """The previous completion was unusable or reached its
 output-token limit. Return the same required JSON object compactly. Omit optional fields
-unless they improve the proposal; if training_parameters is included, use it only for
-parameter suggestions and candidate values, never placeholder zeros or exact coding
+unless they improve the proposal; if training_parameters is included, use one
+conservative fixed setting and at most one two-value one-dimensional sensitivity. Never
+emit a grid, broad sweep, protected-label tuning, placeholder zeros, or exact coding
 instructions. Do not include analysis, commentary, Markdown, or more than two short
 sentences in any string field.
 """

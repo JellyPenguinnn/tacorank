@@ -247,6 +247,10 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert "do not propose clipping" in system_prompt
     assert "optional guidance" in system_prompt
     assert "may use, adapt, or omit" in system_prompt
+    assert "Parameter guidance is not a search program" in system_prompt
+    assert "one-dimensional sensitivity" in system_prompt
+    assert "Historical run comparisons are directional evidence" in system_prompt
+    assert "do not copy exact settings" in system_prompt
     assert "must implement the supplied training_parameters exactly" not in system_prompt
     assert "secret-key" not in json.dumps(payload)
     assert timeout == 120

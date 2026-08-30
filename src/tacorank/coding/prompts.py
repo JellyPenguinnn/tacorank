@@ -197,8 +197,17 @@ def build_coding_prompt(
         "Treat these as hypothesis-level suggestions for parameters or candidate values "
         "to test, not as an exact implementation contract. Use, adapt, or omit them "
         "only when consistent with the approved hypothesis, method cards, target "
-        "interfaces, and frozen contract; do not silently expand scope or tune against "
-        "protected evaluation labels.",
+        "interfaces, and frozen contract; do not silently expand scope, create a "
+        "parameter sweep, select among values using evaluation labels, or copy an "
+        "exact value from a historical result.",
+        "Parameter discipline: suggestions are not a search program. Implement one "
+        "deterministic predeclared configuration, or at most one bounded "
+        "one-dimensional sensitivity when the approved hypothesis requires it; never "
+        "a Cartesian sweep. Prefer conservative capacity, meaningful regularization, "
+        "modest sampling budgets, and strict train-only/causal cutoffs. Do not choose "
+        "the largest capacity, weakest regularization, highest learning rate, or "
+        "largest pair budget to chase one prior score. Preserve the parent score and "
+        "the approved mechanism.",
         "",
         "## Selected method cards",
         _json_block(_json_value(_required_attribute(context, "selected_method_cards"))),
