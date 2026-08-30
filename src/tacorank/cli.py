@@ -95,6 +95,7 @@ def _planner_for(config: RunConfig):
         base_url=config.deepseek_base_url,
         timeout_seconds=config.deepseek_timeout_seconds,
         max_output_tokens=config.deepseek_max_output_tokens,
+        temperature=config.deepseek_temperature,
         thinking_enabled=config.deepseek_thinking_enabled,
         reasoning_effort=config.deepseek_reasoning_effort,
     )

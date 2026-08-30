@@ -320,6 +320,7 @@ def setup_live_deployment(
         "research_planning_max_attempts": 2,
         "research_planning_retry_backoff_seconds": 1.0,
         "deepseek_max_output_tokens": 8192,
+        "deepseek_temperature": 0.2,
         "deepseek_thinking_enabled": True,
         "deepseek_reasoning_effort": "high",
         "literature_research_enabled": True,
@@ -767,7 +768,7 @@ models:
     model_provider: openai
     model: deepseek-v4-flash
     max_tokens: 32768
-    temperature: 0
+    temperature: 0.2
     top_p: 1
     top_k: 0
     max_retries: 3

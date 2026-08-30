@@ -12,6 +12,9 @@ from .graph_view import get_value
 
 
 def _normalize(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _normalize(model_dump(mode="python"))
     if isinstance(value, Mapping):
         return {str(key): _normalize(value[key]) for key in sorted(value)}
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -41,6 +44,7 @@ def duplicate_payload(spec: Any) -> dict[str, Any]:
             str(item)
             for item in get_value(spec, "component_experiment_ids", ()) or ()
         ],
+        "training_parameters": get_value(spec, "training_parameters", None),
         "legacy_change_summary": (
             "" if methods else get_value(spec, "change_summary", "")
         ),

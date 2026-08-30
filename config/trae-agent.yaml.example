@@ -24,7 +24,7 @@ models:
     model_provider: openai
     model: deepseek-v4-flash
     max_tokens: 32768
-    temperature: 0
+    temperature: 0.2
     top_p: 1
     top_k: 0
     max_retries: 3

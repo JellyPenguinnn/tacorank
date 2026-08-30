@@ -61,6 +61,25 @@ def test_method_and_ensemble_components_are_semantic_identity():
     assert compute_duplicate_key(first_blend) != compute_duplicate_key(second_blend)
 
 
+def test_training_parameters_are_part_of_experiment_identity():
+    first = make_spec(
+        training_parameters={
+            "rank": 8,
+            "learning_rate": 0.01,
+            "regularization": 0.0001,
+        }
+    )
+    second = make_spec(
+        training_parameters={
+            "rank": 16,
+            "learning_rate": 0.001,
+            "regularization": 0.000001,
+        }
+    )
+
+    assert compute_duplicate_key(first) != compute_duplicate_key(second)
+
+
 def test_detector_rejects_seen_key_and_validates_supplied_key():
     first = make_spec()
     detector = DuplicateDetector([first])

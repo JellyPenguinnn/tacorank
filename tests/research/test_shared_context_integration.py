@@ -25,13 +25,26 @@ def test_planner_consumes_context_builder_output(harness, baseline_evaluation):
             "expected_mechanism": "Improve within-user relative ordering.",
             "success_criteria": "Trusted full score improves beyond epsilon.",
             "falsification_condition": "No stable improvement over the baseline.",
-            "estimated_cost": CostEstimate(
+                "estimated_cost": CostEstimate(
                 llm_tokens_upper_bound=500,
                 wall_time_seconds_upper_bound=60,
                 gpu_seconds_upper_bound=0,
-                cost_tier=CostTier.MEDIUM,
-            ),
-            "method_card_ids": [choice.method_card_id],
+                    cost_tier=CostTier.MEDIUM,
+                ),
+                "training_parameters": {
+                    "rank": 8,
+                    "learning_rate": 0.01,
+                    "regularization": 0.0001,
+                    "epochs": 4,
+                    "pair_sampling": {
+                        "strategy": "without_replacement",
+                        "max_pairs_per_user": 200,
+                        "max_pairs_total": 1_000_000,
+                    },
+                    "residual_cap": {"scale": "parent_iqr", "value": 0.5},
+                    "residual_centering": False,
+                },
+                "method_card_ids": [choice.method_card_id],
             "evidence_event_ids": list(context.source_event_ids),
         }
         values["duplicate_key"] = compute_duplicate_key(SimpleNamespace(**values))

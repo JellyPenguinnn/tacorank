@@ -135,6 +135,19 @@ def _coding_inputs(secret: str = "") -> tuple[SimpleNamespace, dict[str, object]
         "parent_commit_sha": "b" * 40,
         "hypothesis": "Add a bounded candidate feature.",
         "target_files": ["solution/model.py"],
+        "training_parameters": {
+            "rank": 8,
+            "learning_rate": 0.01,
+            "regularization": 0.0001,
+            "epochs": 4,
+            "pair_sampling": {
+                "strategy": "without_replacement",
+                "max_pairs_per_user": 200,
+                "max_pairs_total": 1_000_000,
+            },
+            "residual_cap": {"scale": "parent_iqr", "value": 0.5},
+            "residual_centering": False,
+        },
     }
     context = SimpleNamespace(
         context_id="ctx1",
@@ -174,6 +187,9 @@ def test_coding_prompt_is_exact_bounded_and_credential_free() -> None:
     assert secret not in prompt
     assert "candidate_smoke" in prompt
     assert '"hypothesis": "Add a bounded candidate feature."' in prompt
+    assert '"rank": 8' in prompt
+    assert "Planner-selected training parameters" in prompt
+    assert "do not replace them with defaults" in prompt
     assert "Do not choose or reinterpret the hypothesis" in prompt
     assert "max_provider_tokens: `50`" in prompt
     assert '"authoritative_target_files": [\n    "solution/model.py"\n  ]' in prompt

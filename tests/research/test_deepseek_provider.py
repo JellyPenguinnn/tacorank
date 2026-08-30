@@ -33,6 +33,19 @@ def candidate(**updates):
             "gpu_seconds_upper_bound": 60,
             "cost_tier": "high",
         },
+        "training_parameters": {
+            "rank": 8,
+            "learning_rate": 0.01,
+            "regularization": 0.0001,
+            "epochs": 4,
+            "pair_sampling": {
+                "strategy": "without_replacement",
+                "max_pairs_per_user": 200,
+                "max_pairs_total": 1_000_000,
+            },
+            "residual_cap": {"scale": "parent_iqr", "value": 0.5},
+            "residual_centering": False,
+        },
         "method_card_ids": ["objective_pairwise_bpr"],
         "evidence_event_ids": ["evt_000001", "evt_not_in_context"],
         # These are deliberately hostile: the adapter must replace policy-owned fields.
@@ -169,6 +182,10 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert result["parent_commit_sha"] == choice.parent.parent_commit_sha
     assert result["family"] == choice.family
     assert result["estimated_cost"]["cost_tier"] == choice.cost_tier
+    assert result["training_parameters"]["rank"] == 8
+    assert result["training_parameters"]["pair_sampling"]["strategy"] == (
+        "without_replacement"
+    )
     assert result["evidence_event_ids"] == ["evt_000001"]
     assert result["duplicate_key"] == compute_duplicate_key(result)
 
@@ -178,6 +195,7 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert payload["model"] == "deepseek-v4-flash"
     assert payload["response_format"] == {"type": "json_object"}
     assert payload["max_tokens"] == 1_000
+    assert payload["temperature"] == 0.2
     assert payload["thinking"] == {"type": "enabled"}
     prompt_document = json.loads(payload["messages"][1]["content"])
     serialized_prompt = json.dumps(prompt_document, sort_keys=True)

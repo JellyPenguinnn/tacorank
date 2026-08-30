@@ -8,6 +8,9 @@ from typing import Any, Sequence
 
 from ..schemas import LiteratureEvidence
 
+from pydantic import ValidationError
+
+from ..schemas import TrainingParameters
 from .code_blind import contains_implementation_reference
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
 from .graph_view import (
@@ -187,6 +190,15 @@ class PlanValidator:
         ):
             if not _nonempty(get_value(spec, field, None)):
                 errors.append(f"MISSING_{field.upper()}")
+
+        training_parameters = get_value(spec, "training_parameters", None)
+        if not _nonempty(training_parameters):
+            errors.append("MISSING_TRAINING_PARAMETERS")
+        else:
+            try:
+                TrainingParameters.model_validate(training_parameters)
+            except ValidationError:
+                errors.append("INVALID_TRAINING_PARAMETERS")
 
         if str(get_value(spec, "schema_version", "")) != "1.0":
             errors.append("SCHEMA_VERSION_MISMATCH")

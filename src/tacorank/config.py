@@ -174,6 +174,7 @@ class RunConfig(StrictModel):
         default=1.0, ge=0.0, le=30.0
     )
     deepseek_max_output_tokens: int = Field(default=8_192, gt=0)
+    deepseek_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     deepseek_thinking_enabled: bool = True
     deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
     # Historical run configs omit these fields and therefore keep the old

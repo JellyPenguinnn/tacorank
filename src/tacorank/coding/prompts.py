@@ -189,6 +189,11 @@ def build_coding_prompt(
         "## Approved ExperimentSpec (exact)",
         _json_block(spec_document),
         "",
+        "## Planner-selected training parameters",
+        _json_block(spec_document.get("training_parameters")),
+        "Implement these parameter values exactly. They are the planner's approved "
+        "training choices; do not replace them with defaults or silently tune them.",
+        "",
         "## Selected method cards",
         _json_block(_json_value(_required_attribute(context, "selected_method_cards"))),
         "",

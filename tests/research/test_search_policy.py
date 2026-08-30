@@ -53,6 +53,103 @@ def test_parallel_directions_use_distinct_eligible_method_cards(planner_context)
     assert len(identities) == capacity
 
 
+def test_parallel_capacity_excludes_exhausted_parent_and_backtracks(
+    planner_context,
+):
+    strongest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="model",
+        score=0.62,
+        parent_eligible=True,
+    )
+    fallback = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0000",
+        commit_sha="c" * 40,
+        family="features",
+        score=0.61,
+        parent_eligible=True,
+    )
+    attempted = []
+    for card in planner_context.method_cards:
+        if card.family == "ensemble":
+            continue
+        attempted.append(
+            make_summary(
+                "attempt_%s" % card.method_id,
+                parent_experiment_id="exp_0001",
+                family=card.family,
+                method_card_ids=[card.method_id],
+                parent_eligible=False,
+            )
+        )
+    context_values = vars(planner_context).copy()
+    context_values.update(
+        {
+            "current_best": strongest,
+            "eligible_frontier": [strongest, fallback],
+            "family_history": attempted,
+        }
+    )
+    context = SimpleNamespace(**context_values)
+
+    policy = SearchPolicy()
+    capacity = policy.parallel_direction_capacity(context)
+    choices = [
+        policy.choose_parallel_direction(context, index, capacity)
+        for index in range(capacity)
+    ]
+
+    assert capacity == len(choices)
+    assert capacity > 0
+    assert choices
+    assert all(choice.parent.experiment_id == "exp_0002" for choice in choices)
+    assert len(
+        {
+            (choice.parent.experiment_id, choice.family, choice.method_card_id)
+            for choice in choices
+        }
+    ) == capacity
+
+
+def test_parallel_capacity_is_zero_when_all_parent_methods_are_exhausted(
+    planner_context,
+):
+    parent = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="model",
+        score=0.62,
+        parent_eligible=True,
+    )
+    attempted = [
+        make_summary(
+            "attempt_%s" % card.method_id,
+            parent_experiment_id="exp_0001",
+            family=card.family,
+            method_card_ids=[card.method_id],
+            parent_eligible=False,
+        )
+        for card in planner_context.method_cards
+        if card.family != "ensemble"
+    ]
+    context_values = vars(planner_context).copy()
+    context_values.update(
+        {
+            "current_best": parent,
+            "eligible_frontier": [parent],
+            "family_history": attempted,
+        }
+    )
+
+    assert SearchPolicy().parallel_direction_capacity(
+        SimpleNamespace(**context_values)
+    ) == 0
+
+
 def test_synthesis_uses_strongest_confirmed_member_and_all_others(
     planner_context,
 ):

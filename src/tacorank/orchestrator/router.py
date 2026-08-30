@@ -1760,7 +1760,7 @@ class Harness:
                 self.stop(
                     StopDecision(
                         True,
-                        "PARALLEL_ROUND_INCOMPLETE",
+                        "no_legal_proposal",
                         "No unique legal research method remains for a parallel round.",
                     )
                 )

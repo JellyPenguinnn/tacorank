@@ -15,6 +15,7 @@
   "deepseek_base_url": "https://api.deepseek.com",
   "deepseek_max_output_tokens": 8192,
   "deepseek_model": "deepseek-v4-flash",
+  "deepseek_temperature": 0.2,
   "deepseek_reasoning_effort": "high",
   "deepseek_thinking_enabled": true,
   "deepseek_timeout_seconds": 120,

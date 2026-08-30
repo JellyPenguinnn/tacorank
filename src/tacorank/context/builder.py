@@ -710,6 +710,7 @@ class ContextBuilder:
                     ),
                     child_count=children[spec.experiment_id],
                     actual_cost=spec.estimated_cost.cost_tier,
+                    training_parameters=spec.training_parameters,
                     parent_eligible=bool(decision and decision.parent_eligible),
                     best_eligible=bool(decision and decision.best_eligible),
                     status=node.status.value,

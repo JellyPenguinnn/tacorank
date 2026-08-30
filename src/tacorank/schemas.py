@@ -548,6 +548,33 @@ class LiteratureEvidence(StrictModel):
         return value
 
 
+class PairSamplingParameters(StrictModel):
+    """Planner-selected pair construction controls for pairwise training."""
+
+    strategy: Literal["with_replacement", "without_replacement"]
+    max_pairs_per_user: int = Field(gt=0, le=100_000)
+    max_pairs_total: Optional[int] = Field(default=None, gt=0)
+
+
+class ResidualCapParameters(StrictModel):
+    """Planner-selected residual cap on the parent's score scale."""
+
+    scale: Literal["absolute", "parent_std", "parent_iqr"]
+    value: float = Field(gt=0, le=10.0)
+
+
+class TrainingParameters(StrictModel):
+    """Structured training choices carried from the planner to the coder."""
+
+    rank: int = Field(gt=0, le=512)
+    learning_rate: float = Field(gt=0, le=1.0)
+    regularization: float = Field(ge=0, le=10.0)
+    epochs: int = Field(gt=0, le=100)
+    pair_sampling: PairSamplingParameters
+    residual_cap: ResidualCapParameters
+    residual_centering: bool
+
+
 class ResearchProposal(StrictModel):
     """Code-blind research recommendation produced by Person 1.
 
@@ -569,6 +596,7 @@ class ResearchProposal(StrictModel):
     success_criteria: NonEmptyStr
     falsification_condition: NonEmptyStr
     estimated_cost: CostEstimate
+    training_parameters: Optional[TrainingParameters] = None
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
     # Ensemble proposals retain one canonical Git parent and identify any
     # additional clean component experiments explicitly.  Non-ensemble plans
@@ -1452,6 +1480,7 @@ class PlannerExperimentSummary(StrictModel):
     diagnostic_metrics: Dict[NonEmptyStr, float] = Field(default_factory=dict)
     child_count: int = Field(default=0, ge=0)
     actual_cost: Optional[CostTier] = None
+    training_parameters: Optional[TrainingParameters] = None
     parent_eligible: bool = False
     best_eligible: bool = False
     status: NonEmptyStr

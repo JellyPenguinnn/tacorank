@@ -50,8 +50,10 @@ event IDs present in the supplied context.
 You are intentionally code-blind. Do not name or infer repository paths, source files,
 modules, classes, functions, entrypoints, commands, patches, implementation interfaces,
 or pipeline stages. Do not prescribe how the coding worker should edit the system.
-Describe what research intervention to test and why; the deterministic controller and
-coding worker own implementation targeting and execution sequencing.
+You may choose the bounded algorithm and training values in training_parameters, but
+do not prescribe code edits. Describe what research intervention to test and why; the
+deterministic controller owns implementation targeting and execution sequencing, and
+the coding worker must implement the supplied training_parameters exactly.
 
 Treat diagnostic_metrics as label-free experimental feedback: use them to reason about
 collapsed residuals, missing personalization, or excessive divergence from the
@@ -100,6 +102,22 @@ Required JSON fields:
     "wall_time_seconds_upper_bound": 0,
     "gpu_seconds_upper_bound": 0,
     "cost_tier": "low|medium|high"
+  },
+  "training_parameters": {
+    "rank": 0,
+    "learning_rate": 0.0,
+    "regularization": 0.0,
+    "epochs": 0,
+    "pair_sampling": {
+      "strategy": "with_replacement|without_replacement",
+      "max_pairs_per_user": 0,
+      "max_pairs_total": null
+    },
+    "residual_cap": {
+      "scale": "absolute|parent_std|parent_iqr",
+      "value": 0.0
+    },
+    "residual_centering": true
   },
   "method_card_ids": ["known_method_id"],
   "evidence_event_ids": ["evt_000001"],
@@ -227,6 +245,7 @@ def _research_summary(value: Any) -> Dict[str, Any]:
         "diagnostic_metrics",
         "child_count",
         "actual_cost",
+        "training_parameters",
         "parent_eligible",
         "best_eligible",
         "status",
@@ -311,6 +330,7 @@ def _research_candidate(value: Any) -> Dict[str, Any]:
         "success_criteria",
         "falsification_condition",
         "estimated_cost",
+        "training_parameters",
         "method_card_ids",
         "evidence_event_ids",
     )
@@ -396,6 +416,7 @@ class DeepSeekResearchProvider:
         base_url: str = "https://api.deepseek.com",
         timeout_seconds: int = 120,
         max_output_tokens: int = 8_192,
+        temperature: float = 0.2,
         thinking_enabled: bool = True,
         reasoning_effort: str = "high",
         transport: Optional[Transport] = None,
@@ -404,6 +425,8 @@ class DeepSeekResearchProvider:
             raise ProviderError("DeepSeek API key is empty")
         if timeout_seconds <= 0 or max_output_tokens <= 0:
             raise ValueError("DeepSeek timeout and output-token limit must be positive")
+        if not 0.0 <= temperature <= 2.0:
+            raise ValueError("DeepSeek temperature must be between 0 and 2")
         if reasoning_effort not in {"low", "high", "max"}:
             raise ValueError("unsupported DeepSeek reasoning effort")
         self.api_key = api_key
@@ -411,6 +434,7 @@ class DeepSeekResearchProvider:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.max_output_tokens = max_output_tokens
+        self.temperature = temperature
         self.thinking_enabled = thinking_enabled
         self.reasoning_effort = reasoning_effort
         self.transport = transport or default_chat_transport
@@ -581,6 +605,7 @@ class DeepSeekResearchProvider:
             ],
             "response_format": {"type": "json_object"},
             "max_tokens": max_tokens,
+            "temperature": self.temperature,
             "stream": False,
             "thinking": {
                 "type": (
@@ -703,6 +728,7 @@ class DeepSeekResearchProvider:
             "expected_mechanism": _text(raw.get("expected_mechanism")),
             "success_criteria": _text(raw.get("success_criteria")),
             "falsification_condition": _text(raw.get("falsification_condition")),
+            "training_parameters": raw.get("training_parameters"),
             "estimated_cost": {
                 "llm_tokens_upper_bound": _nonnegative_int(
                     cost.get("llm_tokens_upper_bound"), self.max_output_tokens

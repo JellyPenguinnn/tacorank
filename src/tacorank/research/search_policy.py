@@ -1105,64 +1105,83 @@ class SearchPolicy:
     ) -> PolicyChoice:
         """Choose one legal, independently testable lane for a parallel round.
 
-        Each lane is pinned to a different eligible method card.  The duplicate
-        identity is method-card based, so free-text hypotheses cannot make a
-        repeated card into a distinct experiment.
+        Each lane is pinned to a different legal parent/method identity.  A
+        method card may be reused from a different eligible parent, but the
+        same method cannot be proposed twice from one parent because that is a
+        duplicate experiment under the schema-v1 identity contract.
         """
 
         if direction_index < 0 or direction_index >= direction_count:
             raise ValueError("parallel direction index is out of range")
-        graph = GraphView.from_context(context)
-        eligible = list(graph.eligible_parents())
-        allowed = _allowed_families(context)
-        if not eligible or not allowed or not method_card_map(context):
-            return self.choose(context)
-        parent = _best_parent(eligible)
-        choices: list[PolicyChoice] = []
-        for family in allowed:
-            if family == "ensemble":
-                continue
-            for card in _ordered_eligible_method_cards(context, family):
-                choices.append(
-                    _proposal(
-                        parent=parent,
-                        family=family,
-                        card=card,
-                        phase="parallel_round",
-                        reason_code="PARALLEL_DIRECTION_%d_OF_%d"
-                        % (direction_index + 1, direction_count),
-                        reason=(
-                            "Produce atomic direction %d of %d using the distinct "
-                            "research method %s."
-                            % (
-                                direction_index + 1,
-                                direction_count,
-                                get_value(card, "method_id", ""),
-                            )
-                        ),
-                    )
-                )
+        choices = self._parallel_choices(context, direction_count)
         if not choices:
             return self.choose(context)
         if direction_index >= len(choices):
             raise ValueError(
-                "parallel direction index exceeds unique eligible method cards"
+                "parallel direction index exceeds unique legal parent/method choices"
             )
         return choices[direction_index]
 
     def parallel_direction_capacity(self, context: Any) -> int:
-        """Return the number of unique legal method-card lanes at a checkpoint."""
+        """Return the number of unique legal parent/method lanes at a checkpoint."""
+
+        return len(self._parallel_choices(context, direction_count=None))
+
+    def _parallel_choices(
+        self, context: Any, direction_count: int | None
+    ) -> tuple[PolicyChoice, ...]:
+        """Build the same legal lane set used by capacity and lane selection.
+
+        Parallel planning is sealed against one planner snapshot.  Therefore
+        the policy must account for identities already present in that
+        snapshot before asking the provider for more directions.  The old
+        implementation counted every eligible method card for only the best
+        parent, even when that parent had already exhausted those cards.
+        """
 
         graph = GraphView.from_context(context)
         eligible = list(graph.eligible_parents())
         allowed = _allowed_families(context)
         if not eligible or not allowed or not method_card_map(context):
-            return 1 if self.choose(context).action == "propose" else 0
-        return sum(
-            len(_ordered_eligible_method_cards(context, family))
-            for family in allowed
-            if family != "ensemble"
+            return ()
+
+        # Keep the strongest parent first, then deterministically backtrack to
+        # other verified parents once its method-card identities are spent.
+        parents = sorted(
+            eligible,
+            key=lambda node: (-_score(node), node.child_count, node.experiment_id),
         )
+        choices: list[PolicyChoice] = []
+        for parent in parents:
+            attempted = _attempted_methods_for_parent(
+                context, parent.experiment_id
+            )
+            for family in allowed:
+                if family == "ensemble":
+                    continue
+                for card in _ordered_eligible_method_cards(context, family):
+                    method_id = str(get_value(card, "method_id", ""))
+                    if method_id in attempted:
+                        continue
+                    choices.append(
+                        _proposal(
+                            parent=parent,
+                            family=family,
+                            card=card,
+                            phase="parallel_round",
+                            reason_code="PARALLEL_DIRECTION_%d_OF_%d"
+                            % (
+                                len(choices) + 1,
+                                direction_count or len(choices) + 1,
+                            ),
+                            reason=(
+                                "Produce atomic direction using the distinct legal "
+                                "parent/method identity %s/%s."
+                                % (parent.experiment_id, method_id)
+                            ),
+                        )
+                    )
+        return tuple(choices)
 
     def choose_synthesis(
         self, context: Any, component_experiment_ids: Sequence[str]
