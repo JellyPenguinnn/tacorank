@@ -1359,6 +1359,7 @@ class PlannerExperimentSummary(StrictModel):
     diagnostic_best_slice: Optional[str] = None
     diagnostic_worst_slice: Optional[str] = None
     decision: Optional[ExperimentDecisionKind] = None
+    decision_reason_code: Optional[NonEmptyStr] = None
     highest_completed_fidelity: Optional[Fidelity] = None
     population: Optional[Population] = None
     output_accepted: Optional[bool] = None
@@ -1384,6 +1385,20 @@ class PlannerExperimentSummary(StrictModel):
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+
+
+class PlannerLessonSummary(StrictModel):
+    """Active curated memory exposed to Person 1 without Git lineage."""
+
+    lesson_id: NonEmptyStr
+    origin: LessonOrigin
+    category: LessonCategory
+    tags: List[NonEmptyStr] = Field(default_factory=list)
+    summary: NonEmptyStr
+    applicability: NonEmptyStr
+    avoid_when: Optional[str] = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    source_event_ids: List[NonEmptyStr] = Field(default_factory=list)
 
 
 class ContextDocument(StrictModel):
@@ -1420,7 +1435,11 @@ class PlannerContext(ContextDocument):
     # bounded refinement or ensemble policy.
     refinement_frontier_ids: List[NonEmptyStr] = Field(default_factory=list)
     ensemble_candidate_ids: List[NonEmptyStr] = Field(default_factory=list)
+    # Short-term iteration memory contains every visible experiment outcome,
+    # including proxy failures, no-ops, and inconclusive results.
     family_history: List[PlannerExperimentSummary] = Field(default_factory=list)
+    # Long-term memory contains only active controller-recorded lessons.
+    active_lessons: List[PlannerLessonSummary] = Field(default_factory=list)
     method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
     playbook: PlannerPlaybookSummary
     # Retained as an empty, backward-compatible field so historical schema-v1

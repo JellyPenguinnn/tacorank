@@ -52,6 +52,16 @@ The ledger uses contiguous event IDs, causal links, idempotency keys, file locki
 
 Only the controller appends events. It validates each transition, owns budgets and convergence, routes recovery, updates the best candidate, and selects the final artifact. No LLM can stop the run, promote itself, read labels, write the ledger, or bypass a gate.
 
+Planner memory has two intentionally separate layers. `PlannerContext.family_history`
+is bounded working memory built from every visible evaluation, including negative proxy,
+`no_op`, inconclusive, redundant, and suspicious results. Each summary retains its
+fidelity, population, metrics and deltas, trust assessment, decision reason, prediction
+change, and diagnostics so the next proposal can react without treating the result as a
+durable fact. `PlannerContext.active_lessons` contains only active `lesson.recorded`
+events selected by the deterministic retrieval policy. Hidden-final evaluations enter
+neither layer, and `lessons/*.md` remains a generated human-readable projection rather
+than a planner input or source of truth.
+
 ## Experiment lifecycle and gates
 
 ```text

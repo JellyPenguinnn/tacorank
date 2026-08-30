@@ -52,6 +52,12 @@ collapsed residuals, missing personalization, or excessive divergence from the
 setup-verified FM parent. Never call a frozen evaluator result "baseline parity"
 unless baseline_parity is explicitly present in contract.research_capabilities.
 
+Treat family_history as short-term iteration feedback. It deliberately includes
+negative proxy, no-op, inconclusive, redundant, and suspicious outcomes; weight each
+item by its fidelity, population, decision, stability, integrity, and trust flags.
+Treat active_lessons as separately curated long-term memory. Do not promote an item
+from family_history into a durable belief merely because it appears in the context.
+
 The context data_profile was computed before this request by fixed read-only aggregate
 EDA tools over the candidate-visible training and unlabeled scoring views. Use its
 observed distributions, sparsity, temporal shift, and entity overlap to ground the
@@ -190,6 +196,7 @@ def _research_summary(value: Any) -> Dict[str, Any]:
         "integrity",
         "trust_flags",
         "decision",
+        "decision_reason_code",
         "highest_completed_fidelity",
         "population",
         "output_accepted",
@@ -211,6 +218,25 @@ def _research_summary(value: Any) -> Dict[str, Any]:
         "status",
         "method_card_ids",
         "component_experiment_ids",
+    )
+    return _code_blind(
+        {field: _jsonable(get_value(value, field, None)) for field in fields}
+    )
+
+
+def _research_lesson(value: Any) -> Dict[str, Any]:
+    """Expose curated lesson content without source commit lineage."""
+
+    fields = (
+        "lesson_id",
+        "origin",
+        "category",
+        "tags",
+        "summary",
+        "applicability",
+        "avoid_when",
+        "confidence",
+        "source_event_ids",
     )
     return _code_blind(
         {field: _jsonable(get_value(value, field, None)) for field in fields}
@@ -398,6 +424,10 @@ class DeepSeekResearchProvider:
             "family_history": [
                 _research_summary(item)
                 for item in as_list(get_value(context, "family_history", []))
+            ],
+            "active_lessons": [
+                _research_lesson(item)
+                for item in as_list(get_value(context, "active_lessons", []))
             ],
             "method_cards": [
                 _research_method(item)

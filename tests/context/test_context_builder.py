@@ -11,7 +11,11 @@ from tacorank.context.builder import (
 )
 from tacorank.context.redaction import redact
 from tacorank.research.duplicate_detection import compute_duplicate_key
-from tacorank.schemas import ArtifactKind, CostEstimate, ResearchProposal
+from tacorank.schemas import (
+    ArtifactKind,
+    CostEstimate,
+    ResearchProposal,
+)
 
 
 def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_evaluation):
@@ -85,6 +89,7 @@ def test_planner_history_preserves_complete_evaluation_evidence(
     assert latest.diagnostic_worst_slice == "user_history.cold"
     assert "Cohort weakness" in latest.failure_hypotheses[0]
     assert "contract v1" in latest.diagnostic_limitations[0]
+    assert latest.decision_reason_code == "fake_trusted_result"
     assert latest.parent_eligible is True
     assert latest.best_eligible is True
     assert context.refinement_frontier_ids == []
@@ -125,6 +130,23 @@ def test_planner_metric_deltas_are_authoritative_and_route_safe() -> None:
         parent_metrics=full_parent,
         same_route=True,
     ) == pytest.approx({"GAUC": -0.03, "nDCG@5": -0.02})
+
+
+def test_planner_context_separates_active_lessons_from_experiment_history(
+    harness, baseline_evaluation
+):
+    harness.bootstrap(baseline_evaluation)
+    asyncio.run(harness.run_one_experiment())
+
+    context = harness.context_builder.build_planner(harness.events())
+
+    assert len(context.family_history) == 1
+    assert len(context.active_lessons) == 1
+    lesson = context.active_lessons[0]
+    assert lesson.lesson_id == "lesson_001"
+    assert lesson.tags == ["feature_cross", "confirmed"]
+    assert "source_commit_shas" not in lesson.model_dump()
+    assert "Applicable active lesson" in context.content
 
 
 def test_mandatory_context_cannot_be_silently_truncated(harness, baseline_evaluation):

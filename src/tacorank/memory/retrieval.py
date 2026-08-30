@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Sequence, Set
+from typing import Iterable, List, Optional, Sequence
 
 from ..schemas import Event, EventType, LessonStatus, Population, TrustVerdict
 
@@ -49,23 +49,49 @@ def active_lessons(
 def verified_experiment_history(
     events: Sequence[Event], *, family: Optional[str] = None, limit: int = 10
 ) -> List[Event]:
+    """Return accepted evaluations for consumers that require positive evidence."""
+
+    accepted_evaluations = [
+        event
+        for event in recent_experiment_feedback(
+            events, family=family, limit=len(events)
+        )
+        if event.payload.result.trust.verdict == TrustVerdict.ACCEPTED
+    ]
+    return accepted_evaluations[:limit]
+
+
+def recent_experiment_feedback(
+    events: Sequence[Event], *, family: Optional[str] = None, limit: int = 10
+) -> List[Event]:
+    """Return recent development evaluations regardless of their trust verdict.
+
+    This is planner working memory, not positive evidence or durable lesson
+    memory. Hidden-final evaluations are excluded even when callers have not
+    already applied the global development-visibility policy.
+    """
+
     family_by_experiment = {}
-    allowed_experiments: Set[str] = set()
     for event in events:
         if event.event_type == EventType.EXPERIMENT_PROPOSED:
-            family_by_experiment[event.payload.spec.experiment_id] = event.payload.spec.family
-    accepted_evaluations = []
+            family_by_experiment[event.payload.spec.experiment_id] = (
+                event.payload.spec.family
+            )
+    evaluations = []
     for event in events:
         if event.event_type != EventType.EVALUATION_COMPLETED:
             continue
         result = event.payload.result
-        if result.trust.verdict != TrustVerdict.ACCEPTED:
+        if result.population == Population.HIDDEN_FINAL:
             continue
-        if family is not None and family_by_experiment.get(result.experiment_id) != family:
+        if (
+            family is not None
+            and family_by_experiment.get(result.experiment_id) != family
+        ):
             continue
-        accepted_evaluations.append(event)
-    accepted_evaluations.sort(key=lambda event: (-event.seq, event.event_id))
-    return accepted_evaluations[:limit]
+        evaluations.append(event)
+    evaluations.sort(key=lambda event: (-event.seq, event.event_id))
+    return evaluations[:limit]
 
 
 def experiment_events(events: Sequence[Event], experiment_id: str) -> List[Event]:

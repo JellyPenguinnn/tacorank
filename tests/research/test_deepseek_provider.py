@@ -82,6 +82,20 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     planner_context.baseline.diagnostic_metrics = {
         "user_rankable_fraction": 1.0,
     }
+    planner_context.active_lessons = [
+        {
+            "lesson_id": "lesson_001",
+            "origin": "research",
+            "category": "research_result",
+            "tags": ["objective", "confirmed"],
+            "summary": "A confirmed objective change improved validation ranking.",
+            "applicability": "Clean full public validation.",
+            "avoid_when": "Only proxy evidence is available.",
+            "confidence": 0.9,
+            "source_event_ids": ["evt_000001"],
+            "source_commit_shas": ["f" * 40],
+        }
+    ]
 
     def transport(url, headers, payload, timeout):
         calls.append((url, headers, payload, timeout))
@@ -131,6 +145,20 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
         "train_rows": 4,
         "score_rows": 2,
     }
+    assert prompt_document["context"]["active_lessons"] == [
+        {
+            "lesson_id": "lesson_001",
+            "origin": "research",
+            "category": "research_result",
+            "tags": ["objective", "confirmed"],
+            "summary": "A confirmed objective change improved validation ranking.",
+            "applicability": "Clean full public validation.",
+            "avoid_when": "Only proxy evidence is available.",
+            "confidence": 0.9,
+            "source_event_ids": ["evt_000001"],
+        }
+    ]
+    assert "source_commit_shas" not in serialized_prompt
     assert "read-only aggregate" in payload["messages"][0]["content"]
     assert all(
         "implementation_targets" not in card

@@ -13,7 +13,7 @@ from ..memory.projections import project
 from ..memory.retrieval import (
     active_lessons,
     failure_chain,
-    verified_experiment_history,
+    recent_experiment_feedback,
     visible_development_events,
 )
 from ..recovery.classifier import classify_failure
@@ -35,6 +35,7 @@ from ..schemas import (
     PlannerConvergenceSummary,
     PlannerDataProfile,
     PlannerExperimentSummary,
+    PlannerLessonSummary,
     PlannerMethodCardSummary,
     PlannerPlaybookSummary,
     ResearchProposal,
@@ -442,6 +443,21 @@ class ContextBuilder:
         )
 
     @staticmethod
+    def _planner_lesson_summary(event: Event) -> PlannerLessonSummary:
+        candidate = event.payload.candidate
+        return PlannerLessonSummary(
+            lesson_id=event.payload.lesson_id,
+            origin=candidate.origin,
+            category=candidate.category,
+            tags=list(candidate.tags),
+            summary=candidate.summary,
+            applicability=candidate.applicability,
+            avoid_when=candidate.avoid_when,
+            confidence=candidate.confidence,
+            source_event_ids=list(candidate.source_event_ids),
+        )
+
+    @staticmethod
     def _planner_method_overview(card: MethodCard) -> str:
         return compact_json(
             _code_blind(
@@ -518,6 +534,7 @@ class ContextBuilder:
             integrity=baseline_evaluation.trust.integrity,
             trust_flags=list(baseline_evaluation.trust.flags),
             decision=ExperimentDecisionKind.ACCEPT,
+            decision_reason_code="BASELINE_VERIFIED",
             highest_completed_fidelity=baseline_evaluation.fidelity,
             population=baseline_evaluation.population,
             primary_score=baseline_payload.metric_set.primary_score,
@@ -628,6 +645,7 @@ class ContextBuilder:
                         evaluation.diagnostics.worst_slice if evaluation else None
                     ),
                     decision=decision.decision if decision else None,
+                    decision_reason_code=(decision.reason_code if decision else None),
                     highest_completed_fidelity=(
                         evaluation.fidelity if evaluation else node.highest_fidelity
                     ),
@@ -681,6 +699,7 @@ class ContextBuilder:
         events: Sequence[Event],
         *,
         data_profile: Optional[PlannerDataProfile] = None,
+        active_lesson_events: Sequence[Event] = (),
     ) -> Dict[str, object]:
         state = project(events)
         baseline, current_best, eligible_frontier, family_history = (
@@ -776,6 +795,10 @@ class ContextBuilder:
             "refinement_frontier_ids": refinement_frontier_ids,
             "ensemble_candidate_ids": ensemble_candidate_ids,
             "family_history": family_history,
+            "active_lessons": [
+                self._planner_lesson_summary(event)
+                for event in active_lesson_events
+            ],
             "method_cards": method_cards,
             "playbook": PlannerPlaybookSummary(
                 schema_version=playbook.schema_version,
@@ -885,18 +908,19 @@ class ContextBuilder:
                     self._planner_experiment_feedback(current_best),
                 )
             )
-        history = verified_experiment_history(visible, family=family, limit=10)
+        history = recent_experiment_feedback(visible, family=family, limit=10)
         for event in history:
             summary = feedback_by_experiment.get(event.payload.result.experiment_id)
             if summary is not None:
                 optional.append(
                     (
                         event.event_id,
-                        "Verified experiment feedback",
+                        "Recent experiment feedback",
                         self._planner_experiment_feedback(summary),
                     )
                 )
-        for event in active_lessons(visible, tags=normalized_tags, limit=5):
+        lesson_events = active_lessons(visible, tags=normalized_tags, limit=5)
+        for event in lesson_events:
             optional.append(
                 (
                     event.event_id,
@@ -950,7 +974,13 @@ class ContextBuilder:
             included=included,
             excluded=excluded,
             context_fields=self._planner_context_fields(
-                visible, data_profile=data_profile
+                visible,
+                data_profile=data_profile,
+                active_lesson_events=[
+                    event
+                    for event in lesson_events
+                    if event.event_id in included
+                ],
             ),
         )
 
