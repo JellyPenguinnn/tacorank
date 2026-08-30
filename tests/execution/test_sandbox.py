@@ -31,6 +31,7 @@ from tacorank.execution.sandbox import (
     SandboxPolicy,
     SandboxPolicyError,
     TrustedLocalProcessSandbox,
+    _translate_value,
     validate_launch_spec,
 )
 
@@ -44,6 +45,15 @@ IMAGE_ENVIRONMENT_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 
+def test_translate_value_handles_windows_host_paths() -> None:
+    source = Path(r"C:\tacorank\runs")
+    value = r"C:\tacorank\runs\run_001\outputs\predictions.csv"
+
+    assert _translate_value(value, ((source, "/artifacts"),)) == (
+        "/artifacts/run_001/outputs/predictions.csv"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _bounded_test_filesystem(monkeypatch: pytest.MonkeyPatch) -> None:
     """Exercise the production verifier against deterministic kernel probes."""
@@ -53,6 +63,7 @@ def _bounded_test_filesystem(monkeypatch: pytest.MonkeyPatch) -> None:
         os,
         "statvfs",
         lambda path: SimpleNamespace(f_frsize=4096, f_bsize=4096, f_blocks=1024),
+        raising=False,
     )
 
     def inspect_image(
