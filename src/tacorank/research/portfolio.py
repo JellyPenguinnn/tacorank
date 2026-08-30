@@ -186,6 +186,69 @@ def default_portfolio() -> ExperimentPortfolio:
                 ),
             ),
             MethodCard(
+                method_id="features_author_affinity_past_only",
+                family="features",
+                summary="Add a strictly past-only author affinity residual.",
+                tags=("features", "author", "temporal", "residual"),
+                cost_tier="medium",
+                mechanism=(
+                    "Capture creator-level preference not fully represented by "
+                    "the supplied FM score."
+                ),
+                prerequisites=("baseline_parity", "strict_temporal_cutoff"),
+                allowed_data=("train_interactions", "date", "author_id", "long_view"),
+                expected_effect="Improve ranking when recent author preference has residual signal.",
+                falsifier="No reproducible primary gain from the bounded residual.",
+                prohibition_conditions=("future_aggregate_required",),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/inference.py",
+                ),
+            ),
+            MethodCard(
+                method_id="features_tab_context_residual",
+                family="features",
+                summary="Add one train-only tab-context long-view residual.",
+                tags=("features", "tab", "context", "residual"),
+                cost_tier="medium",
+                mechanism=(
+                    "Model systematic long-view-rate differences across feed "
+                    "contexts missing from the FM score."
+                ),
+                prerequisites=("baseline_parity",),
+                allowed_data=("train_interactions", "tab", "long_view"),
+                expected_effect="Improve relative scores across feed contexts.",
+                falsifier="No primary gain or a constant residual within user candidates.",
+                prohibition_conditions=("evaluator_or_split_change_required",),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/inference.py",
+                ),
+            ),
+            MethodCard(
+                method_id="sampling_deterministic_coverage",
+                family="sampling",
+                summary="Use deterministic per-user coverage-preserving training samples.",
+                tags=("sampling", "coverage", "within_user"),
+                cost_tier="medium",
+                mechanism=(
+                    "Prevent high-volume users from dominating the bounded "
+                    "residual learner."
+                ),
+                prerequisites=("baseline_parity",),
+                allowed_data=("train_interactions", "user_id", "long_view"),
+                expected_effect="Improve generalization through representative user coverage.",
+                falsifier="No primary gain or loss of useful positive/negative evidence.",
+                prohibition_conditions=("adaptive_validation_sampling",),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
+            ),
+            MethodCard(
                 method_id="ensemble_parallel_round_synthesis",
                 family="ensemble",
                 summary="Align all independently accepted parallel-round members.",

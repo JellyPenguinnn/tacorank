@@ -31,6 +31,9 @@ class ResearchPlanner(Protocol):
     async def propose(self, context: PlannerContext) -> PlannerOutput:
         ...
 
+    def parallel_direction_capacity(self, context: PlannerContext) -> int:
+        ...
+
     async def propose_parallel_direction(
         self, context: PlannerContext, direction_index: int, direction_count: int
     ) -> PlannerOutput:

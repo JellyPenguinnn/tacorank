@@ -1553,6 +1553,25 @@ class Harness:
             self.stop(stop)
             return []
         planner_context = self.context_builder.build_planner(events)
+        capacity = getattr(self.planner, "parallel_direction_capacity", None)
+        if callable(capacity):
+            available = capacity(planner_context)
+            if available < 1:
+                self.stop(
+                    StopDecision(
+                        True,
+                        "PARALLEL_ROUND_INCOMPLETE",
+                        "No unique legal research method remains for a parallel round.",
+                    )
+                )
+                return []
+            if available < count:
+                logger.info(
+                    "parallel_round_width_reduced requested=%d available=%d",
+                    count,
+                    available,
+                )
+                count = available
         context_event = self._append(
             ContextCreatedPayload(context=planner_context),
             stage="parallel_planner_context",

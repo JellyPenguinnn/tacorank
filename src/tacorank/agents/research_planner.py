@@ -95,6 +95,11 @@ class ResearchPlanner:
         )
         return await self._propose(context, forced_choice=choice)
 
+    def parallel_direction_capacity(self, context: Any) -> int:
+        """Expose the policy's unique lane count to the deterministic router."""
+
+        return self.policy.parallel_direction_capacity(context)
+
     async def propose_synthesis(
         self, context: Any, component_experiment_ids: list[str]
     ) -> Any:

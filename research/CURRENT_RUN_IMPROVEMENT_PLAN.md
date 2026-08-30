@@ -42,8 +42,13 @@ before backtracking, rather than probing every research family from baseline.
     "temporal_history": ["temporal_history_compact"],
     "multitask": ["multitask_single_auxiliary"],
     "duration_bias": ["duration_bias_censored_watch_time"],
-    "features": ["temporal_drift_past_only"],
+    "features": [
+      "temporal_drift_past_only",
+      "features_author_affinity_past_only",
+      "features_tab_context_residual"
+    ],
     "model": ["model_compact_ranker"],
+    "sampling": ["sampling_deterministic_coverage"],
     "ensemble": ["ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]
   }

@@ -28,6 +28,31 @@ def test_parallel_direction_is_indexed_and_legal(planner_context):
     assert choice.method_card_id == "objective_pairwise_bpr"
 
 
+def test_parallel_directions_use_distinct_eligible_method_cards(planner_context):
+    policy = SearchPolicy()
+    contract = SimpleNamespace(**vars(planner_context.contract_summary))
+    contract.allowed_families = [
+        *contract.allowed_families,
+        "features",
+        "sampling",
+    ]
+    context_values = vars(planner_context).copy()
+    context_values["contract_summary"] = contract
+    context = SimpleNamespace(**context_values)
+    capacity = policy.parallel_direction_capacity(context)
+    choices = [
+        policy.choose_parallel_direction(context, index, capacity)
+        for index in range(capacity)
+    ]
+    identities = {
+        (choice.parent.experiment_id, choice.family, choice.method_card_id)
+        for choice in choices
+    }
+
+    assert capacity >= 7
+    assert len(identities) == capacity
+
+
 def test_synthesis_uses_strongest_confirmed_member_and_all_others(
     planner_context,
 ):

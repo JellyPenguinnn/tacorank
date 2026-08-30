@@ -214,6 +214,22 @@ def _method_for_family(
     return eligible[remaining[0]] if remaining else None
 
 
+def _ordered_eligible_method_cards(context: Any, family: str) -> tuple[Any, ...]:
+    """Return every eligible card in the playbook's deterministic order."""
+
+    by_id = {
+        str(get_value(card, "method_id", "")): card
+        for card in eligible_method_cards(context, family)
+    }
+    ordered = [
+        by_id.pop(method_id)
+        for method_id in _method_order(context, family)
+        if method_id in by_id
+    ]
+    ordered.extend(by_id[method_id] for method_id in sorted(by_id))
+    return tuple(ordered)
+
+
 def _cost_tier(value: Any) -> str:
     tier = get_value(value, "cost_tier", value)
     normalized = _normalized(tier)
@@ -868,10 +884,9 @@ class SearchPolicy:
     ) -> PolicyChoice:
         """Choose one legal, independently testable lane for a parallel round.
 
-        Lanes may share a method card, but the provider is required to produce a
-        distinct atomic hypothesis for each indexed lane.  This is deliberate:
-        the frozen method portfolio can expose fewer than seven legal cards at a
-        checkpoint, while a round still needs seven independent searches.
+        Each lane is pinned to a different eligible method card.  The duplicate
+        identity is method-card based, so free-text hypotheses cannot make a
+        repeated card into a distinct experiment.
         """
 
         if direction_index < 0 or direction_index >= direction_count:
@@ -884,36 +899,49 @@ class SearchPolicy:
         parent = _best_parent(eligible)
         choices: list[PolicyChoice] = []
         for family in allowed:
-            card = _method_for_family(
-                context,
-                family,
-                parent_experiment_id=parent.experiment_id,
-                allow_repeated=True,
-            )
-            if card is None or family == "ensemble":
+            if family == "ensemble":
                 continue
-            choices.append(
-                _proposal(
-                    parent=parent,
-                    family=family,
-                    card=card,
-                    phase="parallel_round",
-                    reason_code="PARALLEL_DIRECTION_%d_OF_%d"
-                    % (direction_index + 1, direction_count),
-                    reason=(
-                        "Produce atomic direction %d of %d. It must be materially "
-                        "distinct from the other lanes while remaining within method %s."
-                        % (
-                            direction_index + 1,
-                            direction_count,
-                            get_value(card, "method_id", ""),
-                        )
-                    ),
+            for card in _ordered_eligible_method_cards(context, family):
+                choices.append(
+                    _proposal(
+                        parent=parent,
+                        family=family,
+                        card=card,
+                        phase="parallel_round",
+                        reason_code="PARALLEL_DIRECTION_%d_OF_%d"
+                        % (direction_index + 1, direction_count),
+                        reason=(
+                            "Produce atomic direction %d of %d using the distinct "
+                            "research method %s."
+                            % (
+                                direction_index + 1,
+                                direction_count,
+                                get_value(card, "method_id", ""),
+                            )
+                        ),
+                    )
                 )
-            )
         if not choices:
             return self.choose(context)
-        return choices[direction_index % len(choices)]
+        if direction_index >= len(choices):
+            raise ValueError(
+                "parallel direction index exceeds unique eligible method cards"
+            )
+        return choices[direction_index]
+
+    def parallel_direction_capacity(self, context: Any) -> int:
+        """Return the number of unique legal method-card lanes at a checkpoint."""
+
+        graph = GraphView.from_context(context)
+        eligible = list(graph.eligible_parents())
+        allowed = _allowed_families(context)
+        if not eligible or not allowed or not method_card_map(context):
+            return 1 if self.choose(context).action == "propose" else 0
+        return sum(
+            len(_ordered_eligible_method_cards(context, family))
+            for family in allowed
+            if family != "ensemble"
+        )
 
     def choose_synthesis(
         self, context: Any, component_experiment_ids: Sequence[str]
