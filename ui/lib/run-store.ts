@@ -19,8 +19,11 @@ export type LedgerEvent = {
 
 export type RunSummary = {
   run_id: string;
+  source: 'ledger' | 'launch';
   status: string;
   phase: string;
+  is_live: boolean;
+  launch_error: string | null;
   started_at: string | null;
   updated_at: string | null;
   experiments_proposed: number;
@@ -41,8 +44,20 @@ export type RunSummary = {
   last_event_at: string | null;
 };
 
+export type LaunchRecord = {
+  schema_version: 'tacorank.dashboard-launch.v1';
+  launch_id: string;
+  run_id: string;
+  started_at: string;
+  pid: number | null;
+};
+
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const LAUNCH_ID = /^[0-9]{17}$/;
 const MAX_ARTIFACT_BYTES = 512_000;
+const MAX_LAUNCH_RECORD_BYTES = 16_384;
+const MAX_LAUNCH_LOG_TAIL_BYTES = 65_536;
+const LAUNCH_START_GRACE_MS = 10_000;
 
 export function repositoryRoot(): string {
   const configured = process.env.TACORANK_REPOSITORY_ROOT;
@@ -71,6 +86,129 @@ function nested(payload: JsonRecord, name: string): JsonRecord {
 
 export function assertRunId(runId: string): void {
   if (!RUN_ID.test(runId)) throw new Error('Invalid run ID.');
+}
+
+function launchDirectory(): string {
+  return path.join(repositoryRoot(), '.tacorank', 'dashboard-launches');
+}
+
+function validLaunchRecord(value: unknown): LaunchRecord | null {
+  const candidate = record(value);
+  const launchId = text(candidate.launch_id);
+  const runId = text(candidate.run_id);
+  const startedAt = text(candidate.started_at);
+  const pid = candidate.pid;
+  if (
+    candidate.schema_version !== 'tacorank.dashboard-launch.v1'
+    || !launchId || !LAUNCH_ID.test(launchId)
+    || !runId || !RUN_ID.test(runId)
+    || !startedAt || !Number.isFinite(new Date(startedAt).getTime())
+    || !(pid === null || (typeof pid === 'number' && Number.isInteger(pid) && pid > 0))
+  ) return null;
+  return {
+    schema_version: 'tacorank.dashboard-launch.v1',
+    launch_id: launchId,
+    run_id: runId,
+    started_at: startedAt,
+    pid: pid as number | null,
+  };
+}
+
+export async function writeLaunchRecord(value: LaunchRecord): Promise<void> {
+  const parsed = validLaunchRecord(value);
+  if (!parsed) throw new Error('Invalid dashboard launch record.');
+  const directory = launchDirectory();
+  await fs.mkdir(directory, { recursive: true });
+  const destination = path.join(directory, `${parsed.launch_id}.json`);
+  const temporary = path.join(directory, `.${parsed.launch_id}.${process.pid}.tmp`);
+  await fs.writeFile(temporary, `${JSON.stringify(parsed)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await fs.rename(temporary, destination);
+}
+
+async function readLaunchRecords(): Promise<LaunchRecord[]> {
+  const directory = launchDirectory();
+  const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+  const records = await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && LAUNCH_ID.test(entry.name.slice(0, -5)))
+    .map(async (entry) => {
+      try {
+        const location = path.join(directory, entry.name);
+        const stat = await fs.stat(location);
+        if (!stat.isFile() || stat.size > MAX_LAUNCH_RECORD_BYTES) return null;
+        return validLaunchRecord(JSON.parse(await fs.readFile(location, 'utf8')));
+      } catch {
+        return null;
+      }
+    }));
+  return records.filter((item): item is LaunchRecord => item !== null);
+}
+
+function processIsAlive(pid: number | null): boolean {
+  if (pid === null) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH');
+  }
+}
+
+function launchIsAlive(item: LaunchRecord, observedAt = Date.now()): boolean {
+  return processIsAlive(item.pid)
+    || (item.pid === null && observedAt - new Date(item.started_at).getTime() < LAUNCH_START_GRACE_MS);
+}
+
+export async function hasActiveDashboardLaunch(): Promise<boolean> {
+  return (await readLaunchRecords()).some((item) => launchIsAlive(item));
+}
+
+async function launchFailure(item: LaunchRecord): Promise<string | null> {
+  const location = path.join(launchDirectory(), `${item.launch_id}.log`);
+  try {
+    const handle = await fs.open(location, 'r');
+    try {
+      const stat = await handle.stat();
+      const size = Math.min(stat.size, MAX_LAUNCH_LOG_TAIL_BYTES);
+      const buffer = Buffer.alloc(size);
+      await handle.read(buffer, 0, size, stat.size - size);
+      const lines = buffer.toString('utf8').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      return lines.reverse().find((line) => line.startsWith('error:')) ?? null;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function summarizeLaunch(item: LaunchRecord): Promise<RunSummary> {
+  const isLive = launchIsAlive(item);
+  return {
+    run_id: item.run_id,
+    source: 'launch',
+    status: isLive ? 'initializing' : 'failed',
+    phase: isLive ? 'setup' : 'setup_failed',
+    is_live: isLive,
+    launch_error: isLive ? null : await launchFailure(item),
+    started_at: item.started_at,
+    updated_at: item.started_at,
+    experiments_proposed: 0,
+    best_experiment_id: null,
+    best_primary_score: null,
+    baseline_primary_score: null,
+    stop_reason_code: null,
+    final_experiment_id: null,
+    event_count: 0,
+    current_experiment_id: null,
+    current_attempt: null,
+    current_fidelity: null,
+    stage_started_at: item.started_at,
+    configured_timeout_seconds: null,
+    estimated_deadline: null,
+    last_event_id: null,
+    last_event_type: null,
+    last_event_at: null,
+  };
 }
 
 export async function readEvents(runId: string): Promise<LedgerEvent[]> {
@@ -171,8 +309,11 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
   const lastEvent = events.at(-1);
   return {
     run_id: runId,
+    source: 'ledger',
     status,
     phase,
+    is_live: ['initializing', 'ready', 'running', 'finalizing'].includes(status),
+    launch_error: null,
     started_at: events[0]?.timestamp ?? null,
     updated_at: events.at(-1)?.timestamp ?? null,
     experiments_proposed: proposed,
@@ -191,6 +332,17 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
     last_event_id: lastEvent?.event_id ?? null,
     last_event_type: lastEvent?.event_type ?? null,
     last_event_at: lastEvent?.timestamp ?? null,
+  };
+}
+
+function withObservedRuntime(summary: RunSummary, launch: LaunchRecord | undefined): RunSummary {
+  if (!summary.is_live || !summary.estimated_deadline) return summary;
+  const deadline = new Date(summary.estimated_deadline).getTime();
+  if (!Number.isFinite(deadline) || Date.now() <= deadline || (launch && launchIsAlive(launch))) return summary;
+  return {
+    ...summary,
+    status: 'interrupted',
+    is_live: false,
   };
 }
 
@@ -260,21 +412,41 @@ async function safeArtifactText(reference: unknown): Promise<string | null> {
 }
 
 export async function listRuns(): Promise<RunSummary[]> {
+  const launches = await readLaunchRecords();
+  const launchByRunId = new Map(launches.map((item) => [item.run_id, item]));
   const directory = path.join(repositoryRoot(), 'runs');
   const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
   const runs = await Promise.all(entries
     .filter((entry) => entry.isDirectory() && RUN_ID.test(entry.name))
     .map(async (entry) => {
-      try { return summarizeRun(entry.name, await readEvents(entry.name)); }
+      try { return withObservedRuntime(summarizeRun(entry.name, await readEvents(entry.name)), launchByRunId.get(entry.name)); }
       catch { return null; }
     }));
-  return runs.filter((run): run is RunSummary => run !== null)
+  const ledgerRuns = runs.filter((run): run is RunSummary => run !== null);
+  const ledgerRunIds = new Set(ledgerRuns.map((run) => run.run_id));
+  const pendingLaunches = await Promise.all(launches
+    .filter((item) => !ledgerRunIds.has(item.run_id))
+    .map((item) => summarizeLaunch(item)));
+  return [...ledgerRuns, ...pendingLaunches]
     .sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''));
 }
 
 export async function runDetail(runId: string): Promise<JsonRecord> {
+  assertRunId(runId);
+  const ledger = path.join(repositoryRoot(), 'runs', runId, 'events.jsonl');
+  if (!existsSync(ledger)) {
+    const launch = (await readLaunchRecords()).find((item) => item.run_id === runId);
+    if (!launch) throw new Error('Run not found.');
+    return {
+      summary: await summarizeLaunch(launch),
+      events: [],
+      iterations: [],
+      memory: { planner_contexts: [], lessons: [] },
+    };
+  }
   const events = await readEvents(runId);
-  const summary = summarizeRun(runId, events);
+  const launch = (await readLaunchRecords()).find((item) => item.run_id === runId);
+  const summary = withObservedRuntime(summarizeRun(runId, events), launch);
   const iterations = new Map<string, JsonRecord>();
   const plannerContexts: JsonRecord[] = [];
   const lessons: JsonRecord[] = [];

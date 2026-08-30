@@ -6,7 +6,11 @@ every five seconds, and shows each iteration's plan, memory/context, patch,
 Gate A, execution, Gate B, evaluation, recovery, and raw ledger evidence. The
 current-run panel updates elapsed stage/iteration time and last-event age every
 second from ledger timestamp anchors, and shows the active attempt, fidelity,
-timeout, deadline, and loop step.
+timeout, deadline, and loop step. A dashboard launch appears immediately with
+its reserved run ID while setup and non-mutating preflight run; the placeholder
+is replaced by authoritative ledger data when `events.jsonl` is created. If a
+controller disappears after a stage deadline, the dashboard marks the run as
+interrupted and freezes its runtime at the last durable event.
 
 ## Run locally
 
@@ -20,6 +24,10 @@ directory is not directly inside the repository. **Start new run** prompts for
 the DeepSeek API key in a masked field. The key is sent only to the local start
 endpoint, passed to that run's launcher environment, and is not saved in browser
 storage, run metadata, launcher logs, or API responses.
+
+On macOS, the launcher discovers Docker Desktop and adds its CLI directory to
+the child `PATH` so `docker-credential-desktop` remains available during image
+builds. Docker Desktop itself must be running before a production launch.
 
 The start action asks for confirmation and launches the repository's reviewed
 `run-new-live.sh` workflow. That is a paid production workflow and includes
