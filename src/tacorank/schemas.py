@@ -856,6 +856,63 @@ class PredictionChange(StrictModel):
     changed_row_fraction: float = Field(ge=0.0, le=1.0)
 
 
+class EvaluationDiagnostics(StrictModel):
+    """Protected aggregate diagnostics without row-level labels or scores."""
+
+    train_validation_gap: Optional[float] = None
+    proxy_parent_delta: Optional[float] = None
+    proxy_full_delta_gap: Optional[float] = Field(default=None, ge=0.0)
+    validation_arm_deltas: Dict[str, float] = Field(default_factory=dict)
+    validation_arm_gap: Optional[float] = Field(default=None, ge=0.0)
+    temporal_delta_slope: Optional[float] = None
+    gain_concentration_top10pct: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    slice_deltas: Dict[str, float] = Field(default_factory=dict)
+    best_slice: Optional[str] = None
+    worst_slice: Optional[str] = None
+    failure_hypotheses: List[NonEmptyStr] = Field(default_factory=list)
+    limitations: List[NonEmptyStr] = Field(default_factory=list)
+
+    @field_validator("validation_arm_deltas", "slice_deltas")
+    @classmethod
+    def validate_diagnostic_maps(cls, values: Dict[str, float]) -> Dict[str, float]:
+        if any(not str(name).strip() for name in values):
+            raise ValueError("diagnostic names must not be empty")
+        return values
+
+    @field_validator("failure_hypotheses", "limitations")
+    @classmethod
+    def validate_diagnostic_codes(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("diagnostic codes must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_diagnostic_consistency(self) -> "EvaluationDiagnostics":
+        if (self.proxy_parent_delta is None) != (self.proxy_full_delta_gap is None):
+            raise ValueError(
+                "proxy parent delta and proxy/full gap must be supplied together"
+            )
+        arms = self.validation_arm_deltas
+        if arms and set(arms) != {"val_a", "val_b"}:
+            raise ValueError("validation arm diagnostics require val_a and val_b")
+        if bool(arms) != (self.validation_arm_gap is not None):
+            raise ValueError(
+                "validation arm gap and arm deltas must be supplied together"
+            )
+        if arms:
+            expected_gap = abs(arms["val_a"] - arms["val_b"])
+            assert self.validation_arm_gap is not None
+            if abs(expected_gap - self.validation_arm_gap) > 1e-12:
+                raise ValueError("validation arm gap does not match arm deltas")
+        for field_name in ("best_slice", "worst_slice"):
+            name = getattr(self, field_name)
+            if name is not None and name not in self.slice_deltas:
+                raise ValueError("%s must identify a recorded slice" % field_name)
+        return self
+
+
 class EvaluationRequest(StrictModel):
     run_id: NonEmptyStr
     experiment_id: NonEmptyStr
@@ -898,6 +955,7 @@ class EvaluationResult(StrictModel):
     prediction_change: Union[float, PredictionChange]
     trust: TrustAssessment
     seed_evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+    diagnostics: EvaluationDiagnostics = Field(default_factory=EvaluationDiagnostics)
     metrics_artifact: Optional[ArtifactRef] = None
     resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
 
@@ -1111,6 +1169,11 @@ class PlannerExperimentSummary(StrictModel):
     stability: Optional[Stability] = None
     integrity: Optional[Integrity] = None
     trust_flags: List[NonEmptyStr] = Field(default_factory=list)
+    diagnostic_metrics: Dict[str, float] = Field(default_factory=dict)
+    failure_hypotheses: List[NonEmptyStr] = Field(default_factory=list)
+    diagnostic_limitations: List[NonEmptyStr] = Field(default_factory=list)
+    diagnostic_best_slice: Optional[str] = None
+    diagnostic_worst_slice: Optional[str] = None
     decision: Optional[ExperimentDecisionKind] = None
     highest_completed_fidelity: Optional[Fidelity] = None
     population: Optional[Population] = None

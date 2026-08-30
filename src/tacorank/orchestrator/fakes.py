@@ -18,6 +18,7 @@ from ..schemas import (
     CostEstimate,
     CostTier,
     EvaluationDecisionContext,
+    EvaluationDiagnostics,
     EvaluationRequest,
     EvaluationResult,
     ExperimentDecision,
@@ -315,6 +316,29 @@ class FakeEvaluator:
                 else Stability.SINGLE_SEED
             )
         confirmed = stability == Stability.CONFIRMED
+        diagnostics = EvaluationDiagnostics()
+        if request.fidelity == Fidelity.FULL:
+            diagnostics = EvaluationDiagnostics(
+                proxy_parent_delta=0.01,
+                proxy_full_delta_gap=0.01,
+                validation_arm_deltas={"val_a": 0.02, "val_b": 0.01},
+                validation_arm_gap=0.01,
+                temporal_delta_slope=-0.003,
+                gain_concentration_top10pct=0.75,
+                slice_deltas={
+                    "user_history.cold": -0.01,
+                    "user_history.hot": 0.02,
+                },
+                best_slice="user_history.hot",
+                worst_slice="user_history.cold",
+                failure_hypotheses=[
+                    "Cohort weakness: the largest measured slice regression is user_history.cold."
+                ],
+                limitations=[
+                    "Direct train/validation gap unavailable: contract v1 emits no protected train predictions.",
+                    "Associational diagnostics do not prove causality; confirm hypotheses with a controlled ablation.",
+                ],
+            )
         return EvaluationResult(
             run_id=request.run_id,
             experiment_id=request.experiment_id,
@@ -348,6 +372,7 @@ class FakeEvaluator:
                 seed_stderr=0.0 if confirmed else None,
                 seed_count=len(seed_evidence_event_ids) + 1,
             ),
+            diagnostics=diagnostics,
             seed_evidence_event_ids=seed_evidence_event_ids,
         )
 

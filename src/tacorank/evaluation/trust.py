@@ -27,6 +27,7 @@ class TrustConfig:
     redundancy_correlation: float = 0.70
     gain_concentration_threshold: float = 0.70
     drift_slope_threshold: float = 0.002
+    validation_arm_gap_threshold: float = 0.006
     proxy_improvement_threshold: float = 0.0
     require_non_decreasing_metrics: bool = False
     no_op: NoOpConfig = field(default_factory=NoOpConfig)
@@ -48,6 +49,7 @@ class TrustEvidence:
     alignment_suspect: bool = False
     internal_proxy_delta: Optional[float] = None
     unbiased_audit_delta: Optional[float] = None
+    val_a_delta: Optional[float] = None
     val_b_delta: Optional[float] = None
     delta_correlation: Optional[float] = None
     delta_correlation_experiment_id: Optional[str] = None
@@ -123,6 +125,19 @@ def assess_trust(
         return _assessment(
             Verdict.SUSPICIOUS, Stability.NOT_APPLICABLE,
             Integrity.INCONCLUSIVE, ["UNBIASED_AUDIT_SIGN_CONFLICT"], aggregate
+        )
+    if (
+        evidence.parent_delta > 0
+        and evidence.val_a_delta is not None
+        and evidence.val_b_delta is not None
+        and evidence.val_a_delta * evidence.val_b_delta <= 0
+    ):
+        return _assessment(
+            Verdict.SUSPICIOUS,
+            Stability.NOT_APPLICABLE,
+            Integrity.INCONCLUSIVE,
+            ["VALIDATION_ARM_SIGN_CONFLICT"],
+            aggregate,
         )
     if (
         evidence.delta_correlation is not None
@@ -204,6 +219,13 @@ def _directional_flags(evidence: TrustEvidence, config: TrustConfig) -> list:
         and abs(evidence.drift_primary_slope) > config.drift_slope_threshold
     ):
         flags.append("DRIFT_DETECTED")
+    if (
+        evidence.val_a_delta is not None
+        and evidence.val_b_delta is not None
+        and abs(evidence.val_a_delta - evidence.val_b_delta)
+        > config.validation_arm_gap_threshold
+    ):
+        flags.append("VALIDATION_ARM_GAP")
     return flags
 
 

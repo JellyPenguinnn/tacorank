@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ from ..coding import CandidateIdentity, TraeCodingWorker, TraeConfig
 from ..config import ContractError, RunConfig, VerifiedContract
 from ..evaluation import (
     DecisionContext,
+    DiagnosticFeatures,
     EvaluationInputs,
     EvaluationService,
     MetricSet as DomainMetricSet,
@@ -32,6 +34,7 @@ from ..evaluation import (
 )
 from ..evaluation.adapter import PopulationManifest, ordered_row_identity_sha256
 from ..evaluation.comparisons import compare_metric_sets
+from ..evaluation.proxy import split_validation_indices
 from ..evaluation.types import (
     EvaluationResult as DomainEvaluationResult,
     PredictionChange as DomainPredictionChange,
@@ -55,7 +58,7 @@ from ..memory.event_store import EventStore
 from ..memory.projections import project
 from ..recovery import RecoveryManager
 from ..reflection import build_research_lesson
-from ..run_layout import run_artifact_root
+from ..run_layout import experiment_artifact_prefix, run_artifact_root
 from ..safety import (
     DataAccessPolicy,
     DataViewPolicy,
@@ -224,6 +227,7 @@ def _trae_config_from_mapping(values: Mapping[str, Any]) -> TraeConfig:
 class _PopulationData:
     rows: Tuple[Mapping[str, Any], ...]
     labels: Tuple[int, ...]
+    diagnostic_features: Optional[DiagnosticFeatures] = None
 
 
 class ProtectedBaselineFinalSubmission:
@@ -518,12 +522,14 @@ class ProtectedEvaluationBridge:
         populations: Mapping[str, _PopulationData],
         baseline_predictions: Mapping[str, Path],
         evaluator_adapter: Any,
+        artifact_store: Optional[ArtifactStore] = None,
     ) -> None:
         self.config = config
         self.event_store = event_store
         self.populations = dict(populations)
         self.baseline_predictions = dict(baseline_predictions)
         self.evaluator_adapter = evaluator_adapter
+        self.artifact_store = artifact_store
         self._domain_results: Dict[Tuple[str, int, str], DomainEvaluationResult] = {}
         self._active_references: Optional[Tuple[DomainMetricSet, DomainMetricSet, DomainMetricSet]] = None
         self.service = EvaluationService(
@@ -581,6 +587,9 @@ class ProtectedEvaluationBridge:
         best_batch = self._reference_batch(state.best_experiment_id, key, population)
         previous_best = self._score_reference(best_batch, population, request)
         execution_request = self._execution_request(request.output_checked_event_id)
+        internal_proxy_delta = self._internal_proxy_delta(
+            request, execution_request.patch_commit_sha
+        )
         seed_events = (
             tuple(
                 event.event_id
@@ -615,7 +624,9 @@ class ProtectedEvaluationBridge:
             parent=parent,
             previous_best=previous_best,
             parent_scores=parent_batch.scores,
+            diagnostic_features=population.diagnostic_features,
             seed_evaluation_event_ids=seed_events,
+            internal_proxy_delta=internal_proxy_delta,
         )
         self._active_references = (baseline, parent, previous_best)
         try:
@@ -623,7 +634,11 @@ class ProtectedEvaluationBridge:
         finally:
             self._active_references = None
         self._domain_results[(request.experiment_id, request.attempt, key)] = domain
-        return domain.to_canonical()
+        canonical = domain.to_canonical()
+        if self.artifact_store is not None:
+            artifact = self._write_diagnostics_artifact(domain)
+            canonical = canonical.model_copy(update={"metrics_artifact": artifact})
+        return canonical
 
     async def decide(
         self, result: EvaluationResult, context: EvaluationDecisionContext
@@ -840,7 +855,65 @@ class ProtectedEvaluationBridge:
                 seed_stderr=canonical.trust.seed_stderr,
                 seed_count=canonical.trust.seed_count,
             ),
+            diagnostics=canonical.diagnostics,
             seed_evidence_event_ids=tuple(canonical.seed_evidence_event_ids),
+        )
+
+    def _internal_proxy_delta(
+        self, request: EvaluationRequest, patch_commit_sha: str
+    ) -> Optional[float]:
+        if (
+            request.population != Population.PUBLIC_VALIDATION
+            or request.fidelity != Fidelity.FULL
+        ):
+            return None
+        for event in reversed(self.event_store.read_events(repair_tail=True)):
+            if event.payload.type != "evaluation.completed":
+                continue
+            result = event.payload.result
+            if (
+                result.experiment_id != request.experiment_id
+                or result.population != Population.INTERNAL_PROXY
+                or result.fidelity != Fidelity.PROXY
+            ):
+                continue
+            execution = self._execution_request(event.causation_event_id)
+            if execution.patch_commit_sha == patch_commit_sha:
+                return result.parent_delta
+        return None
+
+    def _write_diagnostics_artifact(
+        self, result: DomainEvaluationResult
+    ) -> Any:
+        assert self.artifact_store is not None
+        content = (
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "run_id": result.run_id,
+                    "experiment_id": result.experiment_id,
+                    "attempt": result.attempt,
+                    "population": result.population.value,
+                    "fidelity": result.fidelity.value,
+                    "diagnostic_metrics": dict(result.diagnostic_metrics),
+                    "diagnostics": result.diagnostics.model_dump(mode="json"),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        prefix = experiment_artifact_prefix(
+            result.run_id, result.experiment_id, attempt=result.attempt
+        )
+        return self.artifact_store.write(
+            artifact_id="metrics_%s_%03d_%s"
+            % (result.experiment_id, result.attempt, result.fidelity.value),
+            kind=ArtifactKind.METRICS,
+            relative_path="%s/evaluation/%s-diagnostics.json"
+            % (prefix, result.fidelity.value),
+            content=content,
+            content_type="application/json",
         )
 
     def _score_reference(
@@ -926,8 +999,17 @@ def build_live_adapters(
     _require_clean_baseline(root, config.baseline_commit_sha)
     _require_live_files(config, live)
     _verify_data_manifest(config, live)
+    user_history, item_popularity = _load_training_profiles(
+        live.input_roots["candidate_full"] / "train.csv"
+    )
     populations = {
-        key: _load_population(path) for key, path in live.population_csvs.items()
+        key: _load_population(
+            path,
+            feature_path=live.input_roots["candidate_%s" % key] / "score.csv",
+            user_history=user_history,
+            item_popularity=item_popularity,
+        )
+        for key, path in live.population_csvs.items()
     }
     final_rows = _load_submission_rows(live.contract_root / "submission_rows.csv")
     populations["final"] = _PopulationData(final_rows, ())
@@ -1054,6 +1136,7 @@ def build_live_adapters(
         populations=populations,
         baseline_predictions=live.baseline_prediction_csvs,
         evaluator_adapter=evaluator_adapter,
+        artifact_store=artifact_store,
     )
     baseline = evaluator.baseline_evaluation(verified.contract_sha256)
     config.validate_metric_set(baseline.metric_set)
@@ -1080,7 +1163,13 @@ def build_live_adapters(
     )
 
 
-def _load_population(path: Path) -> _PopulationData:
+def _load_population(
+    path: Path,
+    *,
+    feature_path: Optional[Path] = None,
+    user_history: Optional[Mapping[str, int]] = None,
+    item_popularity: Optional[Mapping[str, int]] = None,
+) -> _PopulationData:
     rows: List[Mapping[str, Any]] = []
     labels: List[int] = []
     with path.open(newline="", encoding="utf-8") as handle:
@@ -1106,7 +1195,93 @@ def _load_population(path: Path) -> _PopulationData:
             labels.append(label)
     if not rows:
         raise ContractError("population CSV must not be empty")
-    return _PopulationData(tuple(rows), tuple(labels))
+    diagnostic_features = None
+    if feature_path is not None:
+        if user_history is None or item_popularity is None:
+            raise ContractError("diagnostic population features require training profiles")
+        diagnostic_features = _load_diagnostic_features(
+            feature_path,
+            rows,
+            user_history=user_history,
+            item_popularity=item_popularity,
+        )
+    return _PopulationData(tuple(rows), tuple(labels), diagnostic_features)
+
+
+def _load_training_profiles(path: Path) -> Tuple[Dict[str, int], Dict[str, int]]:
+    user_history: Dict[str, int] = {}
+    item_popularity: Dict[str, int] = {}
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, strict=True)
+        required = {"user_id", "video_id"}
+        if not required.issubset(reader.fieldnames or ()):
+            raise ContractError("training diagnostics require user_id and video_id")
+        for record in reader:
+            user_id = record["user_id"]
+            video_id = record["video_id"]
+            user_history[user_id] = user_history.get(user_id, 0) + 1
+            item_popularity[video_id] = item_popularity.get(video_id, 0) + 1
+    if not user_history or not item_popularity:
+        raise ContractError("training diagnostics require non-empty training data")
+    return user_history, item_popularity
+
+
+def _load_diagnostic_features(
+    path: Path,
+    population_rows: Sequence[Mapping[str, Any]],
+    *,
+    user_history: Mapping[str, int],
+    item_popularity: Mapping[str, int],
+) -> DiagnosticFeatures:
+    dates: List[int] = []
+    durations: List[float] = []
+    popularities: List[int] = []
+    histories: List[int] = []
+    user_ids: List[str] = []
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, strict=True)
+        required = {"row_id", "date", "user_id", "video_id", "duration_ms"}
+        if not required.issubset(reader.fieldnames or ()):
+            raise ContractError("diagnostic score view is missing required columns")
+        for expected, record in enumerate(reader):
+            if expected >= len(population_rows):
+                raise ContractError("diagnostic score view has extra rows")
+            population = population_rows[expected]
+            if (
+                int(record["row_id"]) != expected
+                or record["user_id"] != str(population["user_id"])
+                or record["video_id"] != str(population["video_id"])
+            ):
+                raise ContractError("diagnostic score view does not match population order")
+            try:
+                date = int(record["date"])
+                duration = float(record["duration_ms"])
+            except (TypeError, ValueError, OverflowError) as error:
+                raise ContractError("diagnostic score features must be numeric") from error
+            if duration < 0 or not math.isfinite(duration):
+                raise ContractError("diagnostic duration must be finite and non-negative")
+            user_id = record["user_id"]
+            video_id = record["video_id"]
+            dates.append(date)
+            durations.append(duration)
+            histories.append(int(user_history.get(user_id, 0)))
+            popularities.append(int(item_popularity.get(video_id, 0)))
+            user_ids.append(user_id)
+    if len(dates) != len(population_rows):
+        raise ContractError("diagnostic score view row count does not match population")
+    val_a, val_b = split_validation_indices(user_ids)
+    arms = [""] * len(user_ids)
+    for index in val_a:
+        arms[index] = "val_a"
+    for index in val_b:
+        arms[index] = "val_b"
+    return DiagnosticFeatures(
+        dates=tuple(dates),
+        duration_ms=tuple(durations),
+        item_popularity=tuple(popularities),
+        user_history_count=tuple(histories),
+        validation_arms=tuple(arms),
+    )
 
 
 def _load_submission_rows(path: Path) -> Tuple[Mapping[str, Any], ...]:

@@ -325,6 +325,19 @@ def render_summary(events: Sequence[Event]) -> str:
                 node.latest_commit_sha or "—",
             )
         )
+    latest_evaluations = {}
+    for event in events:
+        if event.payload.type == "evaluation.completed":
+            latest_evaluations[event.payload.result.experiment_id] = event.payload.result
+    diagnostic_rows = []
+    for experiment_id, result in sorted(latest_evaluations.items()):
+        hypotheses = result.diagnostics.failure_hypotheses
+        if hypotheses:
+            diagnostic_rows.append(
+                "- `%s`: %s" % (experiment_id, " ".join(hypotheses))
+            )
+    if diagnostic_rows:
+        lines.extend(("", "## Diagnostic findings", "", *diagnostic_rows))
     totals = state.resource_totals
     lines.extend(
         (
@@ -396,6 +409,10 @@ def _graph_payload(events: Sequence[Event]) -> dict:
         event.payload.spec.experiment_id: event.payload.spec
         for event in proposal_events
     }
+    latest_evaluations = {}
+    for event in events:
+        if event.payload.type == "evaluation.completed":
+            latest_evaluations[event.payload.result.experiment_id] = event.payload.result
     directions = _direction_directories(
         [spec.family for spec in specifications.values()]
     )
@@ -422,6 +439,12 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                 "highest_fidelity": payload.evaluation.fidelity.value,
                 "metric_set": payload.metric_set.model_dump(mode="json"),
                 "trust": payload.evaluation.trust.model_dump(mode="json"),
+                "diagnostics": payload.evaluation.diagnostics.model_dump(mode="json"),
+                "metrics_artifact": (
+                    payload.evaluation.metrics_artifact.model_dump(mode="json")
+                    if payload.evaluation.metrics_artifact is not None
+                    else None
+                ),
                 "estimated_cost": None,
                 "best_eligible": state.best_experiment_id == payload.experiment_id,
                 "event_ids": [
@@ -433,6 +456,7 @@ def _graph_payload(events: Sequence[Event]) -> dict:
     for experiment_id in sorted(specifications):
         spec = specifications[experiment_id]
         node = state.experiments[experiment_id]
+        evaluation = latest_evaluations.get(experiment_id)
         nodes.append(
             {
                 "experiment_id": experiment_id,
@@ -461,6 +485,17 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                 "trust": (
                     node.trust.model_dump(mode="json")
                     if node.trust is not None
+                    else None
+                ),
+                "diagnostics": (
+                    evaluation.diagnostics.model_dump(mode="json")
+                    if evaluation is not None
+                    else None
+                ),
+                "metrics_artifact": (
+                    evaluation.metrics_artifact.model_dump(mode="json")
+                    if evaluation is not None
+                    and evaluation.metrics_artifact is not None
                     else None
                 ),
                 "estimated_cost": spec.estimated_cost.model_dump(mode="json"),
@@ -573,6 +608,30 @@ def _render_experiment(node: dict, events: Sequence[Event]) -> str:
                 "```",
             )
         )
+    diagnostics = node.get("diagnostics")
+    if diagnostics is not None and any(
+        value not in (None, [], {}) for value in diagnostics.values()
+    ):
+        lines.extend(
+            (
+                "",
+                "## Diagnostics",
+                "",
+                "These aggregate signals support hypotheses, not causal claims.",
+                "",
+                "```json",
+                json.dumps(diagnostics, ensure_ascii=False, sort_keys=True, indent=2),
+                "```",
+            )
+        )
+        if node.get("metrics_artifact") is not None:
+            lines.extend(
+                (
+                    "",
+                    "Metrics artifact: `%s`"
+                    % node["metrics_artifact"]["path"],
+                )
+            )
     event_by_id = {event.event_id: event for event in events}
     lines.extend(("", "## Lifecycle", ""))
     for event_id in node["event_ids"]:

@@ -82,6 +82,35 @@ class NoOpTrustTests(unittest.TestCase):
         )
         self.assertEqual(prohibited.verdict, Verdict.INCONCLUSIVE)
 
+    def test_validation_arm_conflict_blocks_positive_reward(self):
+        change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
+        trust = assess_trust(
+            evidence(
+                change,
+                parent_delta=0.01,
+                val_a_delta=0.02,
+                val_b_delta=-0.001,
+            )
+        )
+
+        self.assertEqual(trust.verdict, Verdict.SUSPICIOUS)
+        self.assertIn("VALIDATION_ARM_SIGN_CONFLICT", trust.flags)
+
+    def test_validation_arm_gap_and_temporal_drift_are_visible(self):
+        change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
+        trust = assess_trust(
+            evidence(
+                change,
+                parent_delta=0.01,
+                val_a_delta=0.02,
+                val_b_delta=0.01,
+                drift_primary_slope=-0.003,
+            )
+        )
+
+        self.assertIn("VALIDATION_ARM_GAP", trust.flags)
+        self.assertIn("DRIFT_DETECTED", trust.flags)
+
     def test_redundancy_does_not_claim_seed_confirmation(self):
         change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
         trust = assess_trust(

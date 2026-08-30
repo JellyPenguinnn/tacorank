@@ -53,6 +53,31 @@ def _prediction_change_spearman(value: object) -> Optional[float]:
     return None if spearman is None else float(spearman)
 
 
+def _planner_diagnostic_metrics(result: object) -> Dict[str, float]:
+    diagnostics = getattr(result, "diagnostics", None)
+    if diagnostics is None:
+        return {}
+    values = {
+        "train_validation_gap": diagnostics.train_validation_gap,
+        "proxy_parent_delta": diagnostics.proxy_parent_delta,
+        "proxy_full_delta_gap": diagnostics.proxy_full_delta_gap,
+        "validation_arm_gap": diagnostics.validation_arm_gap,
+        "temporal_delta_slope": diagnostics.temporal_delta_slope,
+        "gain_concentration_top10pct": diagnostics.gain_concentration_top10pct,
+    }
+    for arm, value in diagnostics.validation_arm_deltas.items():
+        values["%s_parent_delta" % arm] = value
+    for label, name in (
+        ("best_slice_delta", diagnostics.best_slice),
+        ("worst_slice_delta", diagnostics.worst_slice),
+    ):
+        if name is not None:
+            values[label] = diagnostics.slice_deltas[name]
+    return {
+        name: float(value) for name, value in values.items() if value is not None
+    }
+
+
 class ContextBuildError(RuntimeError):
     pass
 
@@ -382,6 +407,23 @@ class ContextBuilder:
                     stability=evaluation.trust.stability if evaluation else None,
                     integrity=evaluation.trust.integrity if evaluation else None,
                     trust_flags=(list(evaluation.trust.flags) if evaluation else []),
+                    diagnostic_metrics=(
+                        _planner_diagnostic_metrics(evaluation) if evaluation else {}
+                    ),
+                    failure_hypotheses=(
+                        list(evaluation.diagnostics.failure_hypotheses)
+                        if evaluation
+                        else []
+                    ),
+                    diagnostic_limitations=(
+                        list(evaluation.diagnostics.limitations) if evaluation else []
+                    ),
+                    diagnostic_best_slice=(
+                        evaluation.diagnostics.best_slice if evaluation else None
+                    ),
+                    diagnostic_worst_slice=(
+                        evaluation.diagnostics.worst_slice if evaluation else None
+                    ),
                     decision=decision.decision if decision else None,
                     highest_completed_fidelity=(
                         evaluation.fidelity if evaluation else node.highest_fidelity

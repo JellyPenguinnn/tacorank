@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
+from tacorank.artifacts import ArtifactStore
 from tacorank.evaluation.types import (
     EvaluationResult as DomainEvaluationResult,
     MetricDelta,
@@ -13,6 +15,7 @@ from tacorank.evaluation.types import (
 from tacorank.orchestrator.live import ProtectedEvaluationBridge
 from tacorank.schemas import (
     EvaluationDecisionContext,
+    EvaluationDiagnostics,
     Fidelity,
     Integrity,
     LessonCategory,
@@ -130,3 +133,124 @@ def test_protected_decision_attaches_eligible_research_lesson():
     ]
     assert lesson.source_commit_shas == ["d" * 40]
     assert lesson.measured_under_frame_experiment_id == "baseline"
+
+
+def test_full_diagnostics_resolve_proxy_delta_from_the_same_commit():
+    proxy_domain = DomainEvaluationResult(
+        run_id="run_test",
+        experiment_id="exp_001",
+        attempt=2,
+        population=Population.INTERNAL_PROXY,
+        fidelity=Fidelity.PROXY,
+        seed=11,
+        public_query_index=None,
+        evaluator_sha256="a" * 64,
+        contract_sha256="b" * 64,
+        data_manifest_sha256="c" * 64,
+        metric_set=MetricSet({"primary": 0.59}, "primary", 0.59),
+        baseline_delta=MetricDelta(-0.01, {"primary": -0.01}),
+        parent_delta=MetricDelta(-0.02, {"primary": -0.02}),
+        previous_best_delta=MetricDelta(-0.01, {"primary": -0.01}),
+        prediction_change=PredictionChange(0.8, 0.2, 0.0, 0.9),
+        trust=TrustAssessment(
+            TrustVerdict.NEGATIVE,
+            Stability.NOT_APPLICABLE,
+            Integrity.CLEAN,
+        ),
+    )
+    request = SimpleNamespace(patch_commit_sha="d" * 40)
+    events = [
+        event("evt_started", "execution.started", request=request),
+        event(
+            "evt_finished",
+            "execution.finished",
+            causation_event_id="evt_started",
+        ),
+        event(
+            "evt_output",
+            "output.checked",
+            causation_event_id="evt_finished",
+        ),
+        event(
+            "evt_proxy",
+            "evaluation.completed",
+            causation_event_id="evt_output",
+            result=proxy_domain.to_canonical(),
+        ),
+    ]
+    bridge = ProtectedEvaluationBridge(
+        config=SimpleNamespace(max_confirmation_attempts=2),
+        event_store=StaticEventStore(events),
+        populations={},
+        baseline_predictions={},
+        evaluator_adapter=object(),
+    )
+    full_request = SimpleNamespace(
+        experiment_id="exp_001",
+        population=Population.PUBLIC_VALIDATION,
+        fidelity=Fidelity.FULL,
+    )
+
+    assert bridge._internal_proxy_delta(full_request, "d" * 40) == -0.02
+    assert bridge._internal_proxy_delta(full_request, "e" * 40) is None
+
+
+def test_diagnostics_artifact_contains_aggregates_without_row_evidence(tmp_path):
+    diagnostics = {
+        "proxy_parent_delta": 0.02,
+        "proxy_full_delta_gap": 0.03,
+        "validation_arm_deltas": {"val_a": 0.01, "val_b": -0.01},
+        "validation_arm_gap": 0.02,
+        "temporal_delta_slope": -0.004,
+        "gain_concentration_top10pct": 0.75,
+        "slice_deltas": {"user_history.cold": -0.02},
+        "best_slice": "user_history.cold",
+        "worst_slice": "user_history.cold",
+        "failure_hypotheses": ["A measured cohort regressed."],
+        "limitations": ["A controlled ablation is required."],
+    }
+    domain = DomainEvaluationResult(
+        run_id="run_test",
+        experiment_id="exp_001",
+        attempt=3,
+        population=Population.PUBLIC_VALIDATION,
+        fidelity=Fidelity.FULL,
+        seed=33,
+        public_query_index=2,
+        evaluator_sha256="a" * 64,
+        contract_sha256="b" * 64,
+        data_manifest_sha256="c" * 64,
+        metric_set=MetricSet({"primary": 0.59}, "primary", 0.59),
+        baseline_delta=MetricDelta(-0.01, {"primary": -0.01}),
+        parent_delta=MetricDelta(-0.02, {"primary": -0.02}),
+        previous_best_delta=MetricDelta(-0.01, {"primary": -0.01}),
+        prediction_change=PredictionChange(0.8, 0.2, 0.0, 0.9),
+        trust=TrustAssessment(
+            TrustVerdict.NEGATIVE,
+            Stability.NOT_APPLICABLE,
+            Integrity.CLEAN,
+        ),
+        diagnostic_metrics={"validation_arm_gap": 0.02},
+        diagnostics=EvaluationDiagnostics(**diagnostics),
+    )
+    store = ArtifactStore(tmp_path, ("runs",))
+    bridge = ProtectedEvaluationBridge(
+        config=SimpleNamespace(max_confirmation_attempts=2),
+        event_store=StaticEventStore([]),
+        populations={},
+        baseline_predictions={},
+        evaluator_adapter=object(),
+        artifact_store=store,
+    )
+
+    artifact = bridge._write_diagnostics_artifact(domain)
+
+    store.verify(artifact)
+    payload = json.loads((tmp_path / artifact.path).read_text(encoding="utf-8"))
+    assert payload["diagnostics"] == domain.diagnostics.model_dump(mode="json")
+    assert payload["diagnostic_metrics"] == {"validation_arm_gap": 0.02}
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "user_ids" not in serialized
+    assert "labels" not in serialized
+    assert "candidate_scores" not in serialized
+    assert "parent_scores" not in serialized

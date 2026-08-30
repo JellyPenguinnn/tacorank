@@ -9,6 +9,7 @@ from .adapter import (
     ProtectedEvaluatorAdapter,
 )
 from .decisions import DecisionContext, NoOpRecoveryRequired, decide
+from .diagnostics import DiagnosticFeatures, compute_evaluation_diagnostics
 from .types import (
     Decision,
     EvaluationResult,
@@ -27,6 +28,7 @@ __all__ = [
     "ContractSpec",
     "Decision",
     "DecisionContext",
+    "DiagnosticFeatures",
     "EvaluationInputs",
     "EvaluationResult",
     "EvaluationService",
@@ -43,5 +45,6 @@ __all__ = [
     "Stability",
     "TrustAssessment",
     "Verdict",
+    "compute_evaluation_diagnostics",
     "decide",
 ]

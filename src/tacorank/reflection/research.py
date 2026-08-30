@@ -60,10 +60,15 @@ def build_research_lesson(
         confidence = 0.85
         tags = (family, "saturated", "redundant")
     elif trust.verdict == Verdict.NEGATIVE:
+        diagnostic_note = ""
+        if result.diagnostics.failure_hypotheses:
+            diagnostic_note = " Diagnostic hypothesis: %s" % " ".join(
+                result.diagnostics.failure_hypotheses[:2]
+            )
         summary = (
             "Observation: a verified implementation of '%s' did not improve the parent beyond noise (%s). "
-            "Causal hypothesis: %s was insufficient under the current evaluation frame."
-            % (hypothesis, metric_text, expected_mechanism)
+            "Mechanism hypothesis: %s was insufficient under the current evaluation frame.%s"
+            % (hypothesis, metric_text, expected_mechanism, diagnostic_note)
         )
         category = "research_result"
         confidence = 0.80

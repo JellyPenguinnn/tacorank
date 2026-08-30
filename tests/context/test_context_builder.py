@@ -58,6 +58,11 @@ def test_planner_history_preserves_complete_evaluation_evidence(
     assert latest.prediction_change == 0.1
     assert latest.prediction_spearman_vs_parent == 0.9
     assert latest.trust_flags == []
+    assert latest.diagnostic_metrics["validation_arm_gap"] == 0.01
+    assert latest.diagnostic_metrics["temporal_delta_slope"] == -0.003
+    assert latest.diagnostic_worst_slice == "user_history.cold"
+    assert "Cohort weakness" in latest.failure_hypotheses[0]
+    assert "contract v1" in latest.diagnostic_limitations[0]
     assert latest.parent_eligible is True
     assert latest.best_eligible is True
 

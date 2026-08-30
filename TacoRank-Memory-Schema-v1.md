@@ -145,6 +145,19 @@ Official evaluation runs in a fresh isolated interpreter after the evaluator and
 contract identities are checked. Candidate interpreter state is never reused for
 protected metric computation.
 
+`evaluation.completed` may carry backward-compatible `EvaluationDiagnostics` and a
+`metrics_artifact`. Diagnostics contain aggregate proxy/full, validation-arm,
+temporal, concentration, and cohort evidence plus explicit hypotheses and limitations.
+The artifact is immutable and must not contain row-level labels, candidate scores,
+parent scores, or user delta vectors. Planner context receives only a compact scalar
+summary and bounded hypothesis text; it never reads the raw diagnostic feature rows.
+
+Diagnostic hypotheses are associational evidence, not causal conclusions. A direct
+training-versus-validation gap is `null` under contract v1 because no protected
+training-prediction population is emitted. A future train-inference route changes the
+execution and information contract and must be introduced deliberately rather than
+accepting a candidate-reported score.
+
 ## Resource accounting
 
 Every adapter result supplies one `ResourceDelta`. Provider-measured and estimated
