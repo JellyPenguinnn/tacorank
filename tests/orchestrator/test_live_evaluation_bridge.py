@@ -14,6 +14,7 @@ from tacorank.evaluation.types import (
 )
 from tacorank.orchestrator.live import ProtectedEvaluationBridge
 from tacorank.schemas import (
+    ArtifactKind,
     EvaluationDecisionContext,
     EvaluationDiagnostics,
     Fidelity,
@@ -255,3 +256,52 @@ def test_diagnostics_artifact_contains_aggregates_without_row_evidence(tmp_path)
     assert "labels" not in serialized
     assert "candidate_scores" not in serialized
     assert "parent_scores" not in serialized
+
+
+def test_training_diagnostics_resolve_from_canonical_artifact_store(tmp_path):
+    store = ArtifactStore(tmp_path, ("runs",))
+    artifact = store.write(
+        artifact_id="training_diagnostics",
+        kind=ArtifactKind.CHECKPOINT,
+        relative_path="runs/run_test/artifacts/training-diagnostics.json",
+        content=(
+            json.dumps(
+                {
+                    "train_rows": 1200,
+                    "loss_start": 0.72,
+                    "loss_end": 0.61,
+                    "pairwise_accuracy": 0.64,
+                    "ignored": "not numeric evidence",
+                }
+            ).encode("utf-8")
+            + b"\n"
+        ),
+        content_type="application/json",
+    )
+    events = [
+        event(
+            "evt_finished",
+            "execution.finished",
+            result=SimpleNamespace(checkpoint_artifact=artifact),
+        ),
+        event(
+            "evt_output",
+            "output.checked",
+            causation_event_id="evt_finished",
+        ),
+    ]
+    bridge = ProtectedEvaluationBridge(
+        config=SimpleNamespace(max_confirmation_attempts=2),
+        event_store=StaticEventStore(events),
+        populations={},
+        baseline_predictions={},
+        evaluator_adapter=object(),
+        artifact_store=store,
+    )
+
+    assert bridge._training_diagnostics("evt_output") == {
+        "train_rows": 1200.0,
+        "loss_start": 0.72,
+        "loss_end": 0.61,
+        "pairwise_accuracy": 0.64,
+    }
