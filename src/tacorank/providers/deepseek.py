@@ -98,9 +98,10 @@ Required JSON fields:
 }
 """
 
-COMPACT_RETRY_INSTRUCTION = """The previous completion reached its output-token limit.
-Return the same required JSON object compactly. Do not include analysis, commentary,
-Markdown, optional fields, or more than two short sentences in any string field.
+COMPACT_RETRY_INSTRUCTION = """The previous completion was unusable or reached its
+output-token limit. Return the same required JSON object compactly. Do not include
+analysis, commentary, Markdown, optional fields, or more than two short sentences
+in any string field.
 """
 
 
@@ -700,24 +701,40 @@ class DeepSeekResearchProvider:
             )
             self._record_usage(response)
             if self._finish_reason(response) != "length" or attempt == 1:
-                break
+                try:
+                    content = self._content(response)
+                except ProviderError as error:
+                    if (
+                        attempt == 0
+                        and str(error) == "DeepSeek returned empty planner JSON"
+                    ):
+                        logger.warning(
+                            "deepseek_planner_empty_retry model=%s context_id=%s repair=%s",
+                            self.model,
+                            get_value(request.context, "context_id", None),
+                            bool(validation_errors),
+                        )
+                        continue
+                    raise
+                normalized = self._normalize(content, request)
+                self._last_candidate.set(normalized)
+                self._last_completed_input_tokens = self._input_tokens.get() or 0
+                self._last_completed_output_tokens = self._output_tokens.get() or 0
+                logger.info(
+                    "deepseek_planner_response model=%s experiment_id=%s input_tokens=%d output_tokens=%d",
+                    self.model,
+                    normalized["experiment_id"],
+                    self._input_tokens.get() or 0,
+                    self._output_tokens.get() or 0,
+                )
+                return normalized
             logger.warning(
                 "deepseek_planner_length_retry model=%s context_id=%s",
                 self.model,
                 get_value(request.context, "context_id", None),
             )
-        normalized = self._normalize(self._content(response), request)
-        self._last_candidate.set(normalized)
-        self._last_completed_input_tokens = self._input_tokens.get() or 0
-        self._last_completed_output_tokens = self._output_tokens.get() or 0
-        logger.info(
-            "deepseek_planner_response model=%s experiment_id=%s input_tokens=%d output_tokens=%d",
-            self.model,
-            normalized["experiment_id"],
-            self._input_tokens.get() or 0,
-            self._output_tokens.get() or 0,
-        )
-        return normalized
+        # The second response was truncated and must be rejected by _content().
+        raise AssertionError("planner completion retry loop exited unexpectedly")
 
     async def generate(self, request: ProviderRequest) -> Dict[str, Any]:
         self._input_tokens.set(0)
