@@ -67,7 +67,10 @@ class ResearchPlanner:
         output_token_limit: int | None = None,
     ):
         self.provider = provider
-        self.policy = policy or SearchPolicy()
+        # Production planning follows one strongest branch at a time.  The
+        # policy remains configurable for tests and offline portfolio analysis,
+        # but the live planner avoids shallow seven-way fan-out.
+        self.policy = policy or SearchPolicy(frontier_limit=1)
         self.validator = validator or PlanValidator()
         self.convergence_advisor = convergence_advisor or ConvergenceAdvisor()
         self.output_factory = output_factory or _default_output_factory

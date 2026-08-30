@@ -82,6 +82,21 @@ def available_capabilities(context: Any) -> frozenset[str]:
     if "random_exposure_log" in allowed_data:
         capabilities.add("random_exposure_log")
 
+    # A materially changing training rate by date is an auditable prerequisite
+    # for the past-only drift card.  Derive it from the hash-bound aggregate
+    # profile rather than requiring a manually asserted capability.  This lets
+    # the planner explore a useful temporal mechanism when the data support it,
+    # while keeping the decision label-free and deterministic.
+    profile = get_value(context, "data_profile", None)
+    date_slices = as_list(get_value(profile, "train_long_view_by_date", None))
+    rates = []
+    for item in date_slices:
+        rate = _number(get_value(item, "positive_rate", None))
+        if rate is not None:
+            rates.append(rate)
+    if len(rates) >= 2 and max(rates) - min(rates) >= 0.01:
+        capabilities.add("drift_diagnostics_material")
+
     pairwise_results = [
         summary
         for summary in history

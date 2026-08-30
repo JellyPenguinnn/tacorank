@@ -55,6 +55,16 @@ Treat the setup-verified FM score as the strong research parent. Prefer one boun
 additive residual on that original ranking-score scale; do not propose clipping,
 sigmoid conversion, normalization, or replacement of the FM parent unless the
 authoritative policy block explicitly selects a replacement-capable method.
+Within those safety boundaries, seek a measurable ranking intervention rather than
+an effectively zero residual: use the full allowed training evidence, target a
+specific source of within-user ordering error, and state how the intervention can
+change rankings while retaining the parent for unseen cases. Do not make a cosmetic
+perturbation merely to pass the prediction-change threshold.
+
+A parent-relative gain that stays below the original setup-verified baseline is not
+sufficient: state success_criteria against that baseline's absolute primary_score,
+not only the immediate parent's score, so a chain of small parent-relative deltas
+cannot be judged healthy while cumulative distance from the baseline grows.
 
 Treat family_history as short-term iteration feedback. It deliberately includes
 negative proxy, no-op, inconclusive, redundant, and suspicious outcomes; weight each
