@@ -93,6 +93,87 @@ def test_git_manifest_ignores_controller_runtime_files_but_binds_tracked_tree(
     assert not manifest.verify().valid
 
 
+def test_git_manifest_canonicalizes_cross_platform_line_endings(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    write(repository / ".gitattributes", "*.md text eol=lf\n")
+    git(repository, "add", ".gitattributes")
+    git(
+        repository,
+        "-c",
+        "user.name=TacoRank Test",
+        "-c",
+        "user.email=tacorank@invalid",
+        "commit",
+        "-m",
+        "normalize protected text",
+    )
+    protected = repository / "contract" / "COMPETITION.md"
+    protected.write_bytes(b"sealed contract\r\n")
+    assert git(repository, "status", "--porcelain").strip() == ""
+    manifest = ProtectedManifest.capture(
+        repository,
+        ("contract",),
+        data_manifest_sha256=DATA_SHA,
+        require_minimum=False,
+    )
+
+    candidate = tmp_path / "candidate-worktree"
+    git(repository, "worktree", "add", "-b", "candidate-eol", str(candidate), "HEAD")
+    candidate_protected = candidate / "contract" / "COMPETITION.md"
+    candidate_protected.unlink()
+    git(
+        candidate,
+        "-c",
+        "core.autocrlf=false",
+        "checkout",
+        "HEAD",
+        "--",
+        "contract/COMPETITION.md",
+    )
+    assert candidate_protected.read_bytes() == b"sealed contract\n"
+    assert git(candidate, "status", "--porcelain").strip() == ""
+
+    assert manifest.verify(candidate).valid
+
+    candidate_protected.write_bytes(b"tampered contract\n")
+    verification = manifest.verify(candidate)
+    assert not verification.valid
+    assert verification.changed_paths == ("contract",)
+
+
+def test_git_manifest_does_not_normalize_binary_line_endings(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    init_repository(repository)
+    binary = repository / "contract" / "sealed.bin"
+    binary.write_bytes(b"\x00sealed\r\n")
+    git(repository, "add", "contract/sealed.bin")
+    git(
+        repository,
+        "-c",
+        "user.name=TacoRank Test",
+        "-c",
+        "user.email=tacorank@invalid",
+        "commit",
+        "-m",
+        "seal binary contract",
+    )
+    manifest = ProtectedManifest.capture(
+        repository,
+        ("contract",),
+        data_manifest_sha256=DATA_SHA,
+        require_minimum=False,
+    )
+
+    binary.write_bytes(b"\x00sealed\n")
+
+    verification = manifest.verify(repository)
+    assert not verification.valid
+    assert verification.changed_paths == ("contract",)
+
+
 def test_markdown_manifest_is_hash_bound_and_requires_paths(tmp_path: Path) -> None:
     write(tmp_path / "contract" / "COMPETITION.md", "sealed\n")
     manifest_path = tmp_path / "PROTECTED_PATHS.md"
@@ -158,6 +239,16 @@ def test_manifest_binds_initialized_submodule_and_rejects_uninitialized_capture(
         require_minimum=False,
     )
     assert manifest.verify(repository).valid
+
+    official_evaluator = repository / "official" / "evaluate.py"
+    indexed_text = b"OFFICIAL = True\n"
+    official_evaluator.write_bytes(indexed_text.replace(b"\n", b"\r\n"))
+    assert manifest.verify(repository).valid
+    official_evaluator.write_bytes(b"OFFICIAL = False\n")
+    tampered = manifest.verify(repository)
+    assert not tampered.valid
+    assert tampered.changed_paths == ("official/evaluate.py",)
+    official_evaluator.write_bytes(indexed_text)
 
     candidate = tmp_path / "candidate-worktree"
     git(repository, "worktree", "add", "-b", "candidate", str(candidate), "HEAD")

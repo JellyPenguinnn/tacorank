@@ -56,6 +56,36 @@ def _require(condition: bool, message: str) -> None:
         raise TransitionError(message)
 
 
+def _authorized_no_op_reimplementation(events: List[Event], state, spec) -> bool:
+    """Allow one planner-selected duplicate after bounded no-op recovery."""
+
+    prior = [
+        node
+        for node in state.experiments.values()
+        if node.duplicate_key == spec.duplicate_key
+    ]
+    if len(prior) != 1:
+        return False
+    node = prior[0]
+    recovery = _last_for_experiment(
+        events, EventType.RECOVERY_DECIDED, node.experiment_id
+    )
+    evaluation = _last_for_experiment(
+        events, EventType.EVALUATION_COMPLETED, node.experiment_id
+    )
+    return bool(
+        node.status == ExperimentStatus.NO_OP
+        and recovery is not None
+        and recovery.payload.decision.action == RecoveryAction.RETURN_TO_PLANNER
+        and recovery.payload.decision.reason_code
+        in {"NO_OP_RECOVERY_EXHAUSTED", "NO_OP_REPAIR_WORKER_EXHAUSTED"}
+        and evaluation is not None
+        and evaluation.payload.result.trust.verdict == TrustVerdict.NO_OP
+        and spec.parent_experiment_id == node.parent_experiment_id
+        and spec.family == node.family
+    )
+
+
 def _latest_recoverable_failure(events: List[Event], experiment_id: str) -> Optional[Event]:
     for event in reversed(events):
         if event.event_type == EventType.PATCH_CHECKED:
@@ -205,8 +235,13 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         spec = payload.spec
         _require(state.status in (RunStatus.READY, RunStatus.RUNNING), "run is not accepting proposals")
         _require(spec.experiment_id not in state.experiments, "duplicate experiment_id")
+        duplicate_exists = any(
+            node.duplicate_key == spec.duplicate_key
+            for node in state.experiments.values()
+        )
         _require(
-            all(node.duplicate_key != spec.duplicate_key for node in state.experiments.values()),
+            not duplicate_exists
+            or _authorized_no_op_reimplementation(events, state, spec),
             "duplicate experiment proposal",
         )
         if spec.parent_experiment_id:
@@ -397,7 +432,13 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         decision = payload.decision
         node = state.experiments.get(decision.experiment_id)
         _require(node is not None and node.status == ExperimentStatus.RECOVERING, "nothing is recoverable")
-        consumes_repair = int(decision.action == RecoveryAction.TRAE_REPAIR)
+        consumes_repair = int(
+            decision.action
+            in {
+                RecoveryAction.TRAE_REPAIR,
+                RecoveryAction.RESTART_FROM_TRUSTED_PARENT,
+            }
+        )
         expected_attempt = min(
             max(1, node.repair_count + 1),
             max(1, state.max_repairs_per_experiment),

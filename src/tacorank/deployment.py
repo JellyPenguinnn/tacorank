@@ -24,6 +24,7 @@ from .coding import (
     TRAE_DEEPSEEK_REASONING_MARKER,
     TRAE_DEEPSEEK_TOOL_JSON_MARKER,
     TRAE_DOCKER_EDIT_TOOL_MARKER,
+    TRAE_STATELESS_DOCKER_MARKER,
     hash_trae_runtime_package,
 )
 from .config import PRODUCTION_TARGET_INTERFACE_EXCERPTS
@@ -342,6 +343,7 @@ def _prepare_trae_runtime(
 
     _install_trae(python, runtime, root)
     _patch_trae_read_only_attach(runtime)
+    _patch_trae_cross_platform_docker_exec(runtime)
     _patch_trae_deepseek_reasoning(runtime)
     _patch_trae_docker_edit_tool(runtime)
     image, image_environment_sha256, allowed_import_roots = _build_runtime_image(
@@ -382,7 +384,7 @@ def _trae_payload(
         "max_steps_cap": 64,
         "max_token_cap": None,
         "max_wall_time_seconds_cap": 1800,
-        "repair_step_limit": 48,
+        "repair_step_limit": 20,
         "repair_token_limit": None,
         "repair_wall_time_limit_seconds": 1200,
         "repair_allowed_command_ids": ["candidate_smoke"],
@@ -831,6 +833,104 @@ def _patch_trae_read_only_attach(runtime: Path) -> None:
         raise DeploymentError("pinned Trae read-only attach patch is invalid") from exc
 
 
+def _patch_trae_cross_platform_docker_exec(runtime: Path) -> None:
+    """Replace Trae's Unix-only interactive pexpect shell with Docker exec.
+
+    The reviewed container remains the security boundary. Each tool call starts
+    in ``/workspace`` and is bounded inside the container by coreutils
+    ``timeout``. This works through Docker Desktop's named pipe on Windows and
+    its Unix socket on macOS/Linux without relying on a host pseudo-terminal.
+    """
+
+    docker_manager = (
+        _trae_site_packages(runtime) / "trae_agent" / "agent" / "docker_manager.py"
+    )
+    try:
+        if (
+            docker_manager.is_symlink()
+            or not docker_manager.is_file()
+            or docker_manager.resolve(strict=True) != docker_manager
+        ):
+            raise DeploymentError("Trae Docker manager is not a canonical source file")
+        original = docker_manager.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DeploymentError("Trae Docker manager could not be read") from exc
+
+    startup_anchor = '''            self._copy_tools_to_container()
+            # if self.interactive:
+            self._start_persistent_shell()
+'''
+    execute_anchor = '''        # if self.interactive:
+        return self._execute_interactive(command, timeout)
+        # else:
+        #     return self._execute_stateless(command)
+'''
+    helper_anchor = '''    def _start_persistent_shell(self):
+'''
+    if (
+        original.count(startup_anchor) != 1
+        or original.count(execute_anchor) != 1
+        or original.count(helper_anchor) != 1
+        or TRAE_STATELESS_DOCKER_MARKER in original
+    ):
+        raise DeploymentError(
+            "pinned Trae cross-platform Docker patch does not apply cleanly"
+        )
+
+    startup_replacement = f'''            self._copy_tools_to_container()
+            # {TRAE_STATELESS_DOCKER_MARKER}.
+            probe = self.container.exec_run(
+                ["/bin/sh", "-c", "command -v timeout >/dev/null"],
+                workdir=self.container_workspace,
+            )
+            if probe.exit_code != 0:
+                raise DockerException(
+                    "Container does not provide the reviewed timeout command."
+                )
+            print("Stateless Docker execution is ready.")
+'''
+    stateless_helper = '''    def _execute_stateless(self, command: str, timeout_seconds: int) -> tuple[int, str]:
+        """Execute one bounded command without a host pseudo-terminal."""
+        if not self.container:
+            raise RuntimeError("Container is not running. Call start() first.")
+        try:
+            bounded_timeout = max(1, int(timeout_seconds))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Docker command timeout must be a positive integer.") from exc
+        result = self.container.exec_run(
+            [
+                "timeout", "--signal=KILL", f"{bounded_timeout}s",
+                "/bin/bash", "-lc", command,
+            ],
+            workdir=self.container_workspace,
+        )
+        output = result.output
+        if isinstance(output, tuple):
+            output = b"".join(part or b"" for part in output)
+        if isinstance(output, bytes):
+            rendered = output.decode("utf-8", errors="replace")
+        else:
+            rendered = str(output or "")
+        return int(result.exit_code), rendered.strip()
+
+'''
+    patched = (
+        original.replace(startup_anchor, startup_replacement)
+        .replace(
+            execute_anchor,
+            "        return self._execute_stateless(command, timeout)\n",
+        )
+        .replace(helper_anchor, stateless_helper + helper_anchor)
+    )
+    try:
+        compile(patched, str(docker_manager), "exec")
+        docker_manager.write_text(patched, encoding="utf-8")
+    except (OSError, SyntaxError) as exc:
+        raise DeploymentError(
+            "pinned Trae cross-platform Docker patch is invalid"
+        ) from exc
+
+
 def _patch_trae_deepseek_reasoning(runtime: Path) -> None:
     """Make the pinned Responses client explicit and continuous for DeepSeek thinking."""
 
@@ -999,6 +1099,9 @@ def _patch_trae_docker_edit_tool(runtime: Path) -> None:
         raise DeploymentError("Trae Docker edit executor could not be read") from exc
 
     import_anchor = "import os\n"
+    path_anchor = '''            container_path = os.path.join(self._container_workspace_dir, relative_path)
+            return os.path.normpath(container_path)
+'''
     block_anchor = '''                executable_path = f"{self._docker_manager.CONTAINER_TOOLS_PATH}/edit_tool"
                 cmd_parts = [executable_path, sub_command]
 
@@ -1015,6 +1118,7 @@ def _patch_trae_docker_edit_tool(runtime: Path) -> None:
 '''
     if (
         original.count(import_anchor) != 1
+        or original.count(path_anchor) != 1
         or original.count(block_anchor) != 1
         or TRAE_DOCKER_EDIT_TOOL_MARKER in original
     ):
@@ -1044,8 +1148,17 @@ def _patch_trae_docker_edit_tool(runtime: Path) -> None:
 
                 command_to_run = shlex.join(cmd_parts)
 '''
-    patched = original.replace(import_anchor, import_anchor + "import shlex\n").replace(
-        block_anchor, replacement
+    patched = (
+        original.replace(import_anchor, import_anchor + "import posixpath\nimport shlex\n")
+        .replace(
+            path_anchor,
+            '''            container_path = posixpath.join(
+                self._container_workspace_dir, relative_path.replace(os.sep, "/")
+            )
+            return posixpath.normpath(container_path)
+''',
+        )
+        .replace(block_anchor, replacement)
     )
     try:
         compile(patched, str(executor), "exec")

@@ -30,6 +30,7 @@ class ExperimentStatus(str, Enum):
     OUTPUT_VERIFIED = "output_verified"
     EVALUATED = "evaluated"
     RECOVERING = "recovering"
+    NO_OP = "no_op"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     PRUNED = "pruned"

@@ -201,6 +201,21 @@ def test_coding_prompt_records_an_unbounded_cumulative_token_limit() -> None:
     assert "does not impose a cumulative trajectory token limit" in prompt
 
 
+def test_coding_owner_retry_prompt_includes_exact_error_and_bounded_correction() -> None:
+    context, spec = _coding_inputs()
+    context.owner_retry_error_summary = "Trae returned NO_PATCH"
+    context.owner_retry_instructions = (
+        "Retry only the coding_worker stage against the same assignment."
+    )
+
+    prompt = build_coding_prompt(context, spec)
+
+    assert "## Bounded owner retry" in prompt
+    assert "Trae returned NO_PATCH" in prompt
+    assert "Retry only the coding_worker stage" in prompt
+    assert "proposed_correction as a bounded diagnostic" in prompt
+
+
 def test_repair_prompt_preserves_original_hypothesis_and_exact_failure() -> None:
     _, spec = _coding_inputs()
     context = SimpleNamespace(
@@ -232,6 +247,9 @@ def test_repair_prompt_preserves_original_hypothesis_and_exact_failure() -> None
     )
     assert "Preserve the original hypothesis" in prompt
     assert "NameError in candidate" in prompt
+    assert "authoritative observations" in prompt
+    assert "proposed fix, not a proven diagnosis" in prompt
+    assert "confirm that the proposed fix explains the supplied evidence" in prompt
     assert '"max_provider_tokens": 40' in prompt
 
     with pytest.raises(PromptContractError, match="not a trae_repair"):

@@ -9,6 +9,7 @@ import re
 from typing import Awaitable, Callable, Deque, Optional, Sequence, Tuple, TypeVar
 
 from ..config import RunConfig, VerifiedContract
+from ..coding import CodingWorkerError
 from ..coding.redaction import SecretRedactor
 from ..context.builder import ContextBuilder
 from ..memory.canonical_json import canonical_sha256
@@ -89,6 +90,14 @@ from .ports import (
 
 class OrchestrationError(RuntimeError):
     pass
+
+
+_CODE_RECOVERY_ACTIONS = frozenset(
+    {
+        RecoveryAction.TRAE_REPAIR,
+        RecoveryAction.RESTART_FROM_TRUSTED_PARENT,
+    }
+)
 
 
 class ResumablePlanningError(OrchestrationError):
@@ -683,12 +692,24 @@ class Harness:
         proposal_event_id: str,
     ):
         decision, context, decision_event = recovery
-        if decision.action != RecoveryAction.TRAE_REPAIR:
-            raise OrchestrationError("only Trae repair can create a replacement patch")
+        if decision.action not in {
+            RecoveryAction.TRAE_REPAIR,
+            RecoveryAction.RESTART_FROM_TRUSTED_PARENT,
+        }:
+            raise OrchestrationError(
+                "only Trae repair or a trusted-parent restart can create a replacement patch"
+            )
         context = context.model_copy(
             update={"recovery_instructions": decision.instructions}
         )
-        candidate = await self.coding_worker.repair_patch(context, decision)
+        if decision.action == RecoveryAction.RESTART_FROM_TRUSTED_PARENT:
+            candidate = await self.coding_worker.restart_from_trusted_parent(
+                context, decision
+            )
+            patch_stage = "trusted_parent_restart_patch_created"
+        else:
+            candidate = await self.coding_worker.repair_patch(context, decision)
+            patch_stage = "repair_patch_created"
         candidate = candidate.__class__.model_validate(
             {
                 **candidate.model_dump(mode="json"),
@@ -699,7 +720,7 @@ class Harness:
         )
         patch_event = self._append(
             PatchCreatedPayload(candidate=candidate),
-            stage="repair_patch_created",
+            stage=patch_stage,
             experiment_id=candidate.experiment_id,
             attempt=candidate.attempt,
             causation_event_id=decision_event.event_id,
@@ -935,9 +956,17 @@ class Harness:
                 # The coding adapter restored its disposable worktree while
                 # retaining immutable failure evidence. Waihong's policy permits
                 # exactly one retry of the same frozen assignment.
-                _, _, recovery_event = recovery
+                retry_decision, _, recovery_event = recovery
+                retry_context = coder_context.model_copy(
+                    update={
+                        "owner_retry_error_summary": (
+                            failure_event.payload.result.error_summary
+                        ),
+                        "owner_retry_instructions": retry_decision.instructions,
+                    }
+                )
                 try:
-                    patch = await self.coding_worker.create_patch(coder_context, spec)
+                    patch = await self.coding_worker.create_patch(retry_context, spec)
                 except Exception as retry_error:
                     retry_failure = self._record_adapter_failure(
                         experiment_id=spec.experiment_id,
@@ -982,6 +1011,7 @@ class Harness:
             return self.state()
 
         patch_check_event = None
+        patch_check_causation_event_id = patch_event.event_id
         try:
             patch_check = await self.patch_gate.check(patch)
         except Exception as error:
@@ -995,7 +1025,36 @@ class Harness:
             action, recovery = await self._recover(
                 failure_event, failure_event.payload.result, spec.experiment_id
             )
-            if action == RecoveryAction.TRAE_REPAIR:
+            if action == RecoveryAction.RETRY_SAME_COMMIT:
+                # A transient Gate-A adapter failure belongs to Gate A, not to
+                # Trae. Retry the exact immutable candidate once; do not ask
+                # the coding worker to invent a code change without a finding.
+                _, _, recovery_event = recovery
+                try:
+                    patch_check = await self.patch_gate.check(patch)
+                    patch_check_causation_event_id = recovery_event.event_id
+                except Exception as retry_error:
+                    retry_failure = self._record_adapter_failure(
+                        experiment_id=spec.experiment_id,
+                        attempt=patch.attempt,
+                        stage="patch_gate",
+                        error=retry_error,
+                        causation_event_id=recovery_event.event_id,
+                    )
+                    retry_action, retry_recovery = await self._recover(
+                        retry_failure,
+                        retry_failure.payload.result,
+                        spec.experiment_id,
+                    )
+                    if retry_action in _CODE_RECOVERY_ACTIONS:
+                        patch, patch_check, patch_check_event = (
+                            await self._execute_code_repair(
+                                retry_recovery, proposal_event.event_id
+                            )
+                        )
+                    else:
+                        return self.state()
+            elif action in _CODE_RECOVERY_ACTIONS:
                 patch, patch_check, patch_check_event = await self._execute_code_repair(
                     recovery, proposal_event.event_id
                 )
@@ -1015,14 +1074,14 @@ class Harness:
                 stage="patch_checked",
                 experiment_id=spec.experiment_id,
                 attempt=patch.attempt,
-                causation_event_id=patch_event.event_id,
+                causation_event_id=patch_check_causation_event_id,
                 resource_delta=patch_check.resource_delta,
             )
         while not patch_check.accepted:
             action, recovery = await self._recover(
                 patch_check_event, patch_check, spec.experiment_id
             )
-            if action != RecoveryAction.TRAE_REPAIR:
+            if action not in _CODE_RECOVERY_ACTIONS:
                 return self.state()
             patch, patch_check, patch_check_event = await self._execute_code_repair(
                 recovery, proposal_event.event_id
@@ -1117,8 +1176,8 @@ class Harness:
                     next_execution_cause = decision_event.event_id
                     stage_queue.appendleft(fidelity)
                     continue
-                if action == RecoveryAction.TRAE_REPAIR:
-                    while action == RecoveryAction.TRAE_REPAIR:
+                elif action in _CODE_RECOVERY_ACTIONS:
+                    while action in _CODE_RECOVERY_ACTIONS:
                         patch, patch_check, patch_check_event = (
                             await self._execute_code_repair(
                                 recovery, proposal_event.event_id
@@ -1170,8 +1229,8 @@ class Harness:
                     next_execution_cause = decision_event.event_id
                     stage_queue.appendleft(fidelity)
                     continue
-                if action == RecoveryAction.TRAE_REPAIR:
-                    while action == RecoveryAction.TRAE_REPAIR:
+                if action in _CODE_RECOVERY_ACTIONS:
+                    while action in _CODE_RECOVERY_ACTIONS:
                         patch, patch_check, patch_check_event = (
                             await self._execute_code_repair(
                                 recovery, proposal_event.event_id
@@ -1193,6 +1252,7 @@ class Harness:
                         continue
                 return self.state()
 
+            output_causation_event_id = finished.event_id
             try:
                 output = await self.output_gate.check(result)
             except Exception as error:
@@ -1208,7 +1268,40 @@ class Harness:
                     failure_event.payload.result,
                     spec.experiment_id,
                 )
-                if action == RecoveryAction.TRAE_REPAIR:
+                if action == RecoveryAction.RETRY_SAME_COMMIT:
+                    # Retry the output verifier against the same execution
+                    # result. Re-executing code would not address a transient
+                    # verifier/provider failure.
+                    _, _, recovery_event = recovery
+                    try:
+                        output = await self.output_gate.check(result)
+                        output_causation_event_id = recovery_event.event_id
+                    except Exception as retry_error:
+                        retry_failure = self._record_adapter_failure(
+                            experiment_id=spec.experiment_id,
+                            attempt=attempt,
+                            stage="output_gate",
+                            error=retry_error,
+                            causation_event_id=recovery_event.event_id,
+                        )
+                        retry_action, retry_recovery = await self._recover(
+                            retry_failure,
+                            retry_failure.payload.result,
+                            spec.experiment_id,
+                        )
+                        if retry_action in _CODE_RECOVERY_ACTIONS:
+                            patch, patch_check, patch_check_event = (
+                                await self._execute_code_repair(
+                                    retry_recovery, proposal_event.event_id
+                                )
+                            )
+                            if patch_check.accepted:
+                                next_request_template = request
+                                next_execution_cause = patch_check_event.event_id
+                                stage_queue.appendleft(fidelity)
+                                continue
+                        return self.state()
+                elif action in _CODE_RECOVERY_ACTIONS:
                     patch, patch_check, patch_check_event = (
                         await self._execute_code_repair(
                             recovery, proposal_event.event_id
@@ -1219,13 +1312,15 @@ class Harness:
                         next_execution_cause = patch_check_event.event_id
                         stage_queue.appendleft(fidelity)
                         continue
-                return self.state()
+                    return self.state()
+                elif action != RecoveryAction.RETRY_SAME_COMMIT:
+                    return self.state()
             output_event = self._append(
                 OutputCheckedPayload(result=output),
                 stage="output_checked_%s" % fidelity.value,
                 experiment_id=spec.experiment_id,
                 attempt=attempt,
-                causation_event_id=finished.event_id,
+                causation_event_id=output_causation_event_id,
                 resource_delta=output.resource_delta,
             )
             if not output.accepted:
@@ -1233,7 +1328,7 @@ class Harness:
                     output_event, output, spec.experiment_id
                 )
                 repair_accepted = False
-                while action == RecoveryAction.TRAE_REPAIR:
+                while action in _CODE_RECOVERY_ACTIONS:
                     patch, patch_check, patch_check_event = (
                         await self._execute_code_repair(
                             recovery, proposal_event.event_id
@@ -1283,6 +1378,8 @@ class Harness:
             )
             baseline = self._baseline_metrics()
             parent = self._reference_metrics(spec.parent_experiment_id, fidelity)
+            evaluation_causation_event_id = output_event.event_id
+            evaluation_request = None
             try:
                 # Protected query indices and best-reference selection are
                 # ledger-global. Serialize only this short authority boundary;
@@ -1337,26 +1434,73 @@ class Harness:
                     failure_event.payload.result,
                     spec.experiment_id,
                 )
-                decision, _, decision_event = recovery
-                if action in (
-                    RecoveryAction.RETRY_SAME_COMMIT,
-                    RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING,
-                ):
-                    self._validate_runtime_adjustments(decision.runtime_adjustments)
-                    runtime_settings.update(decision.runtime_adjustments)
+                recovery_decision, _, decision_event = recovery
+                if action == RecoveryAction.RETRY_SAME_COMMIT:
+                    # Evaluation is deterministic over the accepted prediction
+                    # artifact. Retry the evaluator itself rather than spending
+                    # compute to rerun candidate execution.
+                    if evaluation_request is None:
+                        return self.state()
+                    try:
+                        async with self._evaluation_lock:
+                            evaluation = await self.evaluator.evaluate(
+                                evaluation_request
+                            )
+                            self.config.validate_metric_set(evaluation.metric_set)
+                            evaluation_causation_event_id = decision_event.event_id
+                            evaluation_event = self._append(
+                                EvaluationCompletedPayload(result=evaluation),
+                                stage="evaluation_%s" % fidelity.value,
+                                experiment_id=spec.experiment_id,
+                                attempt=attempt,
+                                causation_event_id=evaluation_causation_event_id,
+                                resource_delta=evaluation.resource_delta,
+                            )
+                    except Exception as retry_error:
+                        retry_failure = self._record_adapter_failure(
+                            experiment_id=spec.experiment_id,
+                            attempt=attempt,
+                            stage="evaluation",
+                            error=retry_error,
+                            causation_event_id=decision_event.event_id,
+                        )
+                        retry_action, retry_recovery = await self._recover(
+                            retry_failure,
+                            retry_failure.payload.result,
+                            spec.experiment_id,
+                        )
+                        if retry_action in _CODE_RECOVERY_ACTIONS:
+                            patch, patch_check, patch_check_event = (
+                                await self._execute_code_repair(
+                                    retry_recovery, proposal_event.event_id
+                                )
+                            )
+                            if patch_check.accepted:
+                                next_request_template = request
+                                next_execution_cause = patch_check_event.event_id
+                                stage_queue.appendleft(fidelity)
+                                continue
+                        return self.state()
+                elif action == RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING:
+                    self._validate_runtime_adjustments(
+                        recovery_decision.runtime_adjustments
+                    )
+                    runtime_settings.update(recovery_decision.runtime_adjustments)
                     next_request_template = request
-                    if "timeout_profile" in decision.runtime_adjustments:
+                    if "timeout_profile" in recovery_decision.runtime_adjustments:
                         next_request_template = request.model_copy(
                             update={
                                 "timeout_seconds": self.config.timeout_profiles[
-                                    decision.runtime_adjustments["timeout_profile"]
+                                    recovery_decision.runtime_adjustments[
+                                        "timeout_profile"
+                                    ]
                                 ]
                             }
                         )
                     next_execution_cause = decision_event.event_id
                     stage_queue.appendleft(fidelity)
                     continue
-                if action == RecoveryAction.TRAE_REPAIR:
+                elif action in _CODE_RECOVERY_ACTIONS:
                     patch, patch_check, patch_check_event = (
                         await self._execute_code_repair(
                             recovery, proposal_event.event_id
@@ -1367,20 +1511,48 @@ class Harness:
                         next_execution_cause = patch_check_event.event_id
                         stage_queue.appendleft(fidelity)
                         continue
-                return self.state()
+                    return self.state()
+                else:
+                    return self.state()
             if self._stop_if_runtime_budget_exhausted():
                 return self.state()
             if evaluation.trust.verdict == TrustVerdict.NO_OP:
+                # The first verified no-op receives one bounded Trae wiring
+                # repair. If the repaired candidate remains a no-op, recovery
+                # returns the evidence to planning without creating a
+                # controller-owned prune decision.
                 action, recovery = await self._recover(
                     evaluation_event, evaluation, spec.experiment_id
                 )
                 repair_accepted = False
-                while action == RecoveryAction.TRAE_REPAIR:
-                    patch, patch_check, patch_check_event = (
-                        await self._execute_code_repair(
-                            recovery, proposal_event.event_id
+                while action in _CODE_RECOVERY_ACTIONS:
+                    try:
+                        patch, patch_check, patch_check_event = (
+                            await self._execute_code_repair(
+                                recovery, proposal_event.event_id
+                            )
                         )
-                    )
+                    except CodingWorkerError as error:
+                        # The no-op evidence remains a valid research result
+                        # even when the bounded repair worker exhausts its 20
+                        # internal steps. Preserve the worker failure, then
+                        # return ownership to planning instead of stopping the
+                        # autonomous loop.
+                        failure_event = self._record_adapter_failure(
+                            experiment_id=spec.experiment_id,
+                            attempt=attempt,
+                            stage="coding",
+                            error=error,
+                            causation_event_id=self.events()[-1].event_id,
+                        )
+                        action, recovery = await self._recover(
+                            failure_event,
+                            failure_event.payload.result,
+                            spec.experiment_id,
+                        )
+                        if action == RecoveryAction.RETURN_TO_PLANNER:
+                            return self.state()
+                        raise
                     if self._stop_if_runtime_budget_exhausted():
                         return self.state()
                     if patch_check.accepted:
@@ -1402,6 +1574,7 @@ class Harness:
                 parent_score=parent[self.config.primary_metric_name],
                 previous_best_score=best[self.config.primary_metric_name],
             )
+            experiment_decision_causation_event_id = evaluation_event.event_id
             try:
                 decision = await self.evaluator.decide(evaluation, decision_context)
             except Exception as error:
@@ -1417,26 +1590,51 @@ class Harness:
                     failure_event.payload.result,
                     spec.experiment_id,
                 )
-                decision, _, decision_event = recovery
-                if action in (
-                    RecoveryAction.RETRY_SAME_COMMIT,
-                    RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING,
-                ):
-                    self._validate_runtime_adjustments(decision.runtime_adjustments)
-                    runtime_settings.update(decision.runtime_adjustments)
+                recovery_decision, _, decision_event = recovery
+                if action == RecoveryAction.RETRY_SAME_COMMIT:
+                    # Protected evaluation is complete. Retry only the
+                    # evaluator's decision/provider call with identical input.
+                    try:
+                        decision = await self.evaluator.decide(
+                            evaluation, decision_context
+                        )
+                        experiment_decision_causation_event_id = (
+                            decision_event.event_id
+                        )
+                    except Exception as retry_error:
+                        retry_failure = self._record_adapter_failure(
+                            experiment_id=spec.experiment_id,
+                            attempt=attempt,
+                            stage="evaluation",
+                            error=retry_error,
+                            causation_event_id=decision_event.event_id,
+                        )
+                        await self._recover(
+                            retry_failure,
+                            retry_failure.payload.result,
+                            spec.experiment_id,
+                        )
+                        return self.state()
+                elif action == RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING:
+                    self._validate_runtime_adjustments(
+                        recovery_decision.runtime_adjustments
+                    )
+                    runtime_settings.update(recovery_decision.runtime_adjustments)
                     next_request_template = request
-                    if "timeout_profile" in decision.runtime_adjustments:
+                    if "timeout_profile" in recovery_decision.runtime_adjustments:
                         next_request_template = request.model_copy(
                             update={
                                 "timeout_seconds": self.config.timeout_profiles[
-                                    decision.runtime_adjustments["timeout_profile"]
+                                    recovery_decision.runtime_adjustments[
+                                        "timeout_profile"
+                                    ]
                                 ]
                             }
                         )
                     next_execution_cause = decision_event.event_id
                     stage_queue.appendleft(fidelity)
                     continue
-                if action == RecoveryAction.TRAE_REPAIR:
+                elif action in _CODE_RECOVERY_ACTIONS:
                     patch, patch_check, patch_check_event = (
                         await self._execute_code_repair(
                             recovery, proposal_event.event_id
@@ -1447,7 +1645,9 @@ class Harness:
                         next_execution_cause = patch_check_event.event_id
                         stage_queue.appendleft(fidelity)
                         continue
-                return self.state()
+                    return self.state()
+                elif action != RecoveryAction.RETRY_SAME_COMMIT:
+                    return self.state()
             decision = decision.__class__.model_validate(
                 {
                     **decision.model_dump(mode="json"),
@@ -1459,7 +1659,7 @@ class Harness:
                 stage="decision_%s" % fidelity.value,
                 experiment_id=spec.experiment_id,
                 attempt=attempt,
-                causation_event_id=evaluation_event.event_id,
+                causation_event_id=experiment_decision_causation_event_id,
                 resource_delta=decision.resource_delta,
             )
             if decision.lesson_candidate is not None:

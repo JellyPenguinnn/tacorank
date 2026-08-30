@@ -128,7 +128,9 @@ def _timestamp(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def _phase_after_event(event: Event, previous: str) -> str:
+def _phase_after_event(
+    event: Event, previous: str, events_by_id: Mapping[str, Event]
+) -> str:
     """Return the controller phase after one durable event."""
 
     payload = event.payload
@@ -163,12 +165,31 @@ def _phase_after_event(event: Event, previous: str) -> str:
         if payload.decision.action in (
             RecoveryAction.ABANDON,
             RecoveryAction.ROLLBACK,
+            RecoveryAction.RETURN_TO_PLANNER,
         ):
             return "planning"
-        if payload.decision.action in (
-            RecoveryAction.RETRY_SAME_COMMIT,
-            RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING,
-        ):
+        if payload.decision.action == RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING:
+            return "execution"
+        if payload.decision.action == RecoveryAction.RETRY_SAME_COMMIT:
+            failure = events_by_id.get(payload.decision.failure_event_id)
+            result = getattr(getattr(failure, "payload", None), "result", None)
+            failure_stage = getattr(result, "failure_stage", None)
+            if failure_stage == "coding":
+                return "coding"
+            if failure_stage == "patch_gate":
+                return "patch_gate"
+            if failure_stage == "output_gate":
+                return "output_gate"
+            if failure_stage == "evaluation":
+                cause = events_by_id.get(
+                    getattr(failure, "causation_event_id", None)
+                )
+                return (
+                    "decision"
+                    if cause is not None
+                    and cause.payload.type == "evaluation.completed"
+                    else "evaluation"
+                )
             return "execution"
         return "recovery"
     if event_type == "output.checked":
@@ -234,8 +255,9 @@ def runtime_status(events: Sequence[Event]) -> dict:
     state = project(events)
     phase = "not_started"
     stage_started_at = None
+    events_by_id = {event.event_id: event for event in events}
     for event in events:
-        next_phase = _phase_after_event(event, phase)
+        next_phase = _phase_after_event(event, phase, events_by_id)
         if next_phase != phase:
             stage_started_at = event.timestamp
         phase = next_phase
@@ -378,6 +400,7 @@ def _state_payload(events: Sequence[Event]) -> dict:
         ExperimentStatus.REJECTED,
         ExperimentStatus.PRUNED,
         ExperimentStatus.INVALID,
+        ExperimentStatus.NO_OP,
     }
     if state.status.value == "running":
         stage_by_status = {

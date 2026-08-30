@@ -95,12 +95,12 @@ Apply these rules from top to bottom. The first matching rule wins.
 | Priority | Evidence condition | Required response | Research branch? |
 | --- | --- | --- | --- |
 | 0 | `output.checked.accepted = false` | Fix or abandon the output/contract failure through recovery. | No |
-| 1 | Trust integrity is `compromised`, or verdict is `suspicious` because of concrete evaluator, alignment, contract, forbidden-input, or output evidence | Quarantine the result so it cannot become reward, parent, refinement, or ensemble evidence. Stop for compromised integrity; otherwise continue from a verified eligible parent with an independent legal method. A proxy/full direction change alone is advisory, not an integrity failure. | From another verified parent only |
-| 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Verify that the patch affected logits, gradients, and intended rows. | No |
+| 1 | Trust integrity is `compromised`, or verdict is `suspicious` because of concrete evaluator, alignment, contract, forbidden-input, or output evidence | Quarantine the result; investigate data, evaluator, or leakage. A proxy/full direction change alone is advisory, not an integrity failure. | No |
+| 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Verify that the patch affected logits, gradients, and intended rows. Give Trae one scoped 20-step wiring-repair action and rerun the same fidelity after Gate A. If predictions remain identical, record a neutral terminal `no_op` and return the evidence to the legal-choice ranker; do not emit a controller prune decision. The ranker selects either one modified same-mechanism plan from the trusted parent or an independent mechanism. | Trusted parent only |
 | 3 | Stability is `unstable` | Confirm seeds or simplify/regularize the same mechanism. | No new family |
 | 4 | Fidelity is `smoke` or `proxy` | Promote a clear proxy improvement, or one clean result within the symmetric proxy noise band, to one bounded full-fidelity check. Prune only a regression beyond that band. | No parent promotion |
 | 5 | Full public result is trusted and improves the parent by more than `epsilon` | Accept; confirm once if stability is only `single_seed`, then deepen the same family. | Yes |
-| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, and remains within `eta` of the current validation best | Retain it as an exploratory research parent, keep `best_eligible = false`, and continue DFS from that node with a legal independent mechanism. | Yes, exploratory |
+| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, and remains within `eta` of the current validation best | Retain it as an exploratory research parent with `best_eligible = false`. Continue from the highest-scoring eligible research node, try one legal same-family refinement, then switch to an independent mechanism only after that refinement is exhausted. | Yes, exploratory |
 | 7 | Full public result is trusted and worse than `-epsilon` | Treat the tested mechanism as falsified under its stated conditions; do not tune it indefinitely. | Yes |
 
 Only a full, verified, clean, seed-confirmed public-validation result may create
@@ -124,9 +124,14 @@ and use an independent legal method. Compromised integrity remains fail-closed.
 Canonical `parent_eligible` and `best_eligible` remain unchanged. Person 1 may
 derive two narrower, non-checkpoint permissions from verified evidence:
 
-- **hard prune:** rejected output, suspicious/compromised integrity, no-op,
-  unstable result, invalid/retracted lineage, or primary regression worse than
-  `max(5 * epsilon, 0.01)`. Never branch, refine, or ensemble this result;
+- **hard prune:** rejected output, suspicious/compromised integrity, unstable
+  result, invalid/retracted lineage, or primary regression worse than
+  `max(5 * epsilon, 0.01)`. Never branch, refine, or ensemble the result node.
+  A no-op is first checked by one bounded Trae wiring repair. If it remains a
+  no-op, the controller records neutral evidence without pruning; the tree
+  planner may select one reimplementation of the same mechanism from its last
+  trusted parent or an independent mechanism. A second no-op retires the
+  same-mechanism option;
 - **soft prune:** clean accepted output at proxy/full fidelity, meaningful
   prediction change, and either primary delta above that regression floor or a
   component-metric trade-off. Retain the node as evidence, not as a checkpoint;
@@ -150,8 +155,8 @@ the parent, using the contract's seed/noise tolerance.
 | positive | positive | Broad pair ordering and top-5 placement both improved. | Confirm, then refine the same family before switching. |
 | positive | negative | Broad within-user separation improved but top ranks worsened. | Try top-weighted/listwise or hybrid ranking loss; inspect top-5 errors. |
 | negative | positive | Top-5 placement improved while general positive-negative ordering degraded. | Blend listwise/top-k emphasis with pairwise loss; avoid a pure top-k overfit. |
-| near zero | near zero, predictions changed | Mechanism has little signal at current fidelity. | Move to the next independent family. |
-| any | any, predictions barely changed | Implementation/no-op, not research evidence. | Diagnose score path, feature coverage, and gradients. |
+| near zero | near zero, predictions changed | Mechanism has little signal at current fidelity. | Return to the highest-scoring eligible research path and try one same-family refinement before moving to an independent family. |
+| any | any, predictions barely changed | Terminal null result; it does not establish that the implementation is broken. | Let the tree planner rank one bounded same-mechanism reimplementation against independent mechanisms. |
 | inconsistent across seeds | inconsistent across seeds | Variance dominates estimated gain. | Confirm or simplify; do not promote. |
 
 Metric-specific interpretation is diagnostic, not proof. GAUC excludes users

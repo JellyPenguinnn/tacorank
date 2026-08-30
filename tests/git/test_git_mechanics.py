@@ -223,6 +223,42 @@ def test_discard_uncommitted_changes_refuses_an_advanced_branch(
     assert candidate.read_text(encoding="utf-8") == "VALUE = 2\n"
 
 
+def test_integrity_restart_restores_exact_trusted_parent(
+    repository: tuple[Path, str], tmp_path: Path
+) -> None:
+    root, base = repository
+    manager = WorktreeManager(root, tmp_path / "worktrees")
+    record = manager.create("integrity", "exp1", base)
+    candidate = record.path / "solution" / "model.py"
+    candidate.write_text("VALUE = 2\n", encoding="utf-8")
+    sealed = commit_staged_patch(
+        record.path,
+        stage_and_capture(record.path, base),
+        message="integrity-rejected candidate",
+    )
+    rejected = record.__class__(
+        repository=record.repository,
+        path=record.path,
+        branch=record.branch,
+        run_id=record.run_id,
+        experiment_id=record.experiment_id,
+        commit_sha=sealed.patch_commit_sha,
+    )
+
+    with manager.acquire_lease(rejected, timeout_seconds=1):
+        restored = manager.restore_trusted_parent(
+            rejected,
+            rejected_commit_sha=sealed.patch_commit_sha,
+            trusted_parent_commit_sha=base,
+        )
+
+    assert _git(restored.path, "rev-parse", "HEAD") == base
+    assert candidate.read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert manager.verify(
+        restored, expected_commit_sha=base, require_clean=True
+    ) == base
+
+
 def test_worktree_lease_is_exclusive_bounded_and_stale_safe(
     repository: tuple[Path, str], tmp_path: Path
 ) -> None:

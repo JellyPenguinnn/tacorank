@@ -4,8 +4,10 @@ import asyncio
 
 import pytest
 
+from tacorank.coding import CodingWorkerError
 from tacorank.orchestrator.convergence import StopDecision
 from tacorank.orchestrator.fakes import (
+    FakeCodingWorker,
     FakeEvaluator,
     FakeExecutionRunner,
     FakeResearchPlanner,
@@ -29,7 +31,13 @@ from tacorank.schemas import (
     PlannerOutput,
     PatchCheckResult,
     ResearchProposal,
+    Stability,
+    PlannerAction,
+    PlannerOutput,
+    PatchCheckResult,
+    RecoveryAction,
     SubmissionCheckedPayload,
+    TrustVerdict,
     Violation,
 )
 
@@ -122,6 +130,36 @@ class ConcurrentCodingWorker:
 
     async def repair_patch(self, context, decision):
         return await self.delegate.repair_patch(context, decision)
+
+
+class SameMechanismReimplementationPlanner:
+    """Model the tree planner selecting its one bounded reimplementation."""
+
+    def __init__(self, parent_commit_sha: str) -> None:
+        self.parent_commit_sha = parent_commit_sha
+
+    async def propose(self, context):
+        output = await FakeResearchPlanner(
+            self.parent_commit_sha,
+            experiment_id="exp_002",
+        ).propose(context)
+        return output.model_copy(
+            update={
+                "spec": output.spec.model_copy(
+                    update={
+                        "duplicate_key": "feature_cross:user_item:v1",
+                        "hypothesis": (
+                            "A corrected implementation of the approved cross "
+                            "should alter within-user ordering."
+                        ),
+                        "change_summary": (
+                            "Reimplement the same approved mechanism from its "
+                            "trusted parent."
+                        ),
+                    }
+                )
+            }
+        )
 
 
 class NonImprovingEvaluator(FakeEvaluator):
@@ -245,6 +283,63 @@ def test_parallel_round_synthesizes_all_independent_improvements(
         "exp_002",
         "exp_003",
     ]
+
+
+class NoOpEvaluator(FakeEvaluator):
+    """Return a structurally valid evaluation with unchanged predictions."""
+
+    async def evaluate(self, request):
+        result = await super().evaluate(request)
+        return result.__class__.model_validate(
+            {
+                **result.model_dump(mode="json"),
+                "prediction_change": {
+                    "spearman_vs_parent": 1.0,
+                    "changed_row_fraction": 0.0,
+                },
+                "seed_evidence_event_ids": [],
+                "trust": {
+                    **result.trust.model_dump(mode="json"),
+                    "verdict": TrustVerdict.NO_OP,
+                    "stability": Stability.NOT_APPLICABLE,
+                    "flags": ["NO_PREDICTION_CHANGE"],
+                    "seed_mean": None,
+                    "seed_stderr": None,
+                    "seed_count": 1,
+                },
+            }
+        )
+
+
+class NoOpRepairingCodingWorker(FakeCodingWorker):
+    def __init__(self, artifacts):
+        super().__init__(artifacts)
+        self.initial_patch = None
+        self.repair_calls = []
+
+    async def create_patch(self, context, spec):
+        self.initial_patch = await super().create_patch(context, spec)
+        return self.initial_patch
+
+    async def repair_patch(self, context, decision):
+        self.repair_calls.append((context, decision))
+        values = self.initial_patch.model_dump(mode="json")
+        values.update(
+            {
+                "context_id": context.context_id,
+                "base_commit_sha": self.initial_patch.patch_commit_sha,
+                "patch_commit_sha": "c" * 40,
+            }
+        )
+        return self.initial_patch.__class__.model_validate(values)
+
+
+class ExhaustedNoOpRepairingCodingWorker(FakeCodingWorker):
+    async def repair_patch(self, context, decision):
+        raise CodingWorkerError(
+            "TRAE_STEP_LIMIT_EXCEEDED",
+            "Trae exhausted the bounded 20-step no-op repair task",
+        )
 
 
 class BlockedPlanner:
@@ -377,6 +472,96 @@ def test_outer_loop_uses_memory_and_counts_distinct_terminal_iterations(
     assert state.consecutive_non_improving_full_evaluations == 3
     assert [len(context.family_history) for context in planner.contexts] == [0, 1, 2]
     assert harness.events()[-1].event_type == EventType.RUN_STOPPED
+
+
+def test_no_op_repairs_once_then_returns_evidence_to_planner(
+    harness, baseline_evaluation
+):
+    planner = SequentialPlanner(harness.config.baseline_commit_sha)
+    harness.planner = planner
+    worker = NoOpRepairingCodingWorker(harness.event_store.artifact_store)
+    harness.coding_worker = worker
+    harness.evaluator = NoOpEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert state.phase == "planning"
+    assert state.experiments["exp_001"].status == ExperimentStatus.NO_OP
+    assert len(worker.repair_calls) == 1
+    recovery_decisions = [
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    ]
+    assert [decision.action for decision in recovery_decisions] == [
+        RecoveryAction.TRAE_REPAIR,
+        RecoveryAction.RETURN_TO_PLANNER,
+    ]
+    assert not any(
+        event.event_type == EventType.EXPERIMENT_DECIDED
+        and event.payload.decision.decision.value == "prune"
+        for event in harness.events()
+    )
+    planner_context = harness.context_builder.build_planner(harness.events())
+    summary = planner_context.family_history[0]
+    assert summary.trust_verdict == TrustVerdict.NO_OP
+    assert summary.decision is None
+    assert summary.status == ExperimentStatus.NO_OP.value
+
+    # Recovery did not decide the branch outcome: a planner-selected modified
+    # plan with the same semantic key is admitted exactly once after the
+    # return-to-planner evidence.
+    harness.planner = SameMechanismReimplementationPlanner(
+        harness.config.baseline_commit_sha
+    )
+    second_state = asyncio.run(harness.run_one_experiment())
+    assert second_state.experiments["exp_002"].status == ExperimentStatus.NO_OP
+    assert len(worker.repair_calls) == 2
+
+
+def test_exhausted_no_op_repair_returns_to_planner_without_stopping_run(
+    harness, baseline_evaluation
+):
+    harness.planner = SequentialPlanner(harness.config.baseline_commit_sha)
+    harness.coding_worker = ExhaustedNoOpRepairingCodingWorker(
+        harness.event_store.artifact_store
+    )
+    harness.evaluator = NoOpEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert state.status.value == "running"
+    assert state.phase == "planning"
+    assert state.experiments["exp_001"].status == ExperimentStatus.NO_OP
+    assert not any(
+        event.event_type == EventType.RUN_STOPPED for event in harness.events()
+    )
+    decisions = [
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    ]
+    assert [decision.action for decision in decisions] == [
+        RecoveryAction.TRAE_REPAIR,
+        RecoveryAction.RETURN_TO_PLANNER,
+    ]
+    assert decisions[-1].reason_code == "NO_OP_REPAIR_WORKER_EXHAUSTED"
+    planner_context = harness.context_builder.build_planner(harness.events())
+    assert planner_context.family_history[-1].trust_flags == [
+        "NO_PREDICTION_CHANGE"
+    ]
 
 
 def test_blocked_planner_stops_without_spinning(harness, baseline_evaluation):

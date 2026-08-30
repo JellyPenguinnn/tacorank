@@ -5,6 +5,8 @@ from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.research.plan_validation import PlanValidator
 from tacorank.schemas import CostTier
 
+from .conftest import make_summary
+
 
 def make_spec(planner_context, **overrides):
     values = dict(
@@ -306,6 +308,45 @@ def test_validator_rejects_duplicate_experiment(planner_context):
 
     assert not result.accepted
     assert "DUPLICATE_EXPERIMENT" in result.errors
+
+
+def test_validator_allows_one_policy_selected_no_op_reimplementation(
+    planner_context,
+):
+    from tacorank.research.search_policy import SearchPolicy
+
+    prior = make_spec(planner_context, experiment_id="exp_0001")
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="no_op",
+        stability="not_applicable",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+        status="no_op",
+    )
+    latest.duplicate_key = prior.duplicate_key
+    planner_context.family_history = [latest]
+    choice = SearchPolicy(
+        legal_choice_ranker=lambda choices, context: next(
+            item
+            for item in choices
+            if item.reason_code == "NO_OP_REIMPLEMENT_MECHANISM"
+        )
+    ).choose(planner_context)
+    proposal = make_spec(
+        planner_context,
+        experiment_id="exp_0002",
+        hypothesis="A corrected pairwise formulation should alter within-user ordering.",
+        change_summary="Reimplement the bounded pairwise mechanism from its trusted parent.",
+    )
+
+    result = PlanValidator().validate(proposal, planner_context, choice=choice)
+
+    assert choice.phase == "no_op_reimplementation"
+    assert result.accepted, result.errors
 
 
 def test_validator_enforces_memory_schema_identifiers(planner_context):

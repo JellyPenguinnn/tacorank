@@ -112,3 +112,22 @@ def test_safety_evidence_overrides_inconsistent_positive_flags(planner_context):
     assert not eligibility.branch_eligible
     assert not eligibility.best_checkpoint_eligible
     assert "INTEGRITY_UNTRUSTED" in eligibility.reasons
+
+
+def test_no_op_is_neutral_evidence_not_a_controller_prune(planner_context):
+    result = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        parent_eligible=False,
+        best_eligible=False,
+        trust_verdict="no_op",
+        stability="not_applicable",
+        prediction_change=0.0,
+        status="no_op",
+    )
+
+    eligibility = classify_search_eligibility(result, planner_context)
+
+    assert eligibility.disposition == PruneDisposition.NULL
+    assert not eligibility.branch_eligible
+    assert not eligibility.best_checkpoint_eligible

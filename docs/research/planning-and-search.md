@@ -61,6 +61,11 @@ The core policy is deterministic, score-guided AIDE-style depth-first search:
   deeper lineage, and stable newest-ID tie-breaking;
 - continue from the best-ranked branch while it has a legal untried method,
   and backtrack to the next trusted branch only when that branch is exhausted;
+- when the latest clean result changes predictions but has no trusted gain,
+  select the highest-scoring non-baseline eligible node rather than blindly
+  extending the newest node; prefer an untried method in that node's family,
+  permit one materially different same-card child when the family exposes only
+  one method, and switch families only after that parent/family route is used;
 - do not require every research family to be probed from the baseline before
   deepening a better branch; family order remains a deterministic tie-break for
   legal methods on the selected parent;
@@ -74,10 +79,20 @@ The core policy is deterministic, score-guided AIDE-style depth-first search:
   and never becomes validation-best eligible through that permission;
 - a clean soft result whose prediction Spearman magnitude is below `0.98` may
   enter one fixed residual-ensemble test from the trusted parent;
-- severe regressions, rejected outputs, suspicious/compromised results, no-ops,
-  unstable results, and invalid/retracted nodes are hard-pruned;
-- hard-pruning a suspicious non-compromised node does not stop search while an
-  independent method remains legal from a verified eligible frontier node;
+- severe regressions, rejected outputs, suspicious/compromised results,
+  unstable results, and invalid/retracted nodes are hard-pruned as parents and
+  checkpoints;
+- a suspicious non-compromised node is quarantined and does not stop search
+  while an independent method remains legal from a verified eligible frontier
+  node;
+- after Person 4's single bounded Trae wiring-repair action still produces a
+  no-op, recovery returns a neutral `no_op` node and its unchanged-prediction
+  evidence to the planner without emitting a prune decision;
+- the legal-choice ranker then receives both one bounded same-mechanism
+  reimplementation from the last trusted parent and the available independent
+  mechanisms; choosing an independent mechanism retires that branch, while a
+  second no-op for the same parent/family/method retires the reimplementation
+  option;
 - a stateless LinUCB ranker is reconstructed from verified ledger history and
   reorders only the legal choices emitted by these deterministic gates. It
   cannot invent a family, method, parent, refinement, or ensemble component.
@@ -89,9 +104,11 @@ Person 1 does not resurrect candidates from generic history. Canonical
 checkpoint selection.
 
 Semantic duplicate identity is `parent + family + method cards + ensemble
-components`. Rephrasing the same method does not authorize another trial from
-the same parent. A genuine refinement receives a new parent commit and therefore
-a distinct identity.
+components`. Rephrasing the same method does not normally authorize another
+trial from the same parent. The only exception is the policy-selected, single
+reimplementation after a verified no-op; the planner cannot repeat it after a
+second no-op. A genuine refinement receives a new parent commit and therefore a
+distinct identity.
 
 ## Interfaces owned by Person 1
 

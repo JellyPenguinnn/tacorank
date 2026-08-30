@@ -158,6 +158,11 @@ class FakeCodingWorker:
     ) -> PatchCandidate:
         raise AssertionError("the successful fake lifecycle does not invoke repair")
 
+    async def restart_from_trusted_parent(
+        self, context: RecoveryContext, decision: RecoveryDecision
+    ) -> PatchCandidate:
+        raise AssertionError("the successful fake lifecycle does not invoke recovery restart")
+
 
 class FakePatchGate:
     def __init__(self, artifacts: ArtifactStore):

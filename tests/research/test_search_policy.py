@@ -346,7 +346,6 @@ def test_playbook_cannot_reintroduce_contract_disallowed_family(planner_context)
             {"trust_verdict": "suspicious", "integrity": "compromised"},
             "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
         ),
-        ({"prediction_change": 0.0001}, "NO_OP_REQUIRES_RECOVERY"),
         ({"output_accepted": None}, "RESULT_NOT_BRANCHABLE"),
         ({"integrity": None}, "RESULT_NOT_BRANCHABLE"),
         ({"stability": None}, "RESULT_NOT_BRANCHABLE"),
@@ -400,6 +399,27 @@ def test_playbook_quarantines_suspicious_result_and_continues_independently(
     assert choice.method_card_id == "temporal_history_compact"
 
 
+def test_playbook_continues_after_no_op_with_independent_choice(planner_context):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="no_op",
+        stability="not_applicable",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+        status="no_op",
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
+    assert choice.family == "temporal_history"
+    assert choice.method_card_id == "temporal_history_compact"
+
+
 def test_playbook_stops_after_quarantine_only_when_no_independent_method_remains(
     planner_context,
 ):
@@ -423,6 +443,86 @@ def test_playbook_stops_after_quarantine_only_when_no_independent_method_remains
     assert choice.action == "blocked"
     assert choice.reason_code == "NO_ELIGIBLE_METHOD"
 
+
+def test_no_op_tree_ranker_can_choose_one_same_mechanism_reimplementation(
+    planner_context,
+):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="no_op",
+        stability="not_applicable",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+        status="no_op",
+    )
+    seen = []
+
+    def choose_reimplementation(choices, context):
+        seen.extend(choices)
+        return next(
+            choice
+            for choice in choices
+            if choice.reason_code == "NO_OP_REIMPLEMENT_MECHANISM"
+        )
+
+    choice = SearchPolicy(
+        legal_choice_ranker=choose_reimplementation
+    ).choose(context_with_latest(planner_context, latest))
+
+    assert {
+        candidate.reason_code for candidate in seen
+    } >= {
+        "NO_OP_REIMPLEMENT_MECHANISM",
+        "NO_OP_INDEPENDENT_MECHANISM",
+    }
+    assert choice.phase == "no_op_reimplementation"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.family == "objective"
+    assert choice.method_card_id == "objective_pairwise_bpr"
+
+
+def test_second_same_mechanism_no_op_retires_reimplementation(planner_context):
+    first = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="no_op",
+        stability="not_applicable",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+        status="no_op",
+    )
+    latest = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="no_op",
+        stability="not_applicable",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+        status="no_op",
+    )
+    context = context_with_latest(planner_context, latest)
+    context.family_history = [first, latest]
+    seen = []
+
+    def capture(choices, context):
+        seen.extend(choices)
+        return choices[0]
+
+    choice = SearchPolicy(legal_choice_ranker=capture).choose(context)
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
+    assert not any(
+        candidate.reason_code == "NO_OP_REIMPLEMENT_MECHANISM"
+        for candidate in seen
+    )
 
 def test_playbook_branches_after_terminal_proxy_prune(planner_context):
     latest = make_summary(
@@ -663,7 +763,7 @@ def test_playbook_handles_remaining_pairwise_metric_shapes(
     assert choice.method_card_id == expected
 
 
-def test_playbook_moves_meaningful_pairwise_no_gain_to_history(planner_context):
+def test_playbook_refines_meaningful_pairwise_no_gain_in_family(planner_context):
     latest = make_summary(
         "exp_0001",
         parent_experiment_id="exp_0000",
@@ -677,9 +777,9 @@ def test_playbook_moves_meaningful_pairwise_no_gain_to_history(planner_context):
 
     choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
 
-    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
-    assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
+    assert choice.family == "objective"
+    assert choice.method_card_id == "objective_listwise_user_softmax"
 
 
 def test_directionally_positive_parent_prevents_premature_search_stop(
@@ -699,9 +799,10 @@ def test_directionally_positive_parent_prevents_premature_search_stop(
     choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
 
     assert choice.action == "propose"
-    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
+    assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.parent.experiment_id == "exp_0006"
-    assert choice.family != "objective"
+    assert choice.family == "objective"
+    assert choice.method_card_id == "objective_pairwise_bpr"
 
 
 def test_near_best_exploratory_parent_continues_depth_first(planner_context):
@@ -732,9 +833,118 @@ def test_near_best_exploratory_parent_continues_depth_first(planner_context):
     choice = SearchPolicy().choose(context)
 
     assert choice.action == "propose"
-    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
+    assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.parent.experiment_id == "exp_0003"
-    assert choice.family != "duration_bias"
+    assert choice.family == "duration_bias"
+    assert choice.method_card_id == "duration_bias_censored_watch_time"
+
+
+def test_meaningful_no_gain_backtracks_to_highest_scoring_experimental_path(
+    planner_context,
+):
+    root = make_summary("baseline", score=0.601468756352959)
+    stronger = make_summary(
+        "exp_002",
+        parent_experiment_id="baseline",
+        family="temporal_history",
+        score=0.6013885105993917,
+        decision="accept",
+        parent_eligible=True,
+        trust_verdict="inconclusive",
+        stability="confirmed",
+        parent_delta=-0.00008024575356735397,
+        prediction_change=0.033800606841780816,
+        method_card_ids=["temporal_history_compact"],
+        child_count=1,
+    )
+    latest_weaker = make_summary(
+        "exp_003",
+        parent_experiment_id="exp_002",
+        family="duration_bias",
+        score=0.6012304244722566,
+        decision="accept",
+        parent_eligible=True,
+        trust_verdict="inconclusive",
+        stability="confirmed",
+        parent_delta=-0.00015808612713508197,
+        prediction_change=0.9831317198920815,
+        method_card_ids=["duration_bias_censored_watch_time"],
+    )
+    context = SimpleNamespace(
+        contract_summary=SimpleNamespace(**vars(planner_context.contract_summary)),
+        baseline=root,
+        current_best=root,
+        eligible_frontier=[root, stronger, latest_weaker],
+        family_history=[stronger, latest_weaker],
+        method_cards=planner_context.method_cards,
+        playbook=planner_context.playbook,
+    )
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
+    assert choice.parent.experiment_id == "exp_002"
+    assert choice.family == "temporal_history"
+    assert choice.method_card_id == "temporal_history_compact"
+
+
+def test_meaningful_no_gain_switches_family_after_best_path_refinement(
+    planner_context,
+):
+    root = make_summary("baseline", score=0.601468756352959)
+    strongest = make_summary(
+        "exp_002",
+        parent_experiment_id="baseline",
+        family="temporal_history",
+        score=0.6013885105993917,
+        parent_eligible=True,
+        trust_verdict="inconclusive",
+        parent_delta=-0.00008024575356735397,
+        prediction_change=0.03,
+        method_card_ids=["temporal_history_compact"],
+        child_count=1,
+    )
+    refinement = make_summary(
+        "exp_003",
+        parent_experiment_id="exp_002",
+        family="temporal_history",
+        score=0.60130,
+        parent_eligible=False,
+        decision="reject",
+        trust_verdict="negative",
+        parent_delta=-0.0000885105993917,
+        prediction_change=0.02,
+        method_card_ids=["temporal_history_compact"],
+        status="rejected",
+    )
+    latest = make_summary(
+        "exp_004",
+        parent_experiment_id="exp_002",
+        family="duration_bias",
+        score=0.60135,
+        parent_eligible=True,
+        trust_verdict="inconclusive",
+        parent_delta=-0.0000385105993917,
+        prediction_change=0.8,
+        method_card_ids=["duration_bias_censored_watch_time"],
+    )
+    context = SimpleNamespace(
+        contract_summary=SimpleNamespace(**vars(planner_context.contract_summary)),
+        baseline=root,
+        current_best=root,
+        eligible_frontier=[root, strongest, latest],
+        family_history=[strongest, refinement, latest],
+        method_cards=planner_context.method_cards,
+        playbook=planner_context.playbook,
+    )
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
+    assert choice.parent.experiment_id == "exp_002"
+    assert choice.family != "temporal_history"
 
 
 def test_playbook_deepens_trusted_improvement(planner_context):

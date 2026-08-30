@@ -195,7 +195,24 @@ def _method_for_family(
         # soft-portfolio route. Generic depth-first proposals have no such
         # component contract and must not select it.
         eligible.pop("ensemble_diverse_residual_candidate", None)
-    attempted = set() if allow_repeated else {
+    attempted = (
+        set()
+        if allow_repeated
+        else _attempted_methods_for_parent(context, parent_experiment_id)
+    )
+    if preferred is not None:
+        return None if preferred in attempted else eligible.get(preferred)
+    for method_id in _method_order(context, family):
+        if method_id in eligible and method_id not in attempted:
+            return eligible[method_id]
+    remaining = sorted(set(eligible) - attempted)
+    return eligible[remaining[0]] if remaining else None
+
+
+def _attempted_methods_for_parent(
+    context: Any, parent_experiment_id: str | None
+) -> set[str]:
+    return {
         method_id
         for summary in as_list(get_value(context, "family_history", None))
         if parent_experiment_id is not None
@@ -205,13 +222,6 @@ def _method_for_family(
             str, as_list(get_value(summary, "method_card_ids", None))
         )
     }
-    if preferred is not None:
-        return None if preferred in attempted else eligible.get(preferred)
-    for method_id in _method_order(context, family):
-        if method_id in eligible and method_id not in attempted:
-            return eligible[method_id]
-    remaining = sorted(set(eligible) - attempted)
-    return eligible[remaining[0]] if remaining else None
 
 
 def _ordered_eligible_method_cards(context: Any, family: str) -> tuple[Any, ...]:
@@ -278,6 +288,78 @@ def _best_parent(eligible: Sequence[ExperimentNodeView]) -> ExperimentNodeView:
     )[0]
 
 
+def _best_experimental_parent(
+    eligible: Sequence[ExperimentNodeView],
+) -> ExperimentNodeView:
+    """Choose the strongest measured research node before baseline fallback."""
+
+    experimental = [
+        node
+        for node in eligible
+        if not node.is_root and node.primary_score is not None
+    ]
+    return _best_parent(experimental or eligible)
+
+
+def _same_family_refinement_choice(
+    context: Any,
+    parent: ExperimentNodeView,
+    allowed: tuple[str, ...],
+) -> PolicyChoice | None:
+    """Try one legal refinement of the strongest experimental mechanism."""
+
+    family = str(parent.family or "")
+    if not family or family not in allowed:
+        return None
+    eligible = {
+        str(get_value(card, "method_id", "")): card
+        for card in eligible_method_cards(context, family)
+    }
+    if family == "ensemble":
+        eligible.pop("ensemble_diverse_residual_candidate", None)
+    attempted = _attempted_methods_for_parent(context, parent.experiment_id)
+    parent_methods = set(parent.method_card_ids)
+    ordered = list(_method_order(context, family))
+    ordered.extend(sorted(set(eligible) - set(ordered)))
+
+    # Prefer a distinct method within the same mechanism family. If the family
+    # exposes only one method card, permit one materially different child from
+    # that parent; duplicate-plan validation still rejects an identical plan.
+    method_id = next(
+        (
+            item
+            for item in ordered
+            if item in eligible
+            and item not in attempted
+            and item not in parent_methods
+        ),
+        None,
+    )
+    if method_id is None:
+        method_id = next(
+            (
+                item
+                for item in ordered
+                if item in eligible and item not in attempted
+            ),
+            None,
+        )
+    if method_id is None:
+        return None
+    return _proposal(
+        parent=parent,
+        family=family,
+        card=eligible[method_id],
+        phase="playbook",
+        reason_code="SCORE_GUIDED_SAME_FAMILY_REFINEMENT",
+        reason=(
+            "Predictions changed without a trusted gain; refine the strongest "
+            "eligible experimental path %s within family %s before introducing "
+            "an unrelated mechanism." % (parent.experiment_id, family)
+        ),
+    )
+
+
 def _depth_first_frontier(
     graph: GraphView,
     eligible: Sequence[ExperimentNodeView],
@@ -323,14 +405,39 @@ def _next_independent_choice(
     reason: str,
     preferred_parent: ExperimentNodeView | None = None,
 ) -> PolicyChoice | None:
+    choices = _independent_choices(
+        context,
+        eligible,
+        allowed,
+        latest_family,
+        reason_code=reason_code,
+        reason=reason,
+        preferred_parent=preferred_parent,
+    )
+    return choices[0] if choices else None
+
+
+def _independent_choices(
+    context: Any,
+    eligible: Sequence[ExperimentNodeView],
+    allowed: tuple[str, ...],
+    latest_family: str,
+    *,
+    reason_code: str,
+    reason: str,
+    preferred_parent: ExperimentNodeView | None = None,
+) -> tuple[PolicyChoice, ...]:
+    """Return every legal independent-family action in deterministic order."""
+
     tried = set(_family_history(context))
-    parent = preferred_parent or _best_parent(eligible)
+    parent = preferred_parent or _best_experimental_parent(eligible)
     ordered = [
         family
         for family in _family_order(context)
         if family in allowed and family != latest_family
     ]
     ordered.sort(key=lambda family: (family in tried, _family_order(context).index(family)))
+    choices = []
     for family in ordered:
         card = _method_for_family(
             context,
@@ -338,15 +445,124 @@ def _next_independent_choice(
             parent_experiment_id=parent.experiment_id,
         )
         if card is not None:
-            return _proposal(
-                parent=parent,
-                family=family,
-                card=card,
-                phase="playbook",
-                reason_code=reason_code,
-                reason=reason,
+            choices.append(
+                _proposal(
+                    parent=parent,
+                    family=family,
+                    card=card,
+                    phase="playbook",
+                    reason_code=reason_code,
+                    reason=reason,
+                )
             )
-    return None
+    return tuple(choices)
+
+
+def _no_op_choices(
+    context: Any,
+    eligible: Sequence[ExperimentNodeView],
+    allowed: tuple[str, ...],
+) -> tuple[PolicyChoice, ...] | None:
+    """Expose bounded next actions after a terminal prediction no-op.
+
+    ``None`` means the latest result is not a no-op. An empty tuple means it is
+    a no-op but no legal next action remains. The no-op node itself is never a
+    parent: a reimplementation branches from its last trusted parent.
+    """
+
+    history = as_list(get_value(context, "family_history", None))
+    if not history:
+        return None
+    latest = history[-1]
+    if _normalized(get_value(latest, "status", None)) != "no_op":
+        return None
+    verdict = _normalized(get_value(latest, "trust_verdict", None))
+    contract = get_value(context, "contract_summary", None)
+    no_op_threshold = _number(
+        get_value(contract, "prediction_change_no_op_threshold", 0.001)
+    )
+    no_op_threshold = 0.001 if no_op_threshold is None else no_op_threshold
+    prediction_change = _number(get_value(latest, "prediction_change", None))
+    if verdict != "no_op" and not (
+        prediction_change is not None and prediction_change <= no_op_threshold
+    ):
+        return None
+
+    family = str(get_value(latest, "family", ""))
+    choices = list(
+        _independent_choices(
+            context,
+            eligible,
+            allowed,
+            family,
+            reason_code="NO_OP_INDEPENDENT_MECHANISM",
+            reason=(
+                "The terminal no-op is research evidence rather than an adapter "
+                "failure; test an independent mechanism from the trusted frontier."
+            ),
+        )
+    )
+
+    parent_id = str(get_value(latest, "parent_experiment_id", ""))
+    parent = next(
+        (node for node in eligible if node.experiment_id == parent_id),
+        None,
+    )
+    latest_methods = tuple(
+        str(item)
+        for item in as_list(get_value(latest, "method_card_ids", None))
+        if str(item)
+    )
+    same_mechanism_no_ops = 0
+    for summary in history:
+        summary_methods = {
+            str(item)
+            for item in as_list(get_value(summary, "method_card_ids", None))
+        }
+        summary_change = _number(get_value(summary, "prediction_change", None))
+        summary_is_no_op = _normalized(
+            get_value(summary, "trust_verdict", None)
+        ) == "no_op" or (
+            summary_change is not None and summary_change <= no_op_threshold
+        )
+        if (
+            summary_is_no_op
+            and str(get_value(summary, "parent_experiment_id", "")) == parent_id
+            and str(get_value(summary, "family", "")) == family
+            and bool(summary_methods.intersection(latest_methods))
+        ):
+            same_mechanism_no_ops += 1
+
+    # Permit one planner-selected reimplementation after the first no-op. A
+    # second no-op for the same parent/family/method retires that mechanism.
+    if (
+        parent is not None
+        and family in allowed
+        and len(latest_methods) == 1
+        and same_mechanism_no_ops == 1
+    ):
+        eligible_cards = {
+            str(get_value(card, "method_id", "")): card
+            for card in eligible_method_cards(context, family)
+        }
+        card = eligible_cards.get(latest_methods[0])
+        if card is not None:
+            choices.append(
+                _proposal(
+                    parent=parent,
+                    family=family,
+                    card=card,
+                    phase="no_op_reimplementation",
+                    reason_code="NO_OP_REIMPLEMENT_MECHANISM",
+                    reason=(
+                        "The previous implementation produced identical predictions. "
+                        "Reimplement or materially refine the same approved mechanism "
+                        "once from its trusted parent; the duplicate-plan gate remains "
+                        "binding."
+                    ),
+                )
+            )
+    return tuple(choices)
 
 
 def _required_method_choice(
@@ -565,17 +781,6 @@ def _playbook_choice(
                 "The suspicious result was quarantined and no independent eligible "
                 "method remains.",
             )
-        if rule == "no_op" and (
-            verdict == "no_op"
-            or (
-                prediction_change is not None
-                and prediction_change <= no_op_threshold
-            )
-        ):
-            return _blocked(
-                "NO_OP_REQUIRES_RECOVERY",
-                "The latest candidate did not change predictions meaningfully.",
-            )
         if rule == "unstable" and stability == "unstable":
             return _blocked(
                 "UNSTABLE_RESULT_REQUIRES_CONFIRMATION",
@@ -707,28 +912,30 @@ def _playbook_choice(
             and prediction_change is not None
             and prediction_change > no_op_threshold
         ):
-            exploration_parent = _latest_parent(latest, eligible)
-            preferred = (
-                "temporal_history_compact" if is_pairwise else None
+            exploration_parent = _best_experimental_parent(eligible)
+            refinement = _same_family_refinement_choice(
+                context,
+                exploration_parent,
+                allowed,
             )
-            if preferred and "temporal_history" in allowed:
-                return _required_method_choice(
-                    context,
-                    exploration_parent,
-                    "temporal_history",
-                    preferred,
-                    reason_code="MEANINGFUL_CHANGE_NO_GAIN",
-                    reason="Predictions changed without trusted gain; move to compact temporal history.",
-                )
+            if refinement is not None:
+                return refinement
+            exploration_family = str(exploration_parent.family or family)
             return _next_independent_choice(
                 context,
                 eligible,
                 allowed,
-                family,
+                exploration_family,
                 reason_code="MEANINGFUL_CHANGE_NO_GAIN",
-                reason="Predictions changed without trusted gain; move to the next independent mechanism.",
+                reason=(
+                    "The strongest eligible experimental path has no remaining "
+                    "same-family refinement; move to the next independent mechanism."
+                ),
                 preferred_parent=exploration_parent,
-            ) or _blocked("NO_ELIGIBLE_METHOD", "No independent eligible method remains.")
+            ) or _blocked(
+                "NO_ELIGIBLE_METHOD",
+                "No independent eligible method remains.",
+            )
         if (
             rule == "trusted_improvement"
             and parent_delta is not None
@@ -833,6 +1040,16 @@ class SearchPolicy:
                 "PLAYBOOK_INVALID",
                 "The planner context contains an invalid improvement playbook.",
                 phase="none",
+            )
+
+        no_op_candidates = _no_op_choices(context, eligible, allowed)
+        if no_op_candidates is not None:
+            if no_op_candidates:
+                return self._rank(no_op_candidates, context)
+            return _blocked(
+                "NO_ELIGIBLE_METHOD",
+                "The latest candidate was a no-op and no legal reimplementation "
+                "or independent method remains.",
             )
 
         routed = _playbook_choice(context, eligible, allowed)
