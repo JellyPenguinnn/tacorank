@@ -19,6 +19,11 @@ from .graph_view import (
 )
 from .method_eligibility import evaluate_method_card, method_card_map
 from .search_eligibility import classify_search_eligibility
+from .variant_configuration import (
+    METHOD_FORMULATIONS,
+    reference_variant_parameters,
+    treatment_partition,
+)
 
 HIDDEN_PATTERNS = (
     "hidden test",
@@ -416,6 +421,7 @@ class PlanValidator:
         cards = method_card_map(context)
         if not cards:
             errors.append("CONTEXT_METHOD_CARDS_MISSING")
+        campaign_active_parameters: set[str] = set()
         for method_id in sorted(method_ids):
             card = cards.get(method_id)
             if card is None:
@@ -427,17 +433,14 @@ class PlanValidator:
                 str(item)
                 for item in as_list(get_value(card, "active_parameters", None))
             }
+            campaign_active_parameters.update(active_parameters)
             if campaign is not None and active_parameters:
                 supplied_parameters = set(
                     (get_value(spec, "variant_parameters", None) or {}).keys()
                 )
                 if supplied_parameters != active_parameters:
                     errors.append("VARIANT_ACTIVE_PARAMETER_MISMATCH")
-                expected_formulation = {
-                    "objective_pairwise_bpr": "bpr",
-                    "objective_listwise_user_softmax": "listwise",
-                    "temporal_history_compact": "temporal_history",
-                }.get(method_id)
+                expected_formulation = METHOD_FORMULATIONS.get(method_id)
                 if expected_formulation is not None and (
                     (get_value(spec, "variant_parameters", None) or {}).get(
                         "formulation"
@@ -455,9 +458,14 @@ class PlanValidator:
             errors.append("EVIDENCE_OUTSIDE_CONTEXT")
         history = as_list(get_value(context, "family_history", None))
         hypothesis_evidence = get_value(spec, "hypothesis_evidence", None)
-        if history and hypothesis_evidence is None:
-            errors.append("HYPOTHESIS_EVIDENCE_REQUIRED_AFTER_FIRST_EXPERIMENT")
-        if hypothesis_evidence is not None:
+        prior_evaluations = {
+            str(get_value(summary, "evaluation_event_id", ""))
+            for summary in history
+            if get_value(summary, "evaluation_event_id", None)
+        }
+        if prior_evaluations and hypothesis_evidence is None:
+            errors.append("HYPOTHESIS_EVIDENCE_REQUIRED_AFTER_PRIOR_EVALUATION")
+        if hypothesis_evidence is not None and prior_evaluations:
             cited_evaluations = set(
                 map(
                     str,
@@ -470,11 +478,6 @@ class PlanValidator:
                     ),
                 )
             )
-            prior_evaluations = {
-                str(get_value(summary, "evaluation_event_id", ""))
-                for summary in history
-                if get_value(summary, "evaluation_event_id", None)
-            }
             if not cited_evaluations:
                 errors.append("HYPOTHESIS_EVALUATION_EVIDENCE_REQUIRED")
             if not cited_evaluations.issubset(prior_evaluations):
@@ -497,15 +500,23 @@ class PlanValidator:
                 errors.append("HYPOTHESIS_TREATMENT_BOUNDARY_REQUIRED")
             if changed.intersection(held):
                 errors.append("HYPOTHESIS_TREATMENT_BOUNDARY_OVERLAP")
-            if get_value(spec, "campaign_id", None):
-                parameter_names = set(
-                    map(
-                        str,
-                        (get_value(spec, "variant_parameters", None) or {}).keys(),
-                    )
+            if get_value(spec, "campaign_id", None) and campaign_active_parameters:
+                if changed.union(held) != campaign_active_parameters:
+                    errors.append("CAMPAIGN_TREATMENT_BOUNDARY_MISMATCH")
+                reference = reference_variant_parameters(
+                    context,
+                    str(implementation_parent_id or ""),
+                    campaign_active_parameters,
                 )
-                if changed != parameter_names:
+                actual_changed, actual_held = treatment_partition(
+                    get_value(spec, "variant_parameters", None) or {},
+                    reference,
+                    campaign_active_parameters,
+                )
+                if changed != set(actual_changed):
                     errors.append("CAMPAIGN_CHANGED_FACTORS_MISMATCH")
+                if held != set(actual_held):
+                    errors.append("CAMPAIGN_HELD_CONSTANT_MISMATCH")
             effects = get_value(
                 hypothesis_evidence, "expected_metric_effects", None
             ) or {}

@@ -1,0 +1,44 @@
+from solution.experiment_config import CONFIG
+
+from tacorank.research.variant_configuration import (
+    VARIANT_PARAMETER_DEFAULTS,
+    resolve_variant_parameters,
+    treatment_partition,
+)
+
+
+def test_controller_defaults_match_executable_scaffold_configuration():
+    assert VARIANT_PARAMETER_DEFAULTS == {
+        key: value for key, value in CONFIG.items() if key != "family"
+    }
+
+
+def test_partial_override_expands_and_partitions_against_parent():
+    active = (
+        "formulation",
+        "embedding_dim",
+        "learning_rate",
+        "epochs",
+        "negative_count",
+        "l2",
+        "residual_scale",
+        "max_train_rows",
+    )
+    reference = {
+        name: VARIANT_PARAMETER_DEFAULTS[name] for name in active
+    }
+    reference["formulation"] = "bpr"
+
+    resolved = resolve_variant_parameters(
+        {"negative_count": 4, "inactive_parameter": 99},
+        active_parameters=active,
+        formulation="bpr",
+        reference=reference,
+    )
+    changed, held = treatment_partition(resolved, reference, active)
+
+    assert set(resolved) == set(active)
+    assert resolved["negative_count"] == 4
+    assert "inactive_parameter" not in resolved
+    assert changed == ("negative_count",)
+    assert set(held) == set(active) - {"negative_count"}

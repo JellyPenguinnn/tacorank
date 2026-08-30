@@ -71,11 +71,26 @@ def test_validator_requires_exact_prior_evaluation_evidence_after_first_result(
     spec = make_spec(planner_context, experiment_id="exp_0002")
 
     missing = PlanValidator().validate(spec, planner_context)
-    assert "HYPOTHESIS_EVIDENCE_REQUIRED_AFTER_FIRST_EXPERIMENT" in missing.errors
+    assert "HYPOTHESIS_EVIDENCE_REQUIRED_AFTER_PRIOR_EVALUATION" in missing.errors
 
     add_prior_hypothesis_evidence(planner_context, latest, spec)
     accepted = PlanValidator().validate(spec, planner_context)
     assert accepted.accepted, accepted.errors
+
+
+def test_validator_does_not_require_evaluation_evidence_when_none_exists(
+    planner_context,
+):
+    planner_context.family_history = [
+        SimpleNamespace(experiment_id="exp_0001", family="objective")
+    ]
+
+    result = PlanValidator().validate(
+        make_spec(planner_context, experiment_id="exp_0002"),
+        planner_context,
+    )
+
+    assert result.accepted, result.errors
 
 
 def test_validator_accepts_distinct_agent_chosen_campaign_variant(planner_context):

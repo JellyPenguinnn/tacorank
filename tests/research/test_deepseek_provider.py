@@ -13,6 +13,7 @@ from tacorank.providers import deepseek as deepseek_module
 from tacorank.providers.deepseek import DeepSeekResearchProvider
 from tacorank.providers.research_provider import ProviderError, ProviderRequest
 from tacorank.research.duplicate_detection import compute_duplicate_key
+from tacorank.research.plan_validation import PlanValidator
 from tacorank.research.search_policy import SearchPolicy
 from tacorank.schemas import TokenMeasurement
 
@@ -219,13 +220,20 @@ def test_deepseek_provider_binds_campaign_variant(planner_context):
         return response(
             candidate(
                 variant_instruction="Use four uniform negatives per positive.",
-                variant_parameters={
-                    "formulation": "bpr",
-                    "negative_sampling": "uniform",
-                    "negative_count": 4,
-                },
+                    variant_parameters={
+                        "formulation": "bpr",
+                        "negative_sampling": "uniform",
+                        "negative_count": 4,
+                    },
+                    hypothesis_evidence={
+                        "observation": "There is no prior experiment yet.",
+                        "source_evaluation_event_ids": ["evt_999999"],
+                        "changed_factors": ["negative_count"],
+                        "held_constant": ["formulation"],
+                        "expected_metric_effects": {"GAUC": 0.001},
+                    },
+                )
             )
-        )
 
     choice = SearchPolicy().choose(planner_context)
     provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
@@ -242,9 +250,15 @@ def test_deepseek_provider_binds_campaign_variant(planner_context):
     )
     assert result["variant_parameters"] == {
         "formulation": "bpr",
-        "negative_sampling": "uniform",
+        "embedding_dim": 8,
+        "learning_rate": 0.01,
+        "epochs": 2,
         "negative_count": 4,
+        "l2": 0.0001,
+        "residual_scale": 0.05,
+        "max_train_rows": 100000,
     }
+    assert result["hypothesis_evidence"] is None
     prompt = json.loads(calls[0]["messages"][1]["content"])
     assert [item["family"] for item in prompt["context"]["family_history"]] == [
         "objective"
@@ -253,6 +267,102 @@ def test_deepseek_provider_binds_campaign_variant(planner_context):
     assert prompt["policy"]["campaign_directive"] == (
         "Adapt the next objective from prior evidence."
     )
+    bpr = next(
+        item
+        for item in prompt["context"]["method_cards"]
+        if item["method_id"] == "objective_pairwise_bpr"
+    )
+    assert bpr["active_parameters"] == [
+        "formulation",
+        "embedding_dim",
+        "learning_rate",
+        "epochs",
+        "negative_count",
+        "l2",
+        "residual_scale",
+        "max_train_rows",
+    ]
+    assert bpr["parameter_defaults"]["negative_count"] == 2
+    validation = PlanValidator().validate(
+        result, planner_context, choice=choice
+    )
+    assert validation.accepted, validation.errors
+
+
+def test_deepseek_provider_derives_later_campaign_treatment_boundary(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = {
+        "campaign_id": "depth_test",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 3},
+        "family_method_card_ids": {"objective": ["objective_pairwise_bpr"]},
+        "family_directives": {"objective": "Adapt from prior evidence."},
+    }
+    prior = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    prior.campaign_id = "depth_test"
+    prior.variant_id = "objective_01"
+    prior.evaluation_event_id = "evt_000010"
+    prior.variant_parameters = {
+        "formulation": "bpr",
+        "embedding_dim": 8,
+        "learning_rate": 0.01,
+        "epochs": 2,
+        "negative_count": 2,
+        "l2": 0.0001,
+        "residual_scale": 0.05,
+        "max_train_rows": 100000,
+    }
+    planner_context.family_history = [prior]
+    planner_context.source_event_ids.append("evt_000010")
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, payload, timeout
+        return response(
+            candidate(
+                variant_instruction="Increase BPR negatives from two to four.",
+                variant_parameters={"negative_count": 4},
+                hypothesis_evidence={
+                    "observation": "The prior BPR result remained within noise.",
+                    "source_evaluation_event_ids": ["evt_000010"],
+                    "changed_factors": ["epochs"],
+                    "held_constant": ["negative_count"],
+                    "expected_metric_effects": {"GAUC": 0.001},
+                },
+            )
+        )
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(ProviderRequest(planner_context, choice))
+    )
+
+    assert result["variant_parameters"]["negative_count"] == 4
+    assert result["variant_parameters"]["learning_rate"] == 0.01
+    assert result["hypothesis_evidence"]["changed_factors"] == [
+        "negative_count"
+    ]
+    assert set(result["hypothesis_evidence"]["held_constant"]) == {
+        "formulation",
+        "embedding_dim",
+        "learning_rate",
+        "epochs",
+        "l2",
+        "residual_scale",
+        "max_train_rows",
+    }
+    assert "evt_000010" in result["evidence_event_ids"]
+    validation = PlanValidator().validate(
+        result, planner_context, choice=choice
+    )
+    assert validation.accepted, validation.errors
 
 
 def test_deepseek_provider_preserves_policy_owned_ensemble_components(

@@ -19,6 +19,13 @@ from pydantic import BaseModel
 from ..research.code_blind import redact_implementation_references
 from ..research.duplicate_detection import compute_duplicate_key
 from ..research.graph_view import as_list, get_value
+from ..research.variant_configuration import (
+    METHOD_FORMULATIONS,
+    VARIANT_PARAMETER_DEFAULTS,
+    reference_variant_parameters,
+    resolve_variant_parameters,
+    treatment_partition,
+)
 from ..schemas import ResourceDelta, TokenMeasurement
 from .research_provider import ProviderError, ProviderRequest
 
@@ -45,17 +52,18 @@ When the policy includes a campaign slot, its variant_id, family directive, and 
 method cards are authoritative. Use prior family_history metrics and failures to choose
 the next distinct formulation and hyperparameters. Record that complete scientific
 choice in variant_instruction; do not repeat an earlier campaign design.
-Also return variant_parameters as a flat JSON object containing formulation and every
-material configuration choice. Use stable snake_case keys and scalar values only.
+Also return variant_parameters as a flat JSON object containing formulation and the
+configuration values you intentionally select. Use stable snake_case keys and scalar
+values only. The controller expands omitted active keys from the implementation parent
+or typed defaults before validation and execution.
 For objective slots, formulation must be pointwise, bpr, or listwise. For temporal
 history slots it must be temporal_history. Optional typed knobs are embedding_dim
 (integer 2..32), learning_rate (1e-5..0.2), epochs (integer 1..8), negative_count
 (integer 1..16), l2 (0..0.1), residual_scale (0..0.5), max_train_rows (integer
 1000..250000), history_decay_days (1..180), and history_shrinkage (0..1000).
 Listwise may additionally use listwise_strategy="full_observed". The selected method
-card's active_parameters are authoritative: return exactly those keys, including
-formulation, with no omitted, inherited, inactive, or extra parameter. Adapt numeric
-values from prior evidence; do not pre-enumerate the campaign.
+card's active_parameters are authoritative: do not return inactive or extra parameters.
+Adapt numeric values from prior evidence; do not pre-enumerate the campaign.
 
 You are intentionally code-blind. Do not name or infer repository paths, source files,
 modules, classes, functions, entrypoints, commands, patches, implementation interfaces,
@@ -87,7 +95,8 @@ observed distributions, sparsity, temporal shift, and entity overlap to ground t
 hypothesis. Target-rate aggregates apply only to training rows; never infer or claim
 score-row labels from them.
 
-Required JSON fields:
+Required JSON shape; hypothesis_evidence is required only when family_history contains
+a prior evaluation:
 {
   "hypothesis": "specific falsifiable hypothesis",
   "change_summary": "one high-level atomic research intervention",
@@ -98,11 +107,11 @@ Required JSON fields:
     "observation": "measured prior result motivating this treatment",
     "source_evaluation_event_ids": ["evt_000010"],
     "changed_factors": ["learning_rate"],
-    "held_constant": ["formulation", "embedding_dim", "epochs"],
+    "held_constant": ["formulation", "embedding_dim", "epochs", "negative_count", "l2", "residual_scale", "max_train_rows"],
     "expected_metric_effects": {"GAUC": 0.001, "nDCG@5": 0.0}
   },
   "variant_instruction": "exact distinct method formulation and hyperparameters for a campaign slot",
-  "variant_parameters": {"formulation": "bpr", "negative_count": 4},
+  "variant_parameters": {"formulation": "bpr", "embedding_dim": 8, "learning_rate": 0.02, "epochs": 2, "negative_count": 4, "l2": 0.0001, "residual_scale": 0.05, "max_train_rows": 100000},
   "estimated_cost": {
     "llm_tokens_upper_bound": 0,
     "wall_time_seconds_upper_bound": 0,
@@ -112,6 +121,10 @@ Required JSON fields:
   "method_card_ids": ["known_method_id"],
   "evidence_event_ids": ["evt_000001"]
 }
+Omit hypothesis_evidence for the first campaign experiment when family_history contains
+no prior evaluation. For later experiments, cite at least one prior evaluation and
+describe the intended changed and held parameters. The controller verifies and
+canonicalizes changed_factors and held_constant from the actual parent configuration.
 """
 
 COMPACT_RETRY_INSTRUCTION = """The previous completion reached its output-token limit.
@@ -326,10 +339,16 @@ def _research_method(value: Any) -> Dict[str, Any]:
         "expected_effect",
         "falsifier",
         "prohibition_conditions",
+        "capability_status",
+        "active_parameters",
     )
-    return _code_blind(
-        {field: _jsonable(get_value(value, field, None)) for field in fields}
-    )
+    result = {field: _jsonable(get_value(value, field, None)) for field in fields}
+    result["parameter_defaults"] = {
+        name: VARIANT_PARAMETER_DEFAULTS[name]
+        for name in as_list(get_value(value, "active_parameters", None))
+        if name in VARIANT_PARAMETER_DEFAULTS
+    }
+    return _code_blind(result)
 
 
 def _research_candidate(value: Any) -> Dict[str, Any]:
@@ -346,6 +365,7 @@ def _research_candidate(value: Any) -> Dict[str, Any]:
         "variant_parameters",
         "method_card_ids",
         "evidence_event_ids",
+        "hypothesis_evidence",
     )
     return _code_blind(
         {field: _jsonable(get_value(value, field, None)) for field in fields}
@@ -662,45 +682,8 @@ class DeepSeekResearchProvider:
         evidence = [item for item in supplied_evidence if item in set(source_events)]
         if not evidence:
             evidence = source_events
-        prior_evaluation_ids = {
-            str(get_value(summary, "evaluation_event_id", ""))
-            for summary in as_list(get_value(context, "family_history", None))
-            if get_value(summary, "evaluation_event_id", None)
-        }
-        raw_hypothesis_evidence = raw.get("hypothesis_evidence")
-        hypothesis_evidence = None
-        if isinstance(raw_hypothesis_evidence, Mapping):
-            effects = raw_hypothesis_evidence.get("expected_metric_effects")
-            hypothesis_evidence = {
-                "observation": _text(raw_hypothesis_evidence.get("observation")),
-                "source_evaluation_event_ids": [
-                    str(item)
-                    for item in as_list(
-                        raw_hypothesis_evidence.get(
-                            "source_evaluation_event_ids"
-                        )
-                    )
-                    if str(item) in prior_evaluation_ids
-                ],
-                "changed_factors": [
-                    str(item)
-                    for item in as_list(
-                        raw_hypothesis_evidence.get("changed_factors")
-                    )
-                ],
-                "held_constant": [
-                    str(item)
-                    for item in as_list(
-                        raw_hypothesis_evidence.get("held_constant")
-                    )
-                ],
-                "expected_metric_effects": (
-                    dict(effects) if isinstance(effects, Mapping) else {}
-                ),
-            }
-
-        known_cards = {
-            str(get_value(card, "method_id", "")): str(get_value(card, "family", ""))
+        cards_by_id = {
+            str(get_value(card, "method_id", "")): card
             for card in as_list(get_value(context, "method_cards", []))
         }
         required_card = get_value(choice, "method_card_id", None)
@@ -718,9 +701,65 @@ class DeepSeekResearchProvider:
             method_ids = [
                 item
                 for item in requested_cards
-                if item in known_cards and known_cards[item] == family
+                if item in cards_by_id
+                and str(get_value(cards_by_id[item], "family", "")) == family
                 and (not allowed_cards or item in allowed_cards)
             ]
+
+        campaign_id = get_value(choice, "campaign_id", None)
+        raw_parameters = _variant_parameters(raw.get("variant_parameters"))
+        variant_parameters = raw_parameters if campaign_id else {}
+        active_parameters: tuple[str, ...] = ()
+        reference: Dict[str, Any] = {}
+        if campaign_id and len(method_ids) == 1:
+            method_id = method_ids[0]
+            card = cards_by_id.get(method_id)
+            active_parameters = tuple(
+                map(str, as_list(get_value(card, "active_parameters", None)))
+            )
+            formulation = METHOD_FORMULATIONS.get(method_id)
+            if active_parameters and formulation is not None:
+                reference = reference_variant_parameters(
+                    context,
+                    str(get_value(implementation_parent, "experiment_id", "")),
+                    active_parameters,
+                )
+                variant_parameters = resolve_variant_parameters(
+                    raw_parameters,
+                    active_parameters=active_parameters,
+                    formulation=formulation,
+                    reference=reference,
+                )
+
+        prior_evaluation_ids = {
+            str(get_value(summary, "evaluation_event_id", ""))
+            for summary in as_list(get_value(context, "family_history", None))
+            if get_value(summary, "evaluation_event_id", None)
+        }
+        raw_hypothesis_evidence = raw.get("hypothesis_evidence")
+        hypothesis_evidence = None
+        if prior_evaluation_ids and isinstance(raw_hypothesis_evidence, Mapping):
+            effects = raw_hypothesis_evidence.get("expected_metric_effects")
+            cited = [
+                str(item)
+                for item in as_list(
+                    raw_hypothesis_evidence.get("source_evaluation_event_ids")
+                )
+                if str(item) in prior_evaluation_ids
+            ]
+            changed, held = treatment_partition(
+                variant_parameters, reference, active_parameters
+            )
+            hypothesis_evidence = {
+                "observation": _text(raw_hypothesis_evidence.get("observation")),
+                "source_evaluation_event_ids": cited,
+                "changed_factors": list(changed),
+                "held_constant": list(held),
+                "expected_metric_effects": (
+                    dict(effects) if isinstance(effects, Mapping) else {}
+                ),
+            }
+            evidence = list(dict.fromkeys([*evidence, *cited]))
 
         cost = raw.get("estimated_cost")
         if not isinstance(cost, Mapping):
@@ -755,18 +794,14 @@ class DeepSeekResearchProvider:
                 ),
                 "cost_tier": str(get_value(choice, "cost_tier", "medium")),
             },
-            "campaign_id": get_value(choice, "campaign_id", None),
+            "campaign_id": campaign_id,
             "variant_id": get_value(choice, "variant_id", None),
             "variant_instruction": (
                 _text(raw.get("variant_instruction"))
-                if get_value(choice, "campaign_id", None)
+                if campaign_id
                 else None
             ),
-            "variant_parameters": (
-                _variant_parameters(raw.get("variant_parameters"))
-                if get_value(choice, "campaign_id", None)
-                else {}
-            ),
+            "variant_parameters": variant_parameters,
             "method_card_ids": method_ids,
             "component_experiment_ids": [
                 str(item)

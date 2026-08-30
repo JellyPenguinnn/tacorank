@@ -93,6 +93,9 @@ class ResumablePlanningError(OrchestrationError):
     """
 
 
+MAX_CONSECUTIVE_INVALID_PROVIDER_PLANS = 3
+
+
 def _is_search_space_exhaustion(reason_code: str) -> bool:
     """Return true only for planner outcomes that prove no legal choice remains."""
 
@@ -102,6 +105,19 @@ def _is_search_space_exhaustion(reason_code: str) -> bool:
         or normalized.startswith("NO_LEGAL_")
         or normalized in {"NO_METHOD_CARDS", "NO_ELIGIBLE_METHOD"}
     )
+
+
+def _consecutive_invalid_provider_plans(events: Sequence[Event]) -> int:
+    count = 0
+    for event in reversed(events):
+        if event.event_type == EventType.EXPERIMENT_PROPOSED:
+            break
+        if event.event_type != EventType.PLANNER_RECOMMENDED:
+            continue
+        if event.payload.output.reason_code != "INVALID_PROVIDER_PLAN":
+            break
+        count += 1
+    return count
 
 
 class Harness:
@@ -786,9 +802,15 @@ class Harness:
             )
             if planner_output.action == PlannerAction.BLOCKED:
                 if planner_output.reason_code == "INVALID_PROVIDER_PLAN":
+                    invalid_count = _consecutive_invalid_provider_plans(
+                        self.events()
+                    )
+                    if invalid_count < MAX_CONSECUTIVE_INVALID_PROVIDER_PLANS:
+                        return self.state()
                     raise ResumablePlanningError(
-                        "research provider failed bounded plan validation; "
+                        "research provider failed bounded plan validation %d times; "
                         "resume from the persisted planner checkpoint"
+                        % invalid_count
                     )
                 if not _is_search_space_exhaustion(planner_output.reason_code):
                     raise ResumablePlanningError(

@@ -176,6 +176,17 @@ class InvalidProviderPlanner:
         )
 
 
+class InvalidOncePlanner:
+    def __init__(self):
+        self.calls = 0
+
+    async def propose(self, context):
+        self.calls += 1
+        if self.calls == 1:
+            return await InvalidProviderPlanner().propose(context)
+        return await BlockedPlanner().propose(context)
+
+
 class IntegrityRejectingPatchGate:
     async def check(self, candidate):
         return PatchCheckResult(
@@ -331,9 +342,30 @@ def test_invalid_provider_plan_is_resumable_and_not_a_false_convergence(
     assert harness.state().status.value == "ready"
     assert harness.state().phase == "planner_context"
     assert harness.state().stop_reason_code is None
+    assert len(
+        [
+            event
+            for event in harness.events()
+            if event.event_type == EventType.PLANNER_RECOMMENDED
+        ]
+    ) == 3
 
     harness.planner = BlockedPlanner()
     state = asyncio.run(harness.run_until_stopped())
+    assert state.stop_reason_code == "no_legal_proposal"
+
+
+def test_one_invalid_provider_plan_does_not_interrupt_campaign(
+    harness, baseline_evaluation
+):
+    planner = InvalidOncePlanner()
+    harness.planner = planner
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_until_stopped())
+
+    assert planner.calls == 2
+    assert state.status.value == "stopped"
     assert state.stop_reason_code == "no_legal_proposal"
 
 
