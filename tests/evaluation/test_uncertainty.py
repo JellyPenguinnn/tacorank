@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 from tacorank.evaluation.no_op import analyze_prediction_change
 from tacorank.evaluation.trust import TrustEvidence, assess_trust
 from tacorank.evaluation.types import (
@@ -6,6 +9,33 @@ from tacorank.evaluation.types import (
     Verdict,
 )
 from tacorank.evaluation.uncertainty import paired_user_delta_interval
+
+
+def test_candidate_runtime_import_does_not_require_numpy() -> None:
+    script = """
+import builtins
+original_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == 'numpy' or name.startswith('numpy.'):
+        raise AssertionError('candidate runtime attempted to import numpy')
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+import benchmarks.kuairand_pure.pipeline
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        shell=False,
+        close_fds=True,
+        timeout=10.0,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_paired_user_bootstrap_is_zero_for_identical_predictions() -> None:

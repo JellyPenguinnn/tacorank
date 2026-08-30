@@ -30,6 +30,32 @@ class SandboxPolicyError(RuntimeError):
     """Raised before launch when sandbox policy cannot be satisfied."""
 
 
+_PROBE_EXCEPTION_LINE = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)|docker):\s+.+$",
+    re.IGNORECASE,
+)
+_PROBE_CREDENTIAL = re.compile(
+    r"(?i)(\b(?:api[_-]?key|access[_-]?token|authorization|password|secret)"
+    r"\b\s*[:=]\s*)([^\s,;]+)"
+)
+_PROBE_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_PROBE_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
+
+
+def _probe_failure_detail(stderr: str) -> str:
+    """Return one bounded credential-redacted exception line from a probe."""
+
+    for raw_line in reversed(stderr.splitlines()):
+        line = " ".join(raw_line.split())
+        if not _PROBE_EXCEPTION_LINE.fullmatch(line):
+            continue
+        line = _PROBE_CREDENTIAL.sub(r"\1[REDACTED]", line)
+        line = _PROBE_BEARER.sub("Bearer [REDACTED]", line)
+        line = _PROBE_TOKEN.sub("[REDACTED]", line)
+        return line[:512]
+    return ""
+
+
 @dataclass(frozen=True)
 class ResourceLimits:
     wall_time_seconds: float
@@ -872,7 +898,7 @@ class DockerSandbox:
                 env=dict(host_environment),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
                 shell=False,
                 close_fds=True,
@@ -905,7 +931,11 @@ class DockerSandbox:
         ):
             raise SandboxPolicyError("Docker preflight container cleanup failed")
         if completed.returncode != 0:
-            raise SandboxPolicyError("Docker runtime capability probe failed")
+            message = "Docker runtime capability probe failed"
+            detail = _probe_failure_detail(completed.stderr)
+            if detail:
+                message = "{0}: {1}".format(message, detail)
+            raise SandboxPolicyError(message)
         try:
             payload = json.loads(completed.stdout)
             capacity = payload["capacity"]

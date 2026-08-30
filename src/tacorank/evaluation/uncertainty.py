@@ -5,9 +5,8 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 import math
-from typing import DefaultDict, List, Sequence, Tuple
-
-import numpy as np
+import random
+from typing import DefaultDict, Iterable, List, Sequence, Tuple
 
 from .metrics import auc, ndcg_at_k, normalize_binary_labels
 
@@ -99,63 +98,76 @@ def paired_user_delta_interval(
             ndcg_at_k([user_labels[index] for index in reference_order], k)
         )
 
-    candidate_auc_array = np.asarray(candidate_auc_numerators, dtype=np.float64)
-    reference_auc_array = np.asarray(reference_auc_numerators, dtype=np.float64)
-    auc_denominator_array = np.asarray(auc_denominators, dtype=np.float64)
-    candidate_ndcg_array = np.asarray(candidate_ndcg, dtype=np.float64)
-    reference_ndcg_array = np.asarray(reference_ndcg, dtype=np.float64)
+    auc_deltas = [
+        candidate - reference
+        for candidate, reference in zip(
+            candidate_auc_numerators, reference_auc_numerators
+        )
+    ]
+    ndcg_deltas = [
+        candidate - reference
+        for candidate, reference in zip(candidate_ndcg, reference_ndcg)
+    ]
     users = len(grouped)
 
     point_delta = _primary_delta(
-        np.ones(users, dtype=np.float64),
-        candidate_auc_array,
-        reference_auc_array,
-        auc_denominator_array,
-        candidate_ndcg_array,
-        reference_ndcg_array,
+        range(users), auc_deltas, auc_denominators, ndcg_deltas
     )
-    rng = np.random.default_rng(int(seed))
-    samples = np.empty(bootstrap_samples, dtype=np.float64)
-    for index in range(bootstrap_samples):
-        selected = rng.integers(0, users, size=users)
-        multiplicity = np.bincount(selected, minlength=users).astype(np.float64)
-        samples[index] = _primary_delta(
-            multiplicity,
-            candidate_auc_array,
-            reference_auc_array,
-            auc_denominator_array,
-            candidate_ndcg_array,
-            reference_ndcg_array,
+    rng = random.Random(int(seed))
+    samples = [
+        _primary_delta(
+            (rng.randrange(users) for _ in range(users)),
+            auc_deltas,
+            auc_denominators,
+            ndcg_deltas,
         )
+        for _ in range(bootstrap_samples)
+    ]
 
     alpha = (1.0 - confidence) / 2.0
     return PairedDeltaInterval(
-        mean=float(point_delta),
-        standard_error=float(np.std(samples, ddof=1)),
-        lower=float(np.quantile(samples, alpha)),
-        upper=float(np.quantile(samples, 1.0 - alpha)),
+        mean=point_delta,
+        standard_error=_sample_standard_deviation(samples),
+        lower=_linear_quantile(samples, alpha),
+        upper=_linear_quantile(samples, 1.0 - alpha),
         bootstrap_samples=bootstrap_samples,
     )
 
 
 def _primary_delta(
-    multiplicity: np.ndarray,
-    candidate_auc: np.ndarray,
-    reference_auc: np.ndarray,
-    auc_denominator: np.ndarray,
-    candidate_ndcg: np.ndarray,
-    reference_ndcg: np.ndarray,
+    selected_users: Iterable[int],
+    auc_deltas: Sequence[float],
+    auc_denominators: Sequence[float],
+    ndcg_deltas: Sequence[float],
 ) -> float:
-    denominator = float(np.dot(multiplicity, auc_denominator))
-    if denominator:
-        gauc_delta = float(
-            np.dot(multiplicity, candidate_auc - reference_auc) / denominator
-        )
-    else:
-        gauc_delta = 0.0
-    ndcg_delta = float(
-        np.dot(multiplicity, candidate_ndcg - reference_ndcg)
-        / float(multiplicity.sum())
-    )
+    auc_numerator = 0.0
+    auc_denominator = 0.0
+    ndcg_numerator = 0.0
+    count = 0
+    for user_index in selected_users:
+        auc_numerator += auc_deltas[user_index]
+        auc_denominator += auc_denominators[user_index]
+        ndcg_numerator += ndcg_deltas[user_index]
+        count += 1
+    if count < 1:
+        raise ValueError("paired uncertainty requires at least one user")
+    gauc_delta = auc_numerator / auc_denominator if auc_denominator else 0.0
+    ndcg_delta = ndcg_numerator / count
     return (gauc_delta + ndcg_delta) / 2.0
 
+
+def _sample_standard_deviation(values: Sequence[float]) -> float:
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return math.sqrt(variance)
+
+
+def _linear_quantile(values: Sequence[float], probability: float) -> float:
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * probability
+    lower_index = int(math.floor(position))
+    upper_index = int(math.ceil(position))
+    if lower_index == upper_index:
+        return ordered[lower_index]
+    weight = position - lower_index
+    return ordered[lower_index] * (1.0 - weight) + ordered[upper_index] * weight

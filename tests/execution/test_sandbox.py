@@ -31,6 +31,7 @@ from tacorank.execution.sandbox import (
     SandboxPolicy,
     SandboxPolicyError,
     TrustedLocalProcessSandbox,
+    _probe_failure_detail,
     validate_launch_spec,
 )
 
@@ -42,6 +43,28 @@ IMAGE_ENVIRONMENT = ["LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin"]
 IMAGE_ENVIRONMENT_SHA256 = hashlib.sha256(
     json.dumps(IMAGE_ENVIRONMENT, separators=(",", ":")).encode("utf-8")
 ).hexdigest()
+
+
+def test_probe_failure_detail_is_bounded_and_credential_redacted() -> None:
+    detail = _probe_failure_detail(
+        "Traceback (most recent call last):\n"
+        "RuntimeError: api_key=secret-value Bearer abcdefghijklmnop "
+        "sk-abcdefghijklmnop\n"
+    )
+
+    assert detail == (
+        "RuntimeError: api_key=[REDACTED] Bearer [REDACTED] [REDACTED]"
+    )
+    assert len(_probe_failure_detail("ValueError: " + "x" * 1000)) == 512
+
+
+def test_probe_failure_detail_prefers_python_exception() -> None:
+    detail = _probe_failure_detail(
+        "ModuleNotFoundError: No module named 'numpy'\n"
+        "tacorank container supervisor: candidate identity self-test failed\n"
+    )
+
+    assert detail == "ModuleNotFoundError: No module named 'numpy'"
 
 
 @pytest.fixture(autouse=True)
@@ -647,6 +670,56 @@ def test_docker_preflight_launches_and_cleans_exact_capability_probe(
         environment["DOCKER_HOST"] == "unix://" + str(socket_path)
         for environment in environments
     )
+    docker_socket.close()
+    socket_path.unlink()
+    socket_root.rmdir()
+
+
+def test_docker_preflight_reports_sanitized_runtime_probe_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, _, artifacts = _resolved(tmp_path)
+    socket_root = Path(tempfile.mkdtemp(prefix="tr-docker-"))
+    socket_path = socket_root / "docker.sock"
+    docker_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    docker_socket.bind(str(socket_path))
+    socket_path = socket_path.resolve(strict=True)
+
+    def docker_cli(argv: list[str], **kwargs: object):
+        if argv[1] == "info":
+            return subprocess.CompletedProcess(argv, 0, stdout="29.0\n", stderr="")
+        if argv[1] == "image":
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(IMAGE_ENVIRONMENT) + "\n", stderr=""
+            )
+        if argv[1] == "run":
+            assert kwargs["stderr"] == subprocess.PIPE
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                stdout="",
+                stderr=(
+                    "ModuleNotFoundError: No module named 'numpy'\n"
+                    "tacorank container supervisor: candidate identity self-test failed\n"
+                ),
+            )
+        if argv[1] == "rm":
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr("tacorank.execution.sandbox.subprocess.run", docker_cli)
+    sandbox = DockerSandbox(
+        _policy(Path(tmp_path / "worktree"), artifacts),
+        image=IMAGE,
+        docker_executable=Path(sys.executable).resolve(),
+        docker_host="unix://" + str(socket_path),
+        output_quota_max_bytes=OUTPUT_QUOTA_BYTES,
+        image_environment_sha256=IMAGE_ENVIRONMENT_SHA256,
+    )
+
+    with pytest.raises(SandboxPolicyError, match="ModuleNotFoundError"):
+        sandbox.preflight(artifacts)
+
     docker_socket.close()
     socket_path.unlink()
     socket_root.rmdir()
