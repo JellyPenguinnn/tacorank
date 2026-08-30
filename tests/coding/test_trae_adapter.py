@@ -587,12 +587,21 @@ def test_reported_failure_retains_only_redacted_bounded_diagnostic(
     assert failure.value.code == "TRAE_REPORTED_FAILURE"
     assert parts.secret not in (failure.value.output_tail or "")
     assert "[REDACTED]" in (failure.value.output_tail or "")
-    assert "diagnostic_artifact=" in (failure.value.output_tail or "")
+    assert failure.value.resource_delta.llm_input_tokens == 7
+    assert failure.value.resource_delta.llm_output_tokens == 4
+    assert len(failure.value.diagnostic_artifacts) == 2
+    assert {artifact.kind for artifact in failure.value.diagnostic_artifacts} == {
+        "trajectory",
+        "log",
+    }
     failure_artifact = parts.repository / experiment_artifact_prefix(
         "run1", "exp1", attempt=1
     ) / "trae_failure_trajectory.json"
     assert failure_artifact.is_file()
     assert parts.secret.encode("utf-8") not in failure_artifact.read_bytes()
+    process_log = failure_artifact.with_name("trae_process.log")
+    assert process_log.is_file()
+    assert parts.secret.encode("utf-8") not in process_log.read_bytes()
 
 
 def test_candidate_identity_is_required_before_worktree_or_trae(

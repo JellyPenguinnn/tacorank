@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 import re
 from typing import Any
 
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
-from .graph_view import GraphView, as_list, enum_value, get_value
+from .graph_view import (
+    ExperimentNodeView,
+    GraphView,
+    as_list,
+    enum_value,
+    get_value,
+    has_value,
+)
 from .method_eligibility import evaluate_method_card, method_card_map
+from .search_eligibility import classify_search_eligibility
 
 
 HIDDEN_PATTERNS = (
@@ -24,6 +31,12 @@ HIDDEN_PATTERNS = (
 SHARED_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 EVENT_ID_PATTERN = re.compile(r"evt_\d{6,}$")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?$")
+CODE_DETAIL_PATTERN = re.compile(
+    r"(?:^|\s)(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|"
+    r"\.(?:py|pyi|js|ts|tsx|java|go|rs|cpp|cc|c|h)\b|"
+    r"\b(?:entrypoint|function name|class name|line number|source file)\b",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -47,20 +60,6 @@ def _normalized_enum(value: Any) -> str:
     return str(enum_value(value) or "").strip().lower()
 
 
-def _normalized_path(path: Any) -> str | None:
-    if not isinstance(path, str) or not path.strip():
-        return None
-    path = path.replace("\\", "/").strip()
-    pure = PurePosixPath(path)
-    if pure.is_absolute() or ".." in pure.parts or "\x00" in path:
-        return None
-    return str(pure)
-
-
-def _path_is_within(path: str, root: str) -> bool:
-    return path == root or path.startswith(root + "/")
-
-
 def _budget_value(budget: Any, *names: str) -> float | None:
     for name in names:
         value = get_value(budget, name, None)
@@ -73,7 +72,7 @@ def _budget_value(budget: Any, *names: str) -> float | None:
 
 
 class PlanValidator:
-    """Validate a proposed ExperimentSpec against verified context only."""
+    """Validate a code-blind research proposal against verified context only."""
 
     def validate(
         self,
@@ -107,7 +106,6 @@ class PlanValidator:
             "hypothesis",
             "family",
             "change_summary",
-            "target_stage",
             "expected_mechanism",
             "falsification_condition",
             "success_criteria",
@@ -158,91 +156,134 @@ class PlanValidator:
         graph = GraphView.from_context(context)
         parent_id = get_value(spec, "parent_experiment_id", None)
         parent = graph.get(str(parent_id)) if parent_id else None
+        historical_summaries = as_list(get_value(context, "family_history", None))
+        historical_by_id = {
+            str(get_value(summary, "experiment_id", "")): summary
+            for summary in historical_summaries
+            if str(get_value(summary, "experiment_id", ""))
+        }
+        refinement_ids = (
+            {
+                str(item)
+                for item in as_list(
+                    get_value(context, "refinement_frontier_ids", None)
+                )
+            }
+            if has_value(context, "refinement_frontier_ids")
+            else {
+                experiment_id
+                for experiment_id, summary in historical_by_id.items()
+                if classify_search_eligibility(
+                    summary, context
+                ).refinement_eligible
+            }
+        )
+        refinement_by_id = {
+            experiment_id: historical_by_id[experiment_id]
+            for experiment_id in refinement_ids
+            if experiment_id in historical_by_id
+        }
+        ensemble_ids = (
+            {
+                str(item)
+                for item in as_list(
+                    get_value(context, "ensemble_candidate_ids", None)
+                )
+            }
+            if has_value(context, "ensemble_candidate_ids")
+            else {
+                experiment_id
+                for experiment_id, summary in historical_by_id.items()
+                if classify_search_eligibility(summary, context).ensemble_eligible
+            }
+        )
+        ensemble_by_id = {
+            experiment_id: historical_by_id[experiment_id]
+            for experiment_id in ensemble_ids
+            if experiment_id in historical_by_id
+        }
+        choice_phase = str(get_value(choice, "phase", "")) if choice is not None else ""
+        if parent is None and choice_phase == "refinement" and parent_id:
+            summary = refinement_by_id.get(str(parent_id))
+            if (
+                summary is not None
+                and classify_search_eligibility(summary, context).refinement_eligible
+            ):
+                parent = ExperimentNodeView.from_summary(summary)
         if parent is None:
             errors.append("UNKNOWN_PARENT")
-        elif not parent.is_parent_eligible:
+        elif not parent.is_parent_eligible and choice_phase != "refinement":
             errors.append("INELIGIBLE_PARENT")
-        elif get_value(spec, "parent_commit_sha", None) and parent.parent_commit_sha:
-            # The summary's commit_sha represents the code state being branched from.
-            if get_value(spec, "parent_commit_sha") != parent.parent_commit_sha:
-                errors.append("PARENT_COMMIT_MISMATCH")
-
-        target_files = as_list(get_value(spec, "target_files", None))
-        normalized_files = [_normalized_path(path) for path in target_files]
-        if not target_files:
-            errors.append("NO_TARGET_FILES")
-        if any(path is None for path in normalized_files):
-            errors.append("INVALID_TARGET_PATH")
-        if len(set(normalized_files)) != len(normalized_files):
-            errors.append("DUPLICATE_TARGET_PATH")
-
-        protected = {
-            str(item).rstrip("/")
-            for item in (get_value(contract, "protected_paths", []) or [])
-        }
-        raw_editable = as_list(get_value(contract, "editable_paths", None))
-        editable = [
-            _normalized_path(str(item).rstrip("/")) for item in raw_editable
-        ]
-        if not raw_editable:
-            errors.append("CONTRACT_EDITABLE_PATHS_MISSING")
-        elif any(path is None for path in editable):
-            errors.append("INVALID_EDITABLE_PATH")
-        editable_roots = [path for path in editable if path is not None]
-        for path in normalized_files:
-            if path is None:
-                continue
-            if any(_path_is_within(path, item) for item in protected):
-                errors.append("PROTECTED_TARGET_PATH")
-            if not any(_path_is_within(path, root) for root in editable_roots):
-                errors.append("TARGET_OUTSIDE_EDITABLE_PATHS")
-
-        raw_interfaces = get_value(context, "target_interface_excerpts", None)
-        try:
-            interface_items = list(dict(raw_interfaces or {}).items())
-        except (TypeError, ValueError):
-            interface_items = []
-            errors.append("INVALID_TARGET_INTERFACES")
-        interface_paths: set[str] = set()
-        if not interface_items:
-            errors.append("TARGET_INTERFACES_MISSING")
-        for raw_path, excerpt in interface_items:
-            path = _normalized_path(raw_path)
-            if path is None or not _nonempty(excerpt):
-                errors.append("INVALID_TARGET_INTERFACE")
-                continue
-            interface_paths.add(path)
-        normalized_target_set = {
-            path for path in normalized_files if path is not None
-        }
-        if (
-            normalized_target_set
-            and interface_paths
-            and normalized_target_set.isdisjoint(interface_paths)
-        ):
-            errors.append("TARGET_INTERFACE_NOT_TOUCHED")
-
-        fidelity_plan = [
-            _normalized_enum(item)
-            for item in as_list(get_value(spec, "fidelity_plan", None))
-        ]
-        allowed_fidelity = {"smoke", "proxy", "full"}
-        fidelity_is_valid = bool(fidelity_plan) and all(
-            item in allowed_fidelity for item in fidelity_plan
-        )
-        if not fidelity_is_valid:
-            errors.append("INVALID_FIDELITY_PLAN")
-        else:
-            if len(fidelity_plan) != len(set(fidelity_plan)):
-                errors.append("DUPLICATE_FIDELITY")
-            order = {"smoke": 0, "proxy": 1, "full": 2}
-            if any(
-                order[fidelity_plan[index]] >= order[fidelity_plan[index + 1]]
-                for index in range(len(fidelity_plan) - 1)
+        elif not parent.is_parent_eligible:
+            summary = refinement_by_id.get(parent.experiment_id)
+            if (
+                summary is None
+                or not classify_search_eligibility(summary, context).refinement_eligible
             ):
-                errors.append("NON_MONOTONIC_FIDELITY_PLAN")
-        if "full" not in fidelity_plan and str(family) == "ensemble":
-            warnings.append("ENSEMBLE_WITHOUT_FULL_FIDELITY")
+                errors.append("INELIGIBLE_REFINEMENT_PARENT")
+        if (
+            parent is not None
+            and get_value(spec, "parent_commit_sha", None)
+            and parent.parent_commit_sha
+            and get_value(spec, "parent_commit_sha") != parent.parent_commit_sha
+        ):
+            # The summary's commit_sha represents the code state being branched from.
+            errors.append("PARENT_COMMIT_MISMATCH")
+
+        component_ids = [
+            str(item)
+            for item in as_list(get_value(spec, "component_experiment_ids", None))
+        ]
+        if len(component_ids) != len(set(component_ids)):
+            errors.append("DUPLICATE_COMPONENT_EXPERIMENT")
+        if any(not SHARED_ID_PATTERN.fullmatch(item) for item in component_ids):
+            errors.append("INVALID_COMPONENT_EXPERIMENT_ID")
+        required_components = tuple(
+            str(item)
+            for item in as_list(
+                get_value(choice, "component_experiment_ids", None)
+                if choice is not None
+                else None
+            )
+        )
+        if required_components and tuple(component_ids) != required_components:
+            errors.append("COMPONENT_POLICY_MISMATCH")
+        if family != "ensemble" and component_ids:
+            errors.append("COMPONENTS_REQUIRE_ENSEMBLE_FAMILY")
+        if family == "ensemble" and not component_ids:
+            errors.append("ENSEMBLE_COMPONENT_REQUIRED")
+        component_method_ids = {
+            str(item)
+            for item in as_list(get_value(spec, "method_card_ids", None))
+        }
+        residual_ensemble = (
+            "ensemble_diverse_residual_candidate" in component_method_ids
+        )
+        for component_id in component_ids:
+            if component_id == str(parent_id):
+                errors.append("ENSEMBLE_COMPONENT_DUPLICATES_PARENT")
+                continue
+            component = historical_by_id.get(component_id)
+            if component is None:
+                errors.append("UNKNOWN_COMPONENT_EXPERIMENT")
+                continue
+            search = classify_search_eligibility(component, context)
+            soft_authorized = component_id in ensemble_by_id
+            if residual_ensemble and not (
+                soft_authorized and search.ensemble_eligible
+            ):
+                errors.append("INELIGIBLE_ENSEMBLE_COMPONENT")
+            elif not residual_ensemble and not (
+                (soft_authorized and search.ensemble_eligible)
+                or search.branch_eligible
+            ):
+                errors.append("INELIGIBLE_ENSEMBLE_COMPONENT")
+
+        if any(
+            has_value(spec, field)
+            for field in ("target_stage", "target_files", "fidelity_plan")
+        ):
+            errors.append("PLANNER_IMPLEMENTATION_DETAIL_FORBIDDEN")
 
         raw_method_ids = list(
             map(str, as_list(get_value(spec, "method_card_ids", None)))
@@ -265,23 +306,6 @@ class PlanValidator:
                 continue
             eligibility = evaluate_method_card(card, context, family=family)
             errors.extend(eligibility.reasons)
-            implementation_targets = [
-                _normalized_path(item)
-                for item in as_list(
-                    get_value(card, "implementation_targets", None)
-                )
-            ]
-            if any(item is None for item in implementation_targets):
-                errors.append("METHOD_IMPLEMENTATION_TARGET_INVALID")
-                continue
-            required_targets = {
-                item for item in implementation_targets if item is not None
-            }
-            if required_targets and not required_targets.issubset(interface_paths):
-                errors.append("METHOD_IMPLEMENTATION_TARGET_UNAUTHORIZED")
-            if required_targets and normalized_target_set.isdisjoint(required_targets):
-                errors.append("METHOD_IMPLEMENTATION_TARGET_NOT_TOUCHED")
-
         source_events = set(map(str, as_list(get_value(context, "source_event_ids", None))))
         if any(not EVENT_ID_PATTERN.fullmatch(event_id) for event_id in source_events):
             errors.append("INVALID_CONTEXT_EVENT_ID")
@@ -297,6 +321,10 @@ class PlanValidator:
         ).lower()
         if any(pattern in text for pattern in HIDDEN_PATTERNS):
             errors.append("HIDDEN_TEST_REFERENCE")
+        if CODE_DETAIL_PATTERN.search(text):
+            errors.append("CODE_SPECIFIC_PLAN_FORBIDDEN")
+        if any(component_id.lower() not in text for component_id in component_ids):
+            errors.append("ENSEMBLE_COMPONENT_NOT_DESCRIBED")
 
         supplied_duplicate_key = get_value(spec, "duplicate_key", None)
         if duplicate_detector is not None and not duplicate_detector.validate(spec):

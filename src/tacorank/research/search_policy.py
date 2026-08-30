@@ -5,10 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-from .graph_view import ExperimentNodeView, GraphView, as_list, enum_value, get_value
+from .graph_view import (
+    ExperimentNodeView,
+    GraphView,
+    as_list,
+    enum_value,
+    get_value,
+    has_value,
+)
+from .linucb import LinUCBLegalChoiceRanker
 from .method_eligibility import eligible_method_cards, method_card_map
 from .playbook import REQUIRED_RULE_ORDER
 from .portfolio import HIGH_VALUE_FAMILIES
+from .search_eligibility import classify_search_eligibility
 
 
 DEFAULT_RULE_ORDER = REQUIRED_RULE_ORDER
@@ -25,7 +34,10 @@ DEFAULT_METHOD_ORDER = {
     "duration_bias": ("duration_bias_censored_watch_time",),
     "features": ("temporal_drift_past_only",),
     "model": ("model_compact_ranker",),
-    "ensemble": ("ensemble_confirmed_members",),
+    "ensemble": (
+        "ensemble_diverse_residual_candidate",
+        "ensemble_confirmed_members",
+    ),
     "evaluation": ("evaluation_random_exposure_robustness",),
 }
 
@@ -40,6 +52,7 @@ class PolicyChoice:
     reason_code: str
     reason: str
     method_card_id: str | None = None
+    component_experiment_ids: tuple[str, ...] = ()
 
 
 LegalChoiceRanker = Callable[[Sequence[PolicyChoice], Any], PolicyChoice]
@@ -70,6 +83,27 @@ def _metric_delta(summary: Any, *names: str) -> float | None:
         if name.lower() in lowered:
             return lowered[name.lower()]
     return None
+
+
+def _diagnostic_suffix(summary: Any) -> str:
+    values = get_value(summary, "diagnostic_metrics", None) or {}
+    if not isinstance(values, dict):
+        try:
+            values = dict(values)
+        except (TypeError, ValueError):
+            return ""
+    preferred = (
+        "spearman_vs_fm_baseline",
+        "user_rankable_fraction",
+        "item_personalized_fraction",
+        "parent_residual_std",
+    )
+    rendered = []
+    for name in preferred:
+        value = _number(values.get(name))
+        if value is not None:
+            rendered.append("%s=%.6g" % (name, value))
+    return " Diagnostics: " + ", ".join(rendered) + "." if rendered else ""
 
 
 def _allowed_families(context: Any) -> tuple[str, ...]:
@@ -148,17 +182,34 @@ def _method_for_family(
     family: str,
     *,
     preferred: str | None = None,
+    parent_experiment_id: str | None = None,
 ) -> Any | None:
     eligible = {
         str(get_value(card, "method_id", "")): card
         for card in eligible_method_cards(context, family)
     }
+    if preferred is None:
+        # This card requires an explicit secondary component chosen by the
+        # soft-portfolio route. Generic breadth/depth proposals have no such
+        # component contract and must not select it.
+        eligible.pop("ensemble_diverse_residual_candidate", None)
+    attempted = {
+        method_id
+        for summary in as_list(get_value(context, "family_history", None))
+        if parent_experiment_id is not None
+        and str(get_value(summary, "parent_experiment_id", ""))
+        == parent_experiment_id
+        for method_id in map(
+            str, as_list(get_value(summary, "method_card_ids", None))
+        )
+    }
     if preferred is not None:
-        return eligible.get(preferred)
+        return None if preferred in attempted else eligible.get(preferred)
     for method_id in _method_order(context, family):
-        if method_id in eligible:
+        if method_id in eligible and method_id not in attempted:
             return eligible[method_id]
-    return eligible[min(eligible)] if eligible else None
+    remaining = sorted(set(eligible) - attempted)
+    return eligible[remaining[0]] if remaining else None
 
 
 def _cost_tier(value: Any) -> str:
@@ -175,6 +226,7 @@ def _proposal(
     phase: str,
     reason_code: str,
     reason: str,
+    component_experiment_ids: tuple[str, ...] = (),
 ) -> PolicyChoice:
     return PolicyChoice(
         action="propose",
@@ -185,6 +237,7 @@ def _proposal(
         reason_code=reason_code,
         reason=reason,
         method_card_id=str(get_value(card, "method_id", "")),
+        component_experiment_ids=component_experiment_ids,
     )
 
 
@@ -227,6 +280,7 @@ def _next_independent_choice(
     reason: str,
 ) -> PolicyChoice | None:
     tried = set(_family_history(context))
+    parent = _best_parent(eligible)
     ordered = [
         family
         for family in _family_order(context)
@@ -234,10 +288,14 @@ def _next_independent_choice(
     ]
     ordered.sort(key=lambda family: (family in tried, _family_order(context).index(family)))
     for family in ordered:
-        card = _method_for_family(context, family)
+        card = _method_for_family(
+            context,
+            family,
+            parent_experiment_id=parent.experiment_id,
+        )
         if card is not None:
             return _proposal(
-                parent=_best_parent(eligible),
+                parent=parent,
                 family=family,
                 card=card,
                 phase="playbook",
@@ -261,7 +319,12 @@ def _required_method_choice(
             "REQUIRED_FAMILY_UNAVAILABLE",
             "Playbook family %s is not allowed by the frozen contract." % family,
         )
-    card = _method_for_family(context, family, preferred=method_id)
+    card = _method_for_family(
+        context,
+        family,
+        preferred=method_id,
+        parent_experiment_id=parent.experiment_id,
+    )
     if card is None:
         return _blocked(
             "REQUIRED_METHOD_UNAVAILABLE",
@@ -276,6 +339,85 @@ def _required_method_choice(
         reason_code=reason_code,
         reason=reason,
     )
+
+
+def _soft_prune_choice(
+    context: Any,
+    latest: Any,
+    eligible: Sequence[ExperimentNodeView],
+    allowed: tuple[str, ...],
+) -> PolicyChoice | None:
+    """Return one bounded refinement or ensemble action for a soft result."""
+
+    search = classify_search_eligibility(latest, context)
+    node = ExperimentNodeView.from_summary(latest)
+    if node is None:
+        return None
+    refinement_ids = {
+        str(item)
+        for item in as_list(get_value(context, "refinement_frontier_ids", None))
+    }
+    ensemble_ids = {
+        str(item)
+        for item in as_list(get_value(context, "ensemble_candidate_ids", None))
+    }
+    refinement_authorized = (
+        node.experiment_id in refinement_ids
+        if has_value(context, "refinement_frontier_ids")
+        else search.refinement_eligible
+    )
+    ensemble_authorized = (
+        node.experiment_id in ensemble_ids
+        if has_value(context, "ensemble_candidate_ids")
+        else search.ensemble_eligible
+    )
+    method_ids = {
+        str(item) for item in as_list(get_value(latest, "method_card_ids", None))
+    }
+    if refinement_authorized and "objective_pairwise_bpr" in method_ids:
+        card = _method_for_family(
+            context,
+            "objective",
+            preferred="objective_listwise_user_softmax",
+            parent_experiment_id=node.experiment_id,
+        )
+        if "objective" in allowed and card is not None:
+            return _proposal(
+                parent=node,
+                family="objective",
+                card=card,
+                phase="refinement",
+                reason_code="SOFT_PRUNE_METRIC_TRADEOFF_REFINEMENT",
+                reason=(
+                    "The clean pairwise proxy exposed a component-metric trade-off; "
+                    "allow exactly one documented listwise refinement from %s."
+                    % node.experiment_id
+                ),
+            )
+
+    if ensemble_authorized and "ensemble" in allowed:
+        parent = _best_parent(eligible)
+        card = _method_for_family(
+            context,
+            "ensemble",
+            preferred="ensemble_diverse_residual_candidate",
+            parent_experiment_id=parent.experiment_id,
+        )
+        if card is not None and node.experiment_id != parent.experiment_id:
+            return _proposal(
+                parent=parent,
+                family="ensemble",
+                card=card,
+                phase="ensemble",
+                reason_code="SOFT_PRUNE_DIVERSE_ENSEMBLE_TEST",
+                reason=(
+                    "Retain %s only as a clean diverse secondary component and "
+                    "test one predeclared blend against trusted parent %s."
+                    % (node.experiment_id, parent.experiment_id)
+                ),
+                component_experiment_ids=(node.experiment_id,),
+            )
+    return None
 
 
 def _playbook_choice(
@@ -306,6 +448,7 @@ def _playbook_choice(
     gauc_delta = _metric_delta(latest, "gauc")
     ndcg_delta = _metric_delta(latest, "ndcg@5", "ndcg")
     family = str(get_value(latest, "family", ""))
+    status = _normalized(get_value(latest, "status", None))
     method_ids = {
         str(item) for item in as_list(get_value(latest, "method_card_ids", None))
     }
@@ -319,6 +462,27 @@ def _playbook_choice(
         and prediction_change is not None
     )
     parent = _latest_parent(latest, eligible)
+
+    if (
+        status == "invalid"
+        and get_value(latest, "primary_score", None) is None
+        and get_value(latest, "metric_set", None) is None
+    ):
+        return _next_independent_choice(
+            context,
+            eligible,
+            allowed,
+            family,
+            reason_code="OPERATIONAL_FAILURE_UNTESTED",
+            reason=(
+                "The latest experiment ended before verified evaluation; do not "
+                "interpret it as research evidence and continue with an independent "
+                "eligible mechanism."
+            ),
+        ) or _blocked(
+            "NO_ELIGIBLE_METHOD",
+            "The failed operational attempt produced no research result and no independent method remains.",
+        )
 
     for rule in _rule_order(context):
         if rule == "output_rejected" and output_accepted is False:
@@ -358,12 +522,54 @@ def _playbook_choice(
             or stability not in {"single_seed", "confirmed", "not_applicable"}
             or prediction_change is None
         ):
+            terminal_clean_full = (
+                output_accepted is True
+                and fidelity == "full"
+                and population == "public_validation"
+                and integrity == "clean"
+                and stability in {"single_seed", "confirmed", "not_applicable"}
+                and prediction_change is not None
+                and (
+                    decision in {"prune", "reject"}
+                    or verdict in {"negative", "inconclusive"}
+                )
+            )
+            if terminal_clean_full:
+                portfolio_choice = _soft_prune_choice(
+                    context,
+                    latest,
+                    eligible,
+                    allowed,
+                )
+                if portfolio_choice is not None:
+                    return portfolio_choice
+                return _next_independent_choice(
+                    context,
+                    eligible,
+                    allowed,
+                    family,
+                    reason_code="TERMINAL_FULL_RESULT_REJECTED",
+                    reason=(
+                        "The clean full result was rejected as a checkpoint and has "
+                        "no authorized portfolio action; move to an independent method."
+                    ),
+                ) or _blocked(
+                    "NO_ELIGIBLE_METHOD", "No independent eligible method remains."
+                )
             return _blocked(
                 "RESULT_NOT_BRANCHABLE",
                 "Only a completed public-validation result may drive a research branch.",
             )
         if rule == "promotion_required" and fidelity in {"smoke", "proxy"}:
             if decision in {"prune", "reject"}:
+                portfolio_choice = _soft_prune_choice(
+                    context,
+                    latest,
+                    eligible,
+                    allowed,
+                )
+                if portfolio_choice is not None:
+                    return portfolio_choice
                 return _next_independent_choice(
                     context,
                     eligible,
@@ -373,6 +579,7 @@ def _playbook_choice(
                     reason=(
                         "The latest mechanism was terminally rejected before full "
                         "evaluation; move to the next independent method."
+                        + _diagnostic_suffix(latest)
                     ),
                 ) or _blocked(
                     "NO_ELIGIBLE_METHOD", "No independent eligible method remains."
@@ -469,7 +676,12 @@ def _playbook_choice(
                     "The successful family is no longer allowed by the frozen contract.",
                 )
             preferred = next(iter(method_ids), None) if len(method_ids) == 1 else None
-            card = _method_for_family(context, family, preferred=preferred)
+            card = _method_for_family(
+                context,
+                family,
+                preferred=preferred,
+                parent_experiment_id=parent.experiment_id,
+            )
             if card is None:
                 return _blocked(
                     "REQUIRED_METHOD_UNAVAILABLE",
@@ -494,7 +706,10 @@ def _playbook_choice(
                 allowed,
                 family,
                 reason_code="TRUSTED_FULL_REGRESSION",
-                reason="The tested mechanism regressed beyond tolerance; move to an independent method.",
+                reason=(
+                    "The tested mechanism regressed beyond tolerance; move to an "
+                    "independent method." + _diagnostic_suffix(latest)
+                ),
             ) or _blocked("NO_ELIGIBLE_METHOD", "No independent eligible method remains.")
     return None
 
@@ -510,7 +725,7 @@ class SearchPolicy:
         if frontier_limit < 1:
             raise ValueError("frontier_limit must be positive")
         self.frontier_limit = frontier_limit
-        self.legal_choice_ranker = legal_choice_ranker
+        self.legal_choice_ranker = legal_choice_ranker or LinUCBLegalChoiceRanker()
 
     def _rank(self, candidates: Sequence[PolicyChoice], context: Any) -> PolicyChoice:
         if not candidates:
@@ -567,7 +782,11 @@ class SearchPolicy:
         for family in allowed:
             if family in tried:
                 continue
-            card = _method_for_family(context, family)
+            card = _method_for_family(
+                context,
+                family,
+                parent_experiment_id=breadth_parent.experiment_id,
+            )
             if card is None:
                 continue
             breadth.append(
@@ -592,7 +811,11 @@ class SearchPolicy:
         recent = set(history[-2:])
         depth: list[PolicyChoice] = []
         for family in allowed:
-            card = _method_for_family(context, family)
+            card = _method_for_family(
+                context,
+                family,
+                parent_experiment_id=parent.experiment_id,
+            )
             if card is None:
                 continue
             depth.append(

@@ -138,10 +138,14 @@ class EvaluationResult:
             baseline_delta=self.baseline_delta.primary,
             parent_delta=self.parent_delta.primary,
             previous_best_delta=self.previous_best_delta.primary,
+            baseline_metric_deltas=dict(self.baseline_delta.metrics),
+            parent_metric_deltas=dict(self.parent_delta.metrics),
+            previous_best_metric_deltas=dict(self.previous_best_delta.metrics),
             prediction_change=CanonicalPredictionChange(
                 spearman_vs_parent=self.prediction_change.spearman_vs_parent,
                 changed_row_fraction=self.prediction_change.changed_row_fraction,
             ),
+            diagnostic_metrics=dict(self.diagnostic_metrics),
             trust=CanonicalTrustAssessment(
                 verdict=self.trust.verdict,
                 stability=self.trust.stability,

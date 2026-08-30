@@ -42,7 +42,7 @@
     "duration_bias": ["duration_bias_censored_watch_time"],
     "features": ["temporal_drift_past_only"],
     "model": ["model_compact_ranker"],
-    "ensemble": ["ensemble_confirmed_members"],
+    "ensemble": ["ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]
   }
 }
@@ -71,6 +71,8 @@ Use only verified fields already present in the current schemas:
 - `metric_set.metrics`, `primary_score`, `baseline_delta`, `parent_delta`, and
   `previous_best_delta`;
 - `prediction_change.spearman_vs_parent` and `changed_row_fraction`;
+- label-free `diagnostic_metrics`, especially FM correlation, residual spread,
+  within-user rankability, and repeated-item personalization;
 - `trust.verdict`, `trust.integrity`, `trust.stability`, and `trust.flags`;
 - `experiment.decided.decision`, `parent_eligible`, and `best_eligible`;
 - contract `epsilon`, patience, budgets, editable paths, and allowed data.
@@ -97,6 +99,27 @@ Apply these rules from top to bottom. The first matching rule wins.
 Only a full, verified, public-validation result with `trust.verdict = accepted`
 and `trust.integrity = clean` may create a future parent. A positive proxy score
 can justify more evaluation, but never a new trusted branch.
+
+### Hard prune, soft prune, and portfolio retention
+
+Canonical `parent_eligible` and `best_eligible` remain unchanged. Person 1 may
+derive two narrower, non-checkpoint permissions from verified evidence:
+
+- **hard prune:** rejected output, suspicious/compromised integrity, no-op,
+  unstable result, invalid/retracted lineage, or primary regression worse than
+  `max(5 * epsilon, 0.01)`. Never branch, refine, or ensemble this result;
+- **soft prune:** clean accepted output at proxy/full fidelity, meaningful
+  prediction change, and either primary delta above that regression floor or a
+  component-metric trade-off. Retain the node as evidence, not as a checkpoint;
+- **bounded refinement:** a soft-pruned node with a documented metric trade-off
+  may receive at most one child when a method card names the follow-up;
+- **ensemble candidate:** a soft-pruned node may enter one fixed blend test only
+  when its prediction Spearman magnitude versus the parent is below `0.98`.
+
+These permissions never change validation-best selection. A soft node remains
+`parent_eligible = false` and `best_eligible = false`; Person 1 must label the
+proposal as a refinement or ensemble action, and the plan validator must
+recompute eligibility from the same verified context.
 
 ## 3. Metric-shape diagnosis
 
@@ -136,9 +159,12 @@ cost does not fit the remaining budget.
 ### Direction 0 — baseline and evaluator parity
 
 Before research, reproduce the frozen random, popularity, and FM checks. The
-random model should be near the published lower-bound tolerance, and FM must
-match baseline parity. Confirm row alignment, duplicate preservation, finite
-scores, contract/evaluator hashes, and seed variance.
+random model should be near the published lower-bound tolerance. The editable
+candidate must also reproduce the official FM prediction bytes on smoke,
+proxy, full validation, and final-inference views; a good evaluator score from
+a separate file is not baseline parity. Confirm the setup-generated parity
+receipt, row alignment, duplicate preservation, finite scores,
+contract/evaluator hashes, and seed variance.
 
 If parity fails, stop research and fix the harness. A broken evaluator can make
 every later direction look productive.
@@ -149,9 +175,9 @@ every later direction look productive.
 contract metrics depend only on within-user order. BPR-style pairwise logistic
 loss directly trains a positive impression to score above a negative impression.
 
-**First experiment:** keep the FM representation and all data/splits fixed.
-Replace only the training objective with deterministic within-user pairwise
-logistic loss:
+**First experiment:** keep the setup-verified official FM score and all
+data/splits fixed. Train only a bounded additive residual with deterministic
+within-user pairwise logistic loss:
 
 ```text
 loss(u, i+, i-) = -log sigmoid(score(u, i+) - score(u, i-))
@@ -160,9 +186,14 @@ loss(u, i+, i-) = -log sigmoid(score(u, i+) - score(u, i-))
 Use only observed impressions from the same user. Cap pairs per user and sample
 deterministically so users with many interactions do not dominate. Users with
 only one label provide no pairwise signal and must be skipped for this loss.
+Initialize both latent factor sides with deterministic small non-zero values;
+zero-initializing both sides makes every latent gradient zero. Before accepting
+the implementation, require non-zero residual variance, meaningful
+within-user score variation, and repeated-item user personalization.
 
-**Do not:** pair across users, treat unexposed items as negatives, change the
-evaluator, or combine a new model architecture in the same experiment.
+**Do not:** pair across users, treat unexposed items as negatives, discard the
+FM parent, change the evaluator, or combine a new model architecture in the
+same experiment.
 
 **Success:** a trusted full result exceeds the parent by more than contract
 `epsilon`, with neither component metric showing a material regression.

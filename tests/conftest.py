@@ -84,6 +84,11 @@ def config(repository: Path) -> RunConfig:
         max_experiments=3,
         seed_schedule=[11, 22, 33, 44],
         context_token_limit=2000,
+        research_capabilities=[
+            "baseline_parity",
+            "objective_data_frame_verified",
+            "verified_best_prediction",
+        ],
     )
 
 

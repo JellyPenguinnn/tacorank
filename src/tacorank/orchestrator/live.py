@@ -63,6 +63,7 @@ from ..safety import (
     DataAccessPolicy,
     DataViewPolicy,
     ExecutionSealExpectation,
+    InterfaceRequirement,
     OutputColumn,
     OutputContract,
     OutputGate,
@@ -129,6 +130,7 @@ class LiveAdapterConfig(StrictModel):
     population_csvs: Dict[str, Path]
     baseline_prediction_csvs: Dict[str, Path]
     baseline_final_prediction_csv: Path
+    baseline_parity_receipt_path: Optional[Path] = None
     candidate_allowed_columns: List[str] = Field(default_factory=list)
     protected_columns: List[str] = Field(default_factory=lambda: ["label"])
     hidden_path_tokens: List[str] = Field(
@@ -173,6 +175,10 @@ class LiveAdapterConfig(StrictModel):
             "baseline_final_prediction_csv",
         ):
             raw[key] = str(_resolve_config_path(base, raw[key]))
+        if raw.get("baseline_parity_receipt_path") is not None:
+            raw["baseline_parity_receipt_path"] = str(
+                _resolve_config_path(base, raw["baseline_parity_receipt_path"])
+            )
         for mapping_name in (
             "input_roots",
             "population_csvs",
@@ -335,6 +341,11 @@ class WorktreePatchGate:
             "allowed_import_roots": allowed_import_roots,
             "allowed_capability_imports": tuple(allowed_capability_imports),
             "allowed_dependency_changes": tuple(allowed_dependency_changes),
+            "interface_requirements": (
+                InterfaceRequirement(
+                    "solution/candidate.py", "run", parameters=("invocation",)
+                ),
+            ),
         }
 
     async def check(self, candidate: Any) -> Any:
@@ -625,6 +636,7 @@ class ProtectedEvaluationBridge:
             previous_best=previous_best,
             parent_scores=parent_batch.scores,
             diagnostic_features=population.diagnostic_features,
+            baseline_scores=baseline_batch.scores,
             seed_evaluation_event_ids=seed_events,
             internal_proxy_delta=internal_proxy_delta,
         )
@@ -845,6 +857,7 @@ class ProtectedEvaluationBridge:
                 None,
                 1.0,
             ),
+            diagnostic_metrics=dict(canonical.diagnostic_metrics),
             trust=DomainTrustAssessment(
                 verdict=canonical.trust.verdict,
                 stability=canonical.trust.stability,
@@ -1401,6 +1414,7 @@ def _require_live_files(config: RunConfig, live: LiveAdapterConfig) -> None:
     ):
         if not path.exists():
             raise ContractError("%s does not exist: %s" % (label, path))
+    _verify_executable_baseline_parity(config, live)
     actual_evaluator = _sha256_file(
         config.repository_root / "kuairand-starter-kit" / "evaluate.py"
     )
@@ -1431,6 +1445,89 @@ def _require_live_files(config: RunConfig, live: LiveAdapterConfig) -> None:
             )
     elif reviewed_token_cap is not None and int(reviewed_token_cap) < config.coding_token_limit:
         raise ContractError("run coding limit exceeds the reviewed Trae max_token_cap")
+
+
+def _verify_executable_baseline_parity(
+    config: RunConfig, live: LiveAdapterConfig
+) -> None:
+    """Require executable proof before exposing baseline-parity methods."""
+
+    receipt_path = live.baseline_parity_receipt_path
+    claims_parity = "baseline_parity" in config.research_capabilities
+    if receipt_path is None:
+        if claims_parity:
+            raise ContractError(
+                "baseline_parity requires a setup-generated executable receipt"
+            )
+        return
+    try:
+        document = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ContractError("baseline parity receipt is invalid JSON") from error
+    if not isinstance(document, dict) or set(document) != {
+        "schema_version",
+        "candidate_entrypoint",
+        "candidate_source_path",
+        "candidate_source_sha256",
+        "routes",
+    }:
+        raise ContractError("baseline parity receipt has an invalid schema")
+    if (
+        document["schema_version"] != "1.0"
+        or document["candidate_entrypoint"] != live.candidate_entrypoint
+        or document["candidate_source_path"] != "solution/candidate.py"
+    ):
+        raise ContractError("baseline parity receipt identifies a different candidate")
+    candidate_source = config.repository_root / "solution" / "candidate.py"
+    if (
+        not candidate_source.is_file()
+        or candidate_source.is_symlink()
+        or document["candidate_source_sha256"] != _sha256_file(candidate_source)
+    ):
+        raise ContractError("baseline parity candidate source identity changed")
+    routes = document["routes"]
+    expected_routes = {
+        "candidate_smoke",
+        "candidate_proxy",
+        "candidate_full",
+        "candidate_final_infer",
+    }
+    if not isinstance(routes, dict) or set(routes) != expected_routes:
+        raise ContractError("baseline parity receipt does not cover every candidate route")
+    for command_id in sorted(expected_routes):
+        record = routes[command_id]
+        if not isinstance(record, dict) or set(record) != {
+            "fm_prediction_sha256",
+            "candidate_output_sha256",
+            "exact_bytes_match",
+        }:
+            raise ContractError("baseline parity route receipt is malformed")
+        view = live.input_roots[command_id]
+        prediction = view / "fm_baseline_predictions.csv"
+        digest_file = view / "fm_baseline_predictions.sha256"
+        if (
+            not prediction.is_file()
+            or prediction.is_symlink()
+            or not digest_file.is_file()
+            or digest_file.is_symlink()
+        ):
+            raise ContractError("baseline parity route is missing frozen FM inputs")
+        digest = _sha256_file(prediction)
+        try:
+            frozen_digest = digest_file.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError) as error:
+            raise ContractError("baseline parity digest file is invalid") from error
+        if (
+            frozen_digest != digest
+            or record["fm_prediction_sha256"] != digest
+            or record["candidate_output_sha256"] != digest
+            or record["exact_bytes_match"] is not True
+        ):
+            raise ContractError("baseline parity route no longer reproduces official FM")
+    if not claims_parity:
+        raise ContractError(
+            "verified executable FM parity exists but run capabilities omit it"
+        )
 
 
 def _require_clean_baseline(root: Path, baseline_commit_sha: str) -> None:
@@ -1526,6 +1623,8 @@ def _verify_data_manifest(config: RunConfig, live: LiveAdapterConfig) -> None:
         path.resolve(strict=True) for path in live.baseline_prediction_csvs.values()
     )
     required_files.add(live.baseline_final_prediction_csv.resolve(strict=True))
+    if live.baseline_parity_receipt_path is not None:
+        required_files.add(live.baseline_parity_receipt_path.resolve(strict=True))
     for path in required_files:
         try:
             relative = path.relative_to(root).as_posix()

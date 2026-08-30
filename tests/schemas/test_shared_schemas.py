@@ -95,6 +95,19 @@ def test_fidelity_plan_rejects_duplicate_or_reverse_stages():
         valid_spec(fidelity_plan=[Fidelity.SMOKE, Fidelity.SMOKE])
 
 
+def test_ensemble_component_ids_are_typed_and_unique():
+    spec = valid_spec(
+        family="ensemble",
+        component_experiment_ids=["exp_0001", "exp_0002"],
+    )
+
+    assert spec.component_experiment_ids == ["exp_0001", "exp_0002"]
+    with pytest.raises(ValidationError):
+        valid_spec(component_experiment_ids=["exp_0001", "exp_0001"])
+    with pytest.raises(ValidationError):
+        valid_spec(component_experiment_ids=["bad/component"])
+
+
 def test_versioned_contract_fixtures():
     fixture_root = Path(__file__).parents[1] / "fixtures"
     valid = json.loads((fixture_root / "valid/experiment_spec.json").read_text())

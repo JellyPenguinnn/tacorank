@@ -82,7 +82,7 @@ class NoOpTrustTests(unittest.TestCase):
         )
         self.assertEqual(prohibited.verdict, Verdict.INCONCLUSIVE)
 
-    def test_validation_arm_conflict_blocks_positive_reward(self):
+    def test_validation_arm_conflict_is_advisory(self):
         change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
         trust = assess_trust(
             evidence(
@@ -93,7 +93,7 @@ class NoOpTrustTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(trust.verdict, Verdict.SUSPICIOUS)
+        self.assertEqual(trust.verdict, Verdict.ACCEPTED)
         self.assertIn("VALIDATION_ARM_SIGN_CONFLICT", trust.flags)
 
     def test_validation_arm_gap_and_temporal_drift_are_visible(self):

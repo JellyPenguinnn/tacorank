@@ -16,14 +16,13 @@ from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.research.search_policy import SearchPolicy
 from tacorank.schemas import TokenMeasurement
 
+from .conftest import make_summary
+
 
 def candidate(**updates):
     value = {
         "hypothesis": "Pairwise BPR should improve within-user ranking.",
         "change_summary": "Replace pointwise loss with pairwise BPR.",
-        "target_stage": "objective",
-        "target_files": ["solution/candidate.py"],
-        "fidelity_plan": ["smoke", "proxy", "full"],
         "expected_mechanism": "Optimize relative positive-negative ordering.",
         "success_criteria": "Full primary delta is at least 0.002.",
         "falsification_condition": "No trusted full-fidelity gain.",
@@ -75,6 +74,14 @@ def output_factory(action, spec, reason_code, reason, supporting_event_ids):
 
 def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_context):
     calls = []
+    planner_context.data_profile = {
+        "profile_sha256": "d" * 64,
+        "train_rows": 4,
+        "score_rows": 2,
+    }
+    planner_context.baseline.diagnostic_metrics = {
+        "user_rankable_fraction": 1.0,
+    }
 
     def transport(url, headers, payload, timeout):
         calls.append((url, headers, payload, timeout))
@@ -111,12 +118,30 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert payload["max_tokens"] == 1_000
     assert payload["thinking"] == {"type": "enabled"}
     prompt_document = json.loads(payload["messages"][1]["content"])
-    assert prompt_document["context"]["target_interfaces"] == {
-        "solution/candidate.py": (
-            "Required candidate entrypoint: def run(invocation) -> None"
-        )
+    serialized_prompt = json.dumps(prompt_document, sort_keys=True)
+    assert "target_interfaces" not in prompt_document["context"]
+    assert "editable_paths" not in prompt_document["context"]["contract"]
+    assert "protected_paths" not in prompt_document["context"]["contract"]
+    assert "commit_sha" not in prompt_document["context"]["baseline"]
+    assert prompt_document["context"]["baseline"]["diagnostic_metrics"] == {
+        "user_rankable_fraction": 1.0,
     }
-    assert "solution/train.py" in payload["messages"][0]["content"]
+    assert prompt_document["context"]["data_profile"] == {
+        "profile_sha256": "d" * 64,
+        "train_rows": 4,
+        "score_rows": 2,
+    }
+    assert "read-only aggregate" in payload["messages"][0]["content"]
+    assert all(
+        "implementation_targets" not in card
+        for card in prompt_document["context"]["method_cards"]
+    )
+    assert "solution/candidate.py" not in serialized_prompt
+    assert "implementation_targets" not in serialized_prompt
+    assert "source_path" not in serialized_prompt
+    assert "parent_commit_sha" not in serialized_prompt
+    assert "target_files" not in payload["messages"][0]["content"]
+    assert "pipeline stages" in payload["messages"][0]["content"]
     assert "secret-key" not in json.dumps(payload)
     assert timeout == 120
     assert provider.resource_delta.llm_input_tokens == 101
@@ -124,9 +149,53 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert provider.resource_delta.token_measurement == TokenMeasurement.PROVIDER
 
 
+def test_deepseek_provider_preserves_policy_owned_ensemble_components(
+    planner_context,
+):
+    component = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="temporal_history",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        parent_eligible=False,
+        trust_verdict="negative",
+        stability="not_applicable",
+        parent_delta=-0.004,
+        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
+        prediction_change=0.8,
+        prediction_spearman_vs_parent=0.6,
+        method_card_ids=["temporal_history_compact"],
+    )
+    planner_context.family_history = [component]
+    planner_context.refinement_frontier_ids = []
+    planner_context.ensemble_candidate_ids = ["exp_0001"]
+    choice = SearchPolicy().choose(planner_context)
+    calls = []
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, timeout
+        calls.append(payload)
+        return response(candidate(component_experiment_ids=["hostile_component"]))
+
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(ProviderRequest(planner_context, choice))
+    )
+
+    assert choice.phase == "ensemble"
+    assert result["family"] == "ensemble"
+    assert result["method_card_ids"] == ["ensemble_diverse_residual_candidate"]
+    assert result["component_experiment_ids"] == ["exp_0001"]
+    prompt = json.loads(calls[0]["messages"][1]["content"])
+    assert prompt["policy"]["component_experiment_ids"] == ["exp_0001"]
+    assert prompt["context"]["ensemble_candidate_ids"] == ["exp_0001"]
+
+
 def test_research_planner_requests_one_deepseek_repair(planner_context):
     responses = [
-        response(candidate(target_files=[]), prompt_tokens=100, completion_tokens=20),
+        response(candidate(hypothesis=""), prompt_tokens=100, completion_tokens=20),
         response(candidate(), prompt_tokens=90, completion_tokens=30),
     ]
     requests = []
@@ -148,59 +217,43 @@ def test_research_planner_requests_one_deepseek_repair(planner_context):
     assert result["action"] == "propose"
     assert len(requests) == 2
     repair_prompt = json.loads(requests[1]["messages"][1]["content"])
-    assert "NO_TARGET_FILES" in repair_prompt["repair"]["validation_errors"]
+    assert "MISSING_HYPOTHESIS" in repair_prompt["repair"]["validation_errors"]
+    assert "parent_commit_sha" not in repair_prompt["repair"]["previous_candidate"]
     assert result["resource_delta"].llm_input_tokens == 190
     assert result["resource_delta"].llm_output_tokens == 50
 
 
-def test_research_planner_repairs_target_outside_editable_paths(planner_context):
-    responses = [
-        response(
-            candidate(target_files=["src/tacorank/train.py"]),
-            prompt_tokens=100,
-            completion_tokens=20,
-        ),
-        response(candidate(), prompt_tokens=90, completion_tokens=30),
-    ]
+def test_deepseek_provider_discards_unsolicited_implementation_details(
+    planner_context,
+):
     requests = []
 
     def transport(url, headers, payload, timeout):
         requests.append(payload)
-        return responses.pop(0)
-
-    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
-    planner = ResearchPlanner(
-        provider,
-        output_factory=output_factory,
-        input_token_limit=2_000,
-        output_token_limit=1_000,
-    )
-
-    result = asyncio.run(planner.propose(planner_context))
-
-    assert result["action"] == "propose"
-    assert result["spec"]["target_files"] == ["solution/candidate.py"]
-    assert len(requests) == 2
-    repair_prompt = json.loads(requests[1]["messages"][1]["content"])
-    assert (
-        "TARGET_OUTSIDE_EDITABLE_PATHS"
-        in repair_prompt["repair"]["validation_errors"]
-    )
-    assert repair_prompt["context"]["contract"]["editable_paths"] == [
-        "solution",
-        "research",
-    ]
-    assert repair_prompt["context"]["target_interfaces"] == {
-        "solution/candidate.py": (
-            "Required candidate entrypoint: def run(invocation) -> None"
+        return response(
+            candidate(
+                target_stage="training_objective",
+                target_files=["src/tacorank/train.py"],
+                fidelity_plan=["full"],
+            )
         )
-    }
+
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    choice = SearchPolicy().choose(planner_context)
+    result = asyncio.run(
+        provider.generate(ProviderRequest(planner_context, choice))
+    )
+
+    assert "target_stage" not in result
+    assert "target_files" not in result
+    assert "fidelity_plan" not in result
+    assert len(requests) == 1
 
 
-def test_research_planner_repairs_invented_train_entrypoint(planner_context):
+def test_research_planner_repairs_code_specific_narrative(planner_context):
     responses = [
-        response(candidate(target_files=["solution/train.py"])),
-        response(candidate(target_files=["solution/candidate.py"])),
+        response(candidate(change_summary="Edit solution/candidate.py.")),
+        response(candidate()),
     ]
     requests = []
 
@@ -219,14 +272,11 @@ def test_research_planner_repairs_invented_train_entrypoint(planner_context):
     result = asyncio.run(planner.propose(planner_context))
 
     assert result["action"] == "propose"
-    assert result["spec"]["target_files"] == ["solution/candidate.py"]
     repair_prompt = json.loads(requests[1]["messages"][1]["content"])
-    assert "TARGET_INTERFACE_NOT_TOUCHED" in repair_prompt["repair"][
+    assert "CODE_SPECIFIC_PLAN_FORBIDDEN" in repair_prompt["repair"][
         "validation_errors"
     ]
-    assert "METHOD_IMPLEMENTATION_TARGET_NOT_TOUCHED" in repair_prompt[
-        "repair"
-    ]["validation_errors"]
+    assert "solution/candidate.py" not in json.dumps(repair_prompt)
 
 
 def test_deepseek_provider_rejects_truncated_completion(planner_context):

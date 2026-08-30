@@ -29,7 +29,10 @@ def make_summary(
     metric_deltas=None,
     parent_delta: float | None = 0.003,
     prediction_change: float | None = 1.0,
+    prediction_spearman_vs_parent: float | None = 0.5,
     method_card_ids=None,
+    component_experiment_ids=None,
+    best_eligible: bool = False,
 ):
     return SimpleNamespace(
         experiment_id=experiment_id,
@@ -53,8 +56,11 @@ def make_summary(
         metric_deltas=metric_deltas or {},
         parent_delta=parent_delta,
         prediction_change=prediction_change,
+        prediction_spearman_vs_parent=prediction_spearman_vs_parent,
         method_card_ids=method_card_ids or [],
+        component_experiment_ids=component_experiment_ids or [],
         parent_eligible=parent_eligible,
+        best_eligible=best_eligible,
         status="accepted",
     )
 
@@ -78,8 +84,8 @@ def planner_context():
                 "ensemble",
                 "other",
             ],
-            protected_paths=["evaluate.py", "contract/COMPETITION.md"],
-            editable_paths=["solution", "research"],
+            protected_paths=[],
+            editable_paths=[],
             allowed_data=[
                 "train_interactions",
                 "public_validation",
@@ -92,7 +98,11 @@ def planner_context():
                 "long_view",
                 "verified_predictions",
             ],
-            research_capabilities=[],
+            research_capabilities=[
+                "baseline_parity",
+                "objective_data_frame_verified",
+                "verified_best_prediction",
+            ],
             active_prohibitions=[],
             data_manifest_sha256="b" * 64,
             evaluator_sha256="c" * 64,
@@ -111,11 +121,7 @@ def planner_context():
         method_cards=load_method_cards(
             Path(__file__).parents[2] / "research" / "methods"
         ).cards,
-        target_interface_excerpts={
-            "solution/candidate.py": (
-                "Required candidate entrypoint: def run(invocation) -> None"
-            )
-        },
+        target_interface_excerpts={},
         remaining_budget=SimpleNamespace(
             remaining_llm_tokens=10_000,
             remaining_wall_time_seconds=10_000,

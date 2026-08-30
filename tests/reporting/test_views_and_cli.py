@@ -39,8 +39,8 @@ def test_views_are_derived_and_cli_validates(harness, baseline_evaluation, capsy
         "baseline",
         "exp_001",
     ]
-    experiment_node = graph["nodes"][1]
-    assert experiment_node["diagnostics"]["validation_arm_gap"] == 0.01
+    experiment = graph["nodes"][1]
+    assert experiment["diagnostics"]["validation_arm_gap"] == 0.01
     experiment_report = (
         run_directory
         / "experiment-graph/directions/feature-cross/experiments/exp_001.md"
@@ -48,6 +48,9 @@ def test_views_are_derived_and_cli_validates(harness, baseline_evaluation, capsy
     assert "## Diagnostics" in experiment_report
     assert "user_history.cold" in experiment_report
     assert "## Diagnostic findings" in summary
+    assert experiment["diagnostic_metrics"]["user_rankable_fraction"] == 1.0
+    assert experiment["adapter_failures"] == []
+    assert experiment["recovery_decisions"] == []
     assert (
         run_directory
         / "experiment-graph/directions/feature-cross/experiments/exp_001.md"

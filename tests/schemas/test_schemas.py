@@ -193,8 +193,14 @@ class SharedSchemaTests(unittest.TestCase):
         )
         payload = EvaluationCompletedPayload(result=result)
         self.assertEqual(payload.result.population, Population.UNBIASED_AUDIT)
+        self.assertEqual(payload.result.parent_metric_deltas, {})
         values = payload.model_dump()
         values["result"]["public_query_index"] = 1
+        with self.assertRaises(ValidationError):
+            EvaluationCompletedPayload.model_validate(values)
+
+        values = payload.model_dump()
+        values["result"]["parent_metric_deltas"] = {"wrong_metric": 0.1}
         with self.assertRaises(ValidationError):
             EvaluationCompletedPayload.model_validate(values)
 
@@ -324,6 +330,18 @@ class SharedSchemaTests(unittest.TestCase):
         canonical = domain.to_canonical()
         self.assertIsInstance(canonical, EvaluationResult)
         self.assertEqual(canonical.parent_delta, 0.005)
+        self.assertEqual(
+            canonical.baseline_metric_deltas,
+            {"gauc": 0.01, "ndcg_at_5": 0.01},
+        )
+        self.assertEqual(
+            canonical.parent_metric_deltas,
+            {"gauc": 0.006, "ndcg_at_5": 0.004},
+        )
+        self.assertEqual(
+            canonical.previous_best_metric_deltas,
+            {"gauc": 0.004, "ndcg_at_5": 0.002},
+        )
         self.assertEqual(canonical.trust.verdict, TrustVerdict.ACCEPTED)
         self.assertEqual(
             canonical.seed_evidence_event_ids,

@@ -16,10 +16,10 @@ class ProviderRequest:
 
 class ResearchProvider(Protocol):
     async def generate(self, request: ProviderRequest) -> Any:
-        """Return one raw or validated ExperimentSpec, never a list."""
+        """Return one raw or validated code-blind ResearchProposal, never a list."""
 
     async def repair(self, request: ProviderRequest, errors: tuple[str, ...]) -> Any:
-        """Return one corrected ExperimentSpec after a bounded format repair."""
+        """Return one corrected ResearchProposal after a bounded format repair."""
 
 
 class ProviderError(RuntimeError):

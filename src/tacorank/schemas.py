@@ -510,7 +510,14 @@ class LessonCandidate(StrictModel):
         )
 
 
-class ExperimentSpec(StrictModel):
+class ResearchProposal(StrictModel):
+    """Code-blind research recommendation produced by Person 1.
+
+    Repository targets and execution-ladder details are deliberately absent.
+    The deterministic harness binds those implementation details only after the
+    research proposal has passed policy validation.
+    """
+
     schema_version: Literal["1.0"] = SCHEMA_VERSION
     run_id: NonEmptyStr
     experiment_id: NonEmptyStr
@@ -520,14 +527,15 @@ class ExperimentSpec(StrictModel):
     hypothesis: NonEmptyStr
     family: NonEmptyStr
     change_summary: NonEmptyStr
-    target_stage: NonEmptyStr
-    target_files: List[str]
-    fidelity_plan: List[Fidelity]
     expected_mechanism: NonEmptyStr
     success_criteria: NonEmptyStr
     falsification_condition: NonEmptyStr
     estimated_cost: CostEstimate
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
+    # Ensemble proposals retain one canonical Git parent and identify any
+    # additional clean component experiments explicitly.  Non-ensemble plans
+    # leave this empty.
+    component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
     duplicate_key: NonEmptyStr
 
@@ -540,6 +548,22 @@ class ExperimentSpec(StrictModel):
     @classmethod
     def validate_optional_id(cls, value: Optional[str]) -> Optional[str]:
         return None if value is None else _validate_id(value, "parent_experiment_id")
+
+    @field_validator("component_experiment_ids")
+    @classmethod
+    def validate_component_experiment_ids(cls, values: List[str]) -> List[str]:
+        normalized = [_validate_id(value, "component_experiment_id") for value in values]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("component_experiment_ids must be unique")
+        return normalized
+
+
+class ExperimentSpec(ResearchProposal):
+    """Controller-bound implementation assignment consumed by the coder."""
+
+    target_stage: NonEmptyStr
+    target_files: List[str]
+    fidelity_plan: List[Fidelity]
 
     @field_validator("target_files")
     @classmethod
@@ -565,7 +589,7 @@ class ExperimentSpec(StrictModel):
 
 class PlannerOutput(StrictModel):
     action: PlannerAction
-    spec: Optional[ExperimentSpec] = None
+    spec: Optional[Union[ExperimentSpec, ResearchProposal]] = None
     reason_code: NonEmptyStr
     reason: NonEmptyStr
     supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)
@@ -739,6 +763,7 @@ class AdapterFailureResult(StrictModel):
     error_class: NonEmptyStr
     error_fingerprint: str
     error_summary: NonEmptyStr
+    diagnostic_artifacts: List[ArtifactRef] = Field(default_factory=list)
     resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
 
     @field_validator("error_fingerprint")
@@ -952,7 +977,13 @@ class EvaluationResult(StrictModel):
     baseline_delta: float
     parent_delta: Optional[float] = None
     previous_best_delta: Optional[float] = None
+    baseline_metric_deltas: Dict[NonEmptyStr, float] = Field(default_factory=dict)
+    parent_metric_deltas: Dict[NonEmptyStr, float] = Field(default_factory=dict)
+    previous_best_metric_deltas: Dict[NonEmptyStr, float] = Field(
+        default_factory=dict
+    )
     prediction_change: Union[float, PredictionChange]
+    diagnostic_metrics: Dict[NonEmptyStr, float] = Field(default_factory=dict)
     trust: TrustAssessment
     seed_evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
     diagnostics: EvaluationDiagnostics = Field(default_factory=EvaluationDiagnostics)
@@ -982,8 +1013,32 @@ class EvaluationResult(StrictModel):
             raise ValueError("seed_evidence_event_ids must be unique")
         return values
 
+    @field_validator(
+        "baseline_metric_deltas",
+        "parent_metric_deltas",
+        "previous_best_metric_deltas",
+    )
+    @classmethod
+    def validate_metric_delta_names(
+        cls, values: Dict[str, float]
+    ) -> Dict[str, float]:
+        if any(not str(name).strip() for name in values):
+            raise ValueError("metric delta names must not be empty")
+        return values
+
     @model_validator(mode="after")
     def validate_evaluation_route(self) -> "EvaluationResult":
+        expected_metrics = set(self.metric_set.metrics)
+        for field_name in (
+            "baseline_metric_deltas",
+            "parent_metric_deltas",
+            "previous_best_metric_deltas",
+        ):
+            values = getattr(self, field_name)
+            if values and set(values) != expected_metrics:
+                raise ValueError(
+                    "%s must match the evaluated metric schema" % field_name
+                )
         if self.population == Population.PUBLIC_VALIDATION:
             if self.fidelity != Fidelity.FULL or self.public_query_index is None:
                 raise ValueError("public validation requires full fidelity and query index")
@@ -1042,6 +1097,136 @@ class ExperimentDecision(StrictModel):
             raise ValueError("promote decisions require next_fidelity and only promotes may set it")
         if self.best_eligible and self.fidelity_completed != Fidelity.FULL:
             raise ValueError("only full-fidelity decisions can be best eligible")
+        return self
+
+
+class PlannerEdaNumericSummary(StrictModel):
+    """Bounded numeric distribution emitted by the planner EDA toolbox."""
+
+    count: int = Field(gt=0)
+    minimum: float
+    p25: float
+    p50: float
+    p75: float
+    p90: float
+    p95: float
+    p99: float
+    maximum: float
+    mean: float
+
+    @model_validator(mode="after")
+    def validate_quantile_order(self) -> "PlannerEdaNumericSummary":
+        ordered = (
+            self.minimum,
+            self.p25,
+            self.p50,
+            self.p75,
+            self.p90,
+            self.p95,
+            self.p99,
+            self.maximum,
+        )
+        if any(left > right for left, right in zip(ordered, ordered[1:])):
+            raise ValueError("planner EDA numeric quantiles must be ordered")
+        return self
+
+
+class PlannerEdaRateSlice(StrictModel):
+    """One aggregate training-label slice; never an individual data row."""
+
+    value: NonEmptyStr
+    row_count: int = Field(gt=0)
+    positive_count: int = Field(ge=0)
+    positive_rate: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_positive_count(self) -> "PlannerEdaRateSlice":
+        if self.positive_count > self.row_count:
+            raise ValueError("planner EDA positives cannot exceed slice rows")
+        return self
+
+
+class PlannerEdaOverlapSummary(StrictModel):
+    """Distinct score entities seen in the training view."""
+
+    score_distinct_count: int = Field(ge=0)
+    seen_in_train_count: int = Field(ge=0)
+    unseen_in_train_count: int = Field(ge=0)
+    seen_in_train_rate: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_overlap_counts(self) -> "PlannerEdaOverlapSummary":
+        if (
+            self.seen_in_train_count + self.unseen_in_train_count
+            != self.score_distinct_count
+        ):
+            raise ValueError("planner EDA overlap counts must cover score entities")
+        return self
+
+
+class PlannerDataProfile(StrictModel):
+    """Hash-bound aggregate EDA available before a research proposal is made."""
+
+    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    profile_sha256: str
+    source_view: Literal["candidate_full"] = "candidate_full"
+    tool_ids: List[NonEmptyStr]
+    train_file_sha256: str
+    score_file_sha256: str
+    train_columns: List[NonEmptyStr]
+    score_columns: List[NonEmptyStr]
+    train_rows: int = Field(gt=0)
+    score_rows: int = Field(gt=0)
+    train_date_min: int
+    train_date_max: int
+    score_date_min: int
+    score_date_max: int
+    train_positive_count: int = Field(ge=0)
+    train_positive_rate: float = Field(ge=0.0, le=1.0)
+    train_cardinalities: Dict[NonEmptyStr, int]
+    score_cardinalities: Dict[NonEmptyStr, int]
+    train_missing_counts: Dict[NonEmptyStr, int]
+    score_missing_counts: Dict[NonEmptyStr, int]
+    train_duration_ms: PlannerEdaNumericSummary
+    score_duration_ms: PlannerEdaNumericSummary
+    train_interactions_per_entity: Dict[
+        NonEmptyStr, PlannerEdaNumericSummary
+    ]
+    score_entity_overlap: Dict[NonEmptyStr, PlannerEdaOverlapSummary]
+    train_long_view_by_tab: List[PlannerEdaRateSlice]
+    train_long_view_by_date: List[PlannerEdaRateSlice]
+
+    @field_validator("profile_sha256", "train_file_sha256", "score_file_sha256")
+    @classmethod
+    def validate_eda_hashes(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("planner EDA identities must be lowercase sha256")
+        return value
+
+    @field_validator("tool_ids", "train_columns", "score_columns")
+    @classmethod
+    def validate_unique_eda_values(cls, values: List[str]) -> List[str]:
+        if not values or len(values) != len(set(values)):
+            raise ValueError("planner EDA lists must be non-empty and unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_eda_profile(self) -> "PlannerDataProfile":
+        if self.train_positive_count > self.train_rows:
+            raise ValueError("planner EDA positives cannot exceed training rows")
+        if self.train_date_min > self.train_date_max:
+            raise ValueError("planner EDA training date range is invalid")
+        if self.score_date_min > self.score_date_max:
+            raise ValueError("planner EDA score date range is invalid")
+        canonical = json.dumps(
+            self.model_dump(mode="json", exclude={"profile_sha256"}),
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if hashlib.sha256(canonical).hexdigest() != self.profile_sha256:
+            raise ValueError("planner EDA profile hash does not match its contents")
         return self
 
 
@@ -1169,7 +1354,6 @@ class PlannerExperimentSummary(StrictModel):
     stability: Optional[Stability] = None
     integrity: Optional[Integrity] = None
     trust_flags: List[NonEmptyStr] = Field(default_factory=list)
-    diagnostic_metrics: Dict[str, float] = Field(default_factory=dict)
     failure_hypotheses: List[NonEmptyStr] = Field(default_factory=list)
     diagnostic_limitations: List[NonEmptyStr] = Field(default_factory=list)
     diagnostic_best_slice: Optional[str] = None
@@ -1190,6 +1374,7 @@ class PlannerExperimentSummary(StrictModel):
     prediction_spearman_vs_parent: Optional[float] = Field(
         default=None, ge=-1.0, le=1.0
     )
+    diagnostic_metrics: Dict[NonEmptyStr, float] = Field(default_factory=dict)
     child_count: int = Field(default=0, ge=0)
     actual_cost: Optional[CostTier] = None
     parent_eligible: bool = False
@@ -1197,6 +1382,7 @@ class PlannerExperimentSummary(StrictModel):
     status: NonEmptyStr
     duplicate_key: str = ""
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
+    component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)
 
 
@@ -1229,20 +1415,35 @@ class PlannerContext(ContextDocument):
     # This collection is authoritative. An empty list means there is no legal
     # parent; consumers must not reconstruct eligibility from history.
     eligible_frontier: List[PlannerExperimentSummary] = Field(default_factory=list)
+    # These are authoritative non-checkpoint portfolios. They do not alter
+    # parent_eligible/best_eligible and are consumed only by the matching
+    # bounded refinement or ensemble policy.
+    refinement_frontier_ids: List[NonEmptyStr] = Field(default_factory=list)
+    ensemble_candidate_ids: List[NonEmptyStr] = Field(default_factory=list)
     family_history: List[PlannerExperimentSummary] = Field(default_factory=list)
     method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
     playbook: PlannerPlaybookSummary
-    target_interface_excerpts: Dict[str, NonEmptyStr]
+    # Retained as an empty, backward-compatible field so historical schema-v1
+    # ledgers still replay. New planner contexts never carry implementation
+    # interfaces; those belong exclusively to the coder boundary.
+    target_interface_excerpts: Dict[str, NonEmptyStr] = Field(default_factory=dict)
+    data_profile: Optional[PlannerDataProfile] = None
     remaining_budget: PlannerBudgetSummary
     convergence: PlannerConvergenceSummary
+
+    @field_validator("refinement_frontier_ids", "ensemble_candidate_ids")
+    @classmethod
+    def validate_search_portfolio_ids(cls, values: List[str]) -> List[str]:
+        normalized = [_validate_id(value, "experiment_id") for value in values]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("planner search portfolio IDs must be unique")
+        return normalized
 
     @field_validator("target_interface_excerpts")
     @classmethod
     def validate_planner_target_interfaces(
         cls, values: Dict[str, str]
     ) -> Dict[str, str]:
-        if not values:
-            raise ValueError("planner target interfaces must not be empty")
         normalized: Dict[str, str] = {}
         for path, excerpt in values.items():
             target = normalize_relative_path(path)
