@@ -39,6 +39,12 @@ const formatDuration = (value: number | null) => {
     : `${minutes}m ${String(remainder).padStart(2, '0')}s`;
 };
 const elapsedSince = (value: string | null | undefined, now: number) => value ? Math.max(0, (now - new Date(value).getTime()) / 1000) : null;
+const parentExperimentId = (plan?: Json) => typeof plan?.parent_experiment_id === 'string' && plan.parent_experiment_id ? plan.parent_experiment_id : null;
+const lineageLabel = (plan?: Json) => {
+  const parent = parentExperimentId(plan);
+  if (!parent) return 'Parent not recorded';
+  return parent === 'baseline' ? 'Starts from baseline' : `Continues from ${parent}`;
+};
 
 const PROGRESS_STEPS = ['Plan', 'Trae coding', 'Gate A', 'Execute', 'Gate B', 'Evaluate', 'Decide', 'Finalize'];
 function progressIndex(phase: string, lastEventType: string | null, failureStage?: string): number {
@@ -74,6 +80,8 @@ function Plan({ plan }: { plan?: Json }) {
   return <div className="detail-stack">
     <div className="callout"><span>Hypothesis</span><p>{text(plan.hypothesis)}</p></div>
     <dl className="detail-list">
+      <div><dt>Lineage</dt><dd>{lineageLabel(plan)}</dd></div>
+      <div><dt>Research direction</dt><dd>{humanize(text(plan.family, 'unclassified'))}</dd></div>
       <div><dt>Change</dt><dd>{text(plan.change_summary)}</dd></div>
       <div><dt>Mechanism</dt><dd>{text(plan.expected_mechanism)}</dd></div>
       <div><dt>Success criteria</dt><dd>{text(plan.success_criteria)}</dd></div>
@@ -186,6 +194,7 @@ export default function Home() {
   const delta = current?.best_primary_score != null && current.baseline_primary_score != null ? current.best_primary_score - current.baseline_primary_score : null;
   const latestIteration = selectedDetail?.iterations.at(-1)?.experiment_id;
   const currentIteration = selectedDetail?.iterations.find((iteration) => iteration.experiment_id === current?.current_experiment_id) ?? selectedDetail?.iterations.at(-1);
+  const currentParent = parentExperimentId(currentIteration?.plan);
   const currentTiming = object(currentIteration?.timing);
   const terminalLoopTime = typeof currentTiming.loop_time_seconds === 'number' ? currentTiming.loop_time_seconds : null;
   const clockAnchor = current && !current.is_live && current.updated_at ? new Date(current.updated_at).getTime() : now;
@@ -219,7 +228,7 @@ export default function Home() {
         {current.launch_error && <div className="launch-error" role="alert"><strong>Setup failed before the ledger started.</strong><span>{current.launch_error}</span></div>}
         <section className="runtime-panel" aria-label="Current iteration runtime and progress">
           <div className="runtime-grid">
-            <article><span>Current experiment</span><strong>{current.current_experiment_id ?? (current.source === 'launch' ? 'Preparing run' : 'Between iterations')}</strong><small>{current.current_attempt ? `Attempt ${current.current_attempt}` : current.source === 'launch' ? 'Setup and preflight' : 'No active attempt'}{current.current_fidelity ? ` · ${humanize(current.current_fidelity)}` : ''}</small></article>
+            <article><span>Current experiment</span><strong>{current.current_experiment_id ?? (current.source === 'launch' ? 'Preparing run' : 'Between iterations')}</strong><small>{current.current_attempt ? `Attempt ${current.current_attempt}` : current.source === 'launch' ? 'Setup and preflight' : 'No active attempt'}{current.current_fidelity ? ` · ${humanize(current.current_fidelity)}` : ''}</small>{currentIteration?.plan && <small className={`runtime-lineage ${currentParent === 'baseline' ? 'baseline' : 'continuation'}`}>{lineageLabel(currentIteration.plan)}</small>}</article>
             <article><span>Iteration runtime</span><strong>{formatDuration(iterationElapsed)}</strong><small>{terminalLoopTime !== null ? 'Exact proposal-to-terminal' : current.source === 'launch' ? 'Waiting for first proposal' : current.is_live ? 'Live since proposal' : 'Frozen at last durable event'}</small></article>
             <article><span>Phase runtime</span><strong>{formatDuration(stageElapsed)}</strong><small>{current.is_live ? `Started ${formatTime(current.stage_started_at)}` : `Frozen at ${formatTime(current.updated_at)}`}</small></article>
             <article><span>Stage timeout</span><strong>{current.configured_timeout_seconds === null ? 'Not configured' : formatDuration(current.configured_timeout_seconds)}</strong><small>{current.status === 'interrupted' ? `Deadline passed ${formatTime(current.estimated_deadline)}` : deadlineDelta === null ? 'No stage deadline' : deadlineDelta >= 0 ? `${formatDuration(deadlineDelta)} remaining` : `${formatDuration(Math.abs(deadlineDelta))} overdue`}</small></article>
@@ -235,8 +244,9 @@ export default function Home() {
           {selectedDetail?.iterations.map((iteration, index) => {
             const metricSet = object(object(iteration.evaluation).metric_set); const decision = object(iteration.decision);
             const timing = object(iteration.timing);
+            const parent = parentExperimentId(iteration.plan);
             const loopTime = typeof timing.loop_time_seconds === 'number' ? timing.loop_time_seconds : elapsedSince(typeof timing.proposed_at === 'string' ? timing.proposed_at : null, clockAnchor);
-            return <details className="iteration-card" key={iteration.experiment_id} open={iteration.experiment_id === latestIteration}><summary><span className="iteration-index">{String(index + 1).padStart(2, '0')}</span><span><strong>{iteration.experiment_id}</strong><small>{text(iteration.plan?.family, 'Unclassified')} · {humanize(text(decision.decision, 'in progress'))}</small></span><span className="iteration-metrics"><span><small>Loop time</small><b>{formatDuration(loopTime)}</b></span><span><small>Score</small><b>{typeof metricSet.primary_score === 'number' ? metricSet.primary_score.toFixed(6) : '—'}</b></span></span><span className="summary-chevron">⌄</span></summary>
+            return <details className="iteration-card" key={iteration.experiment_id} open={iteration.experiment_id === latestIteration}><summary><span className="iteration-index">{String(index + 1).padStart(2, '0')}</span><span><strong>{iteration.experiment_id}</strong><small>{text(iteration.plan?.family, 'Unclassified')} · {humanize(text(decision.decision, 'in progress'))}</small>{iteration.plan && <span className={`iteration-lineage ${parent === 'baseline' ? 'baseline' : 'continuation'}`}>{parent === 'baseline' ? 'Root · baseline' : `↳ Continues from ${parent ?? 'unknown parent'}`}</span>}</span><span className="iteration-metrics"><span><small>Loop time</small><b>{formatDuration(loopTime)}</b></span><span><small>Score</small><b>{typeof metricSet.primary_score === 'number' ? metricSet.primary_score.toFixed(6) : '—'}</b></span></span><span className="summary-chevron">⌄</span></summary>
               <div className="iteration-body"><section className="iteration-section timing-section"><div className="subheading"><span>00</span><h3>Timing</h3></div><div className="timing-breakdown"><div><span>Proposal → terminal</span><strong>{formatDuration(loopTime)}</strong><small>{timing.terminal_at ? 'Exact terminal duration' : current.is_live ? 'Live' : 'Frozen at last durable event'}</small></div><div><span>Trae coding</span><strong>{formatDuration(typeof timing.trae_coding_time_seconds === 'number' ? timing.trae_coding_time_seconds : null)}</strong></div><div><span>Execution</span><strong>{formatDuration(typeof timing.execution_time_seconds === 'number' ? timing.execution_time_seconds : null)}</strong></div><div><span>Recovery</span><strong>{formatDuration(typeof timing.recovery_time_seconds === 'number' ? timing.recovery_time_seconds : null)}</strong></div></div></section><section className="iteration-section"><div className="subheading"><span>01</span><h3>Plan</h3></div><Plan plan={iteration.plan} /></section><section className="iteration-section"><div className="subheading"><span>02</span><h3>Memory & context</h3></div><JsonView value={{ contexts: iteration.contexts ?? [], lessons: iteration.lessons ?? [] }} empty="No iteration memory recorded." /></section><section className="iteration-section"><div className="subheading"><span>03</span><h3>Current implementation</h3></div><Implementation value={iteration.implementation} /></section><section className="iteration-section"><div className="subheading"><span>04</span><h3>Execution & evaluation</h3></div><div className="evidence-grid"><div><h4>Gate A</h4><JsonView value={iteration.gate_a} /></div><div><h4>Execution</h4><JsonView value={iteration.execution_result ?? iteration.execution_request} /></div><div><h4>Gate B</h4><JsonView value={iteration.gate_b} /></div><div><h4>Evaluation</h4><JsonView value={iteration.evaluation} /></div></div></section>
               {(iteration.failures?.length || iteration.recoveries?.length) ? <section className="iteration-section warning-section"><div className="subheading"><span>!</span><h3>Failures & bounded recovery</h3></div><JsonView value={{ failures: iteration.failures ?? [], recoveries: iteration.recoveries ?? [] }} /></section> : null}<details className="raw-evidence"><summary>Raw ledger evidence ({iteration.events?.length ?? 0} events)</summary><JsonView value={iteration.events} /></details></div></details>;
           })}
