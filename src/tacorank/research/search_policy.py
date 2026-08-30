@@ -193,7 +193,20 @@ def _method_for_family(
         # soft-portfolio route. Generic depth-first proposals have no such
         # component contract and must not select it.
         eligible.pop("ensemble_diverse_residual_candidate", None)
-    attempted = {
+    attempted = _attempted_methods_for_parent(context, parent_experiment_id)
+    if preferred is not None:
+        return None if preferred in attempted else eligible.get(preferred)
+    for method_id in _method_order(context, family):
+        if method_id in eligible and method_id not in attempted:
+            return eligible[method_id]
+    remaining = sorted(set(eligible) - attempted)
+    return eligible[remaining[0]] if remaining else None
+
+
+def _attempted_methods_for_parent(
+    context: Any, parent_experiment_id: str | None
+) -> set[str]:
+    return {
         method_id
         for summary in as_list(get_value(context, "family_history", None))
         if parent_experiment_id is not None
@@ -203,13 +216,6 @@ def _method_for_family(
             str, as_list(get_value(summary, "method_card_ids", None))
         )
     }
-    if preferred is not None:
-        return None if preferred in attempted else eligible.get(preferred)
-    for method_id in _method_order(context, family):
-        if method_id in eligible and method_id not in attempted:
-            return eligible[method_id]
-    remaining = sorted(set(eligible) - attempted)
-    return eligible[remaining[0]] if remaining else None
 
 
 def _cost_tier(value: Any) -> str:
@@ -258,6 +264,78 @@ def _best_parent(eligible: Sequence[ExperimentNodeView]) -> ExperimentNodeView:
         eligible,
         key=lambda node: (-_score(node), node.child_count, node.experiment_id),
     )[0]
+
+
+def _best_experimental_parent(
+    eligible: Sequence[ExperimentNodeView],
+) -> ExperimentNodeView:
+    """Choose the strongest measured research node before baseline fallback."""
+
+    experimental = [
+        node
+        for node in eligible
+        if not node.is_root and node.primary_score is not None
+    ]
+    return _best_parent(experimental or eligible)
+
+
+def _same_family_refinement_choice(
+    context: Any,
+    parent: ExperimentNodeView,
+    allowed: tuple[str, ...],
+) -> PolicyChoice | None:
+    """Try one legal refinement of the strongest experimental mechanism."""
+
+    family = str(parent.family or "")
+    if not family or family not in allowed:
+        return None
+    eligible = {
+        str(get_value(card, "method_id", "")): card
+        for card in eligible_method_cards(context, family)
+    }
+    if family == "ensemble":
+        eligible.pop("ensemble_diverse_residual_candidate", None)
+    attempted = _attempted_methods_for_parent(context, parent.experiment_id)
+    parent_methods = set(parent.method_card_ids)
+    ordered = list(_method_order(context, family))
+    ordered.extend(sorted(set(eligible) - set(ordered)))
+
+    # Prefer a distinct method within the same mechanism family. If the family
+    # exposes only one method card, permit one materially different child from
+    # that parent; duplicate-plan validation still rejects an identical plan.
+    method_id = next(
+        (
+            item
+            for item in ordered
+            if item in eligible
+            and item not in attempted
+            and item not in parent_methods
+        ),
+        None,
+    )
+    if method_id is None:
+        method_id = next(
+            (
+                item
+                for item in ordered
+                if item in eligible and item not in attempted
+            ),
+            None,
+        )
+    if method_id is None:
+        return None
+    return _proposal(
+        parent=parent,
+        family=family,
+        card=eligible[method_id],
+        phase="playbook",
+        reason_code="SCORE_GUIDED_SAME_FAMILY_REFINEMENT",
+        reason=(
+            "Predictions changed without a trusted gain; refine the strongest "
+            "eligible experimental path %s within family %s before introducing "
+            "an unrelated mechanism." % (parent.experiment_id, family)
+        ),
+    )
 
 
 def _depth_first_frontier(
@@ -330,7 +408,7 @@ def _independent_choices(
     """Return every legal independent-family action in deterministic order."""
 
     tried = set(_family_history(context))
-    parent = preferred_parent or _best_parent(eligible)
+    parent = preferred_parent or _best_experimental_parent(eligible)
     ordered = [
         family
         for family in _family_order(context)
@@ -796,28 +874,30 @@ def _playbook_choice(
             and prediction_change is not None
             and prediction_change > no_op_threshold
         ):
-            exploration_parent = _latest_parent(latest, eligible)
-            preferred = (
-                "temporal_history_compact" if is_pairwise else None
+            exploration_parent = _best_experimental_parent(eligible)
+            refinement = _same_family_refinement_choice(
+                context,
+                exploration_parent,
+                allowed,
             )
-            if preferred and "temporal_history" in allowed:
-                return _required_method_choice(
-                    context,
-                    exploration_parent,
-                    "temporal_history",
-                    preferred,
-                    reason_code="MEANINGFUL_CHANGE_NO_GAIN",
-                    reason="Predictions changed without trusted gain; move to compact temporal history.",
-                )
+            if refinement is not None:
+                return refinement
+            exploration_family = str(exploration_parent.family or family)
             return _next_independent_choice(
                 context,
                 eligible,
                 allowed,
-                family,
+                exploration_family,
                 reason_code="MEANINGFUL_CHANGE_NO_GAIN",
-                reason="Predictions changed without trusted gain; move to the next independent mechanism.",
+                reason=(
+                    "The strongest eligible experimental path has no remaining "
+                    "same-family refinement; move to the next independent mechanism."
+                ),
                 preferred_parent=exploration_parent,
-            ) or _blocked("NO_ELIGIBLE_METHOD", "No independent eligible method remains.")
+            ) or _blocked(
+                "NO_ELIGIBLE_METHOD",
+                "No independent eligible method remains.",
+            )
         if (
             rule == "trusted_improvement"
             and parent_delta is not None

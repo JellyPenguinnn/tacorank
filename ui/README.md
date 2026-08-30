@@ -4,6 +4,8 @@ Local repository-backed dashboard for starting and inspecting TacoRank runs.
 It lists every ledger under `runs/`, opens the latest run by default, refreshes
 every five seconds, and shows each iteration's plan, memory/context, patch,
 Gate A, execution, Gate B, evaluation, recovery, and raw ledger evidence. The
+current experiment and iteration cards show whether the proposal starts from
+the baseline or continues from a named parent experiment. The
 current-run panel updates elapsed stage/iteration time and last-event age every
 second from ledger timestamp anchors, and shows the active attempt, fidelity,
 timeout, deadline, and loop step. A dashboard launch appears immediately with
