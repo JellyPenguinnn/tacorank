@@ -518,6 +518,8 @@ def test_real_adapter_seals_patch_and_redacted_evidence(
     assert trajectory["tacorank_adapter"]["isolation_mode"] == "trusted_test"
     assert trajectory["fake_environment"]["PYTHON_DOTENV_DISABLED"] == "1"
     assert trajectory["fake_environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert trajectory["fake_environment"]["PYTHONUTF8"] == "1"
+    assert trajectory["fake_environment"]["PYTHONIOENCODING"] == "utf-8"
     assert trajectory["fake_environment"]["HOME"] != "/sensitive-real-home"
     assert trajectory["fake_environment"]["HOME"].endswith("/home")
     assert trajectory["fake_environment"]["TMPDIR"].endswith("/tmp")
@@ -1329,3 +1331,20 @@ def test_production_sanitized_path_uses_host_separator(
         assert path_entries[1:] == os.environ.get("PATH", "").split(os.pathsep)
     else:
         assert path_entries[1:] == ["/usr/bin", "/bin"]
+
+
+def test_sanitized_environment_forces_utf8_console(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    environment = _worker(adapter_parts)._sanitized_environment()
+
+    assert environment["PYTHONUTF8"] == "1"
+    assert environment["PYTHONIOENCODING"] == "utf-8"
+    result = subprocess.run(
+        (sys.executable, "-c", "print('\\u2705')"),
+        check=True,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert result.stdout.decode("utf-8").strip() == "\u2705"

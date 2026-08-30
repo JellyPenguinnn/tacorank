@@ -493,6 +493,7 @@ Production never falls back to fake adapters. Deterministic fakes remain behind 
 | Python 3.12 or Docker cannot be found | Pass absolute executable paths with `setup-live --python312 ... --docker ...`. |
 | Docker preflight cannot reach the daemon | Start Docker Desktop or the configured compatible daemon, then rerun `preflight`. |
 | Trae reports `pexpect` has no `spawn` | The deployment predates the cross-platform Docker bridge. Preserve its evidence, update TacoRank, and create a fresh `setup-live` deployment and run ID. |
+| Trae exits with a Windows `UnicodeEncodeError` for a status glyph | Update TacoRank to a revision that forces UTF-8 for the isolated Trae subprocess, commit the tracked change, and create a fresh deployment and run ID. Do not reuse the finalized or hash-bound deployment. |
 | DeepSeek authentication or model preflight fails | Export a valid `DEEPSEEK_API_KEY` in the current shell; never place it in a tracked file. |
 | The run identifier already has a ledger | Choose a new `--run-id` in `setup-live`; completed ledgers are immutable and are not reused for new runs. |
 | `resume` rejects the current phase | The last durable state is mid-adapter and ambiguous. Preserve the ledger and evidence for operator review instead of fabricating a result. |

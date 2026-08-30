@@ -2935,6 +2935,12 @@ class TraeCodingWorker:
         environment["LC_ALL"] = "C.UTF-8"
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PYTHONUNBUFFERED"] = "1"
+        # Trae's Rich console emits Unicode status glyphs.  The host process is
+        # captured through a pipe, so native Windows otherwise falls back to
+        # the legacy ANSI code page and can crash before the first tool call.
+        # These settings are deterministic and are also safe on macOS/Linux.
+        environment["PYTHONUTF8"] = "1"
+        environment["PYTHONIOENCODING"] = "utf-8"
         environment["PYTHON_DOTENV_DISABLED"] = "1"
         environment["GIT_TERMINAL_PROMPT"] = "0"
         if os.name == "nt":

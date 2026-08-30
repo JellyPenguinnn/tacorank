@@ -102,7 +102,10 @@ path works through Docker Desktop's Windows named pipe and macOS/Linux Unix
 socket, always starts commands in `/workspace`, converts host paths to POSIX
 container paths, and applies an in-container timeout. Runtime identity checks
 require this patch, while preflight verifies the timeout utility and read-only
-tool mount before any research ledger is created.
+tool mount before any research ledger is created. The isolated host-side Trae
+process also forces Python UTF-8 mode and UTF-8 standard streams, preventing
+Windows legacy code pages from crashing on Rich status glyphs while preserving
+the same deterministic environment on macOS and Linux.
 
 Resource failures are typed and fail closed. OOM and hard memory-limit signals may use an allowlisted runtime adjustment; disk-full, `ENOSPC`, output-quota, and storage-floor signals abandon the experiment without retrying or asking the coding worker to make an unrelated patch. The controller records the stable reason code and an operational lesson, so an operator can reclaim space or choose a fresh runtime before resuming. Evidence and prior run directories are never deleted automatically.
 

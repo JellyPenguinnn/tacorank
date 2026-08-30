@@ -396,6 +396,7 @@ Use the exact immutable configurations generated for that run:
 | Candidate fails plan-to-code verification | Inspect `solution_verification.json` and its per-pass trajectory/process artifacts. Do not bypass the verifier; its internal loop is capped at five. |
 | Candidate fails Gate A or Gate B | Follow typed bounded recovery; never weaken a gate to admit the candidate. |
 | Trae reports malformed or truncated tool JSON | Preserve the `adapter.failed` evidence. The pinned client first requests a smaller valid call in-loop. If a failure remains, follow Waihong's bounded self-recovery classification and its same-commit retry, abandon, or stop decision; do not hand-edit the worktree or ledger. |
+| Trae reports a Windows `UnicodeEncodeError` for a status glyph | The isolated Trae process must force Python UTF-8 mode and UTF-8 standard streams. Update and commit the compatibility fix, then create a new hash-bound deployment and run ID; do not reuse the failed deployment. |
 | Proxy/full score regresses | Let the deterministic controller prune/reject and continue with the legal search policy. |
 | `fatal_integrity` or final `failed` | Stop, preserve evidence, identify the violated invariant, and do not call the run successful. |
 
