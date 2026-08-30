@@ -30,6 +30,15 @@ export type RunSummary = {
   stop_reason_code: string | null;
   final_experiment_id: string | null;
   event_count: number;
+  current_experiment_id: string | null;
+  current_attempt: number | null;
+  current_fidelity: string | null;
+  stage_started_at: string | null;
+  configured_timeout_seconds: number | null;
+  estimated_deadline: string | null;
+  last_event_id: string | null;
+  last_event_type: string | null;
+  last_event_at: string | null;
 };
 
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -101,20 +110,44 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
   let baselineScore: number | null = null;
   let stopReason: string | null = null;
   let finalId: string | null = null;
+  let activeExperiment: string | null = null;
+  let activeAttempt: number | null = null;
+  let activeFidelity: string | null = null;
+  let stageStartedAt: string | null = null;
+  let coderTimeout: number | null = null;
+  let executionTimeout: number | null = null;
 
   for (const event of events) {
     const payload = record(event.payload);
+    const previousPhase = phase;
     switch (event.event_type) {
       case 'run.started': phase = 'contract_verification'; break;
       case 'contract.verified': phase = 'baseline'; break;
       case 'baseline.verified':
         status = 'ready'; phase = 'planning'; baselineScore = metricScore(payload);
         bestId = text(payload.experiment_id) ?? 'baseline'; bestScore = baselineScore; break;
-      case 'context.created': phase = `${text(nested(payload, 'context').role) ?? 'planner'}_context`; break;
-      case 'experiment.proposed': status = 'running'; phase = 'coding'; proposed += 1; break;
-      case 'patch.created': phase = 'patch_gate'; break;
+      case 'context.created': {
+        const context = nested(payload, 'context');
+        phase = `${text(context.role) ?? 'planner'}_context`;
+        if (context.role === 'coder') coderTimeout = number(context.wall_time_limit_seconds);
+        break;
+      }
+      case 'experiment.proposed': {
+        const spec = nested(payload, 'spec');
+        status = 'running'; phase = 'coding'; proposed += 1;
+        activeExperiment = text(spec.experiment_id); activeAttempt = 1; activeFidelity = null;
+        break;
+      }
+      case 'patch.created': {
+        const candidate = nested(payload, 'candidate');
+        phase = 'patch_gate'; activeAttempt = number(candidate.attempt); break;
+      }
       case 'patch.checked': phase = nested(payload, 'result').accepted === false ? 'recovery' : 'execution'; break;
-      case 'execution.started': phase = 'running'; break;
+      case 'execution.started': {
+        const request = nested(payload, 'request');
+        phase = 'running'; activeAttempt = number(request.attempt);
+        activeFidelity = text(request.fidelity); executionTimeout = number(request.timeout_seconds); break;
+      }
       case 'execution.finished': phase = text(nested(payload, 'result').outcome) === 'success' ? 'output_gate' : 'recovery'; break;
       case 'adapter.failed': phase = 'recovery'; break;
       case 'recovery.decided': phase = 'recovery'; break;
@@ -122,12 +155,20 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
       case 'evaluation.completed': phase = 'decision'; break;
       case 'experiment.decided': phase = 'planning'; break;
       case 'best.updated': bestId = text(payload.experiment_id); bestScore = number(payload.primary_score); break;
-      case 'run.stopped': status = 'stopped'; phase = 'stopped'; stopReason = text(payload.reason_code); break;
+      case 'run.stopped':
+        status = 'stopped'; phase = 'stopped'; stopReason = text(payload.reason_code);
+        activeExperiment = null; activeAttempt = null; activeFidelity = null; break;
       case 'final.selected': status = 'finalizing'; phase = 'submission'; finalId = text(payload.experiment_id); break;
       case 'submission.checked':
         status = payload.accepted === true ? 'finalized' : 'failed'; phase = status; break;
     }
+    if (phase !== previousPhase) stageStartedAt = event.timestamp ?? null;
   }
+  const timeout = phase === 'coder_context' ? coderTimeout : phase === 'running' ? executionTimeout : null;
+  const deadline = timeout !== null && stageStartedAt
+    ? new Date(new Date(stageStartedAt).getTime() + timeout * 1000).toISOString()
+    : null;
+  const lastEvent = events.at(-1);
   return {
     run_id: runId,
     status,
@@ -141,6 +182,65 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
     stop_reason_code: stopReason,
     final_experiment_id: finalId,
     event_count: events.length,
+    current_experiment_id: activeExperiment,
+    current_attempt: activeAttempt,
+    current_fidelity: activeFidelity,
+    stage_started_at: stageStartedAt,
+    configured_timeout_seconds: timeout,
+    estimated_deadline: deadline,
+    last_event_id: lastEvent?.event_id ?? null,
+    last_event_type: lastEvent?.event_type ?? null,
+    last_event_at: lastEvent?.timestamp ?? null,
+  };
+}
+
+function durationSeconds(start?: string, finish?: string): number | null {
+  if (!start || !finish) return null;
+  return Math.max(0, (new Date(finish).getTime() - new Date(start).getTime()) / 1000);
+}
+
+function experimentTiming(events: LedgerEvent[]): JsonRecord {
+  const proposal = events.find((event) => event.event_type === 'experiment.proposed');
+  const terminal = events.find((event) => {
+    const payload = record(event.payload);
+    if (event.event_type === 'experiment.decided') return text(nested(payload, 'decision').decision) !== 'promote';
+    if (event.event_type === 'recovery.decided') return ['abandon', 'rollback'].includes(text(nested(payload, 'decision').action) ?? '');
+    return false;
+  });
+  let codingStart: LedgerEvent | undefined;
+  let executionStart: LedgerEvent | undefined;
+  let codingSeconds = 0;
+  let executionSeconds = 0;
+  let recoverySeconds = 0;
+  const byId = new Map(events.map((event) => [event.event_id, event]));
+  for (const event of events) {
+    const payload = record(event.payload);
+    if (event.event_type === 'context.created' && nested(payload, 'context').role === 'coder') codingStart = event;
+    else if (event.event_type === 'recovery.decided' && nested(payload, 'decision').action === 'trae_repair') codingStart = event;
+    else if (event.event_type === 'patch.created' && codingStart) {
+      codingSeconds += durationSeconds(codingStart.timestamp, event.timestamp) ?? 0; codingStart = undefined;
+    } else if (event.event_type === 'adapter.failed' && nested(payload, 'result').failure_stage === 'coding' && codingStart) {
+      codingSeconds += durationSeconds(codingStart.timestamp, event.timestamp) ?? 0; codingStart = undefined;
+    }
+    if (event.event_type === 'execution.started') executionStart = event;
+    else if (event.event_type === 'execution.finished' && executionStart) {
+      executionSeconds += durationSeconds(executionStart.timestamp, event.timestamp) ?? 0; executionStart = undefined;
+    } else if (event.event_type === 'adapter.failed' && nested(payload, 'result').failure_stage === 'execution' && executionStart) {
+      executionSeconds += durationSeconds(executionStart.timestamp, event.timestamp) ?? 0; executionStart = undefined;
+    }
+    if (event.event_type === 'recovery.decided') {
+      const failure = byId.get(text(nested(payload, 'decision').failure_event_id) ?? undefined);
+      if (failure) recoverySeconds += durationSeconds(failure.timestamp, event.timestamp) ?? 0;
+    }
+  }
+  return {
+    proposed_at: proposal?.timestamp ?? null,
+    terminal_at: terminal?.timestamp ?? null,
+    terminal_event_id: terminal?.event_id ?? null,
+    loop_time_seconds: durationSeconds(proposal?.timestamp, terminal?.timestamp),
+    trae_coding_time_seconds: codingSeconds,
+    execution_time_seconds: executionSeconds,
+    recovery_time_seconds: recoverySeconds,
   };
 }
 
@@ -236,6 +336,7 @@ export async function runDetail(runId: string): Promise<JsonRecord> {
       const sourceIds = record(lesson.candidate).source_event_ids;
       return Array.isArray(sourceIds) && sourceIds.some((sourceId) => typeof sourceId === 'string' && eventIds.has(sourceId));
     });
+    item.timing = experimentTiming(item.events as LedgerEvent[]);
   }
 
   return {

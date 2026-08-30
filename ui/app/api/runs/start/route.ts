@@ -9,10 +9,24 @@ import { repositoryRoot } from '@/lib/run-store';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function POST() {
+const MAX_API_KEY_LENGTH = 4096;
+
+export async function POST(request: Request) {
   const root = repositoryRoot();
-  if (!process.env.DEEPSEEK_API_KEY) {
-    return NextResponse.json({ error: 'DEEPSEEK_API_KEY is not available to the dashboard process.' }, { status: 412 });
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'Enter a DeepSeek API key to start the run.' }, { status: 400 });
+  }
+  const apiKey = body && typeof body === 'object' && 'api_key' in body && typeof body.api_key === 'string'
+    ? body.api_key.trim()
+    : '';
+  if (!apiKey) {
+    return NextResponse.json({ error: 'Enter a DeepSeek API key to start the run.' }, { status: 400 });
+  }
+  if (apiKey.length > MAX_API_KEY_LENGTH || apiKey.includes('\0') || apiKey.includes('\n') || apiKey.includes('\r')) {
+    return NextResponse.json({ error: 'The DeepSeek API key is invalid.' }, { status: 400 });
   }
   const lock = path.join(root, '.tacorank', 'live-run.lock');
   try {
@@ -34,7 +48,7 @@ export async function POST() {
       child = spawn(script, [], {
         cwd: root,
         detached: true,
-        env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+        env: { ...process.env, DEEPSEEK_API_KEY: apiKey, PYTHONDONTWRITEBYTECODE: '1' },
         shell: false,
         stdio: ['ignore', log, log],
       });
