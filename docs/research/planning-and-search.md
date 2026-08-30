@@ -32,13 +32,15 @@ become positive research rewards or parent nodes.
 
 ## Search policy
 
-The core policy is deterministic AIDE-style portfolio search:
+The core policy is deterministic, score-guided AIDE-style depth-first search:
 
-- breadth first probes untried high-value families in this order: objective,
-  temporal history, multitask, duration bias, temporal features, and model;
-- depth then retains at most three trusted frontier nodes, preferring higher
-  trusted primary score, fewer children, family diversity, and stable ID
-  tie-breaking;
+- rank at most three trusted frontier nodes by higher trusted primary score,
+  deeper lineage, and stable newest-ID tie-breaking;
+- continue from the best-ranked branch while it has a legal untried method,
+  and backtrack to the next trusted branch only when that branch is exhausted;
+- do not require every research family to be probed from the baseline before
+  deepening a better branch; family order remains a deterministic tie-break for
+  legal methods on the selected parent;
 - only baseline roots with a verified decision and non-root experiments with a
   trusted full-fidelity result may be normal branch parents; a soft node can be
   used only as the base of its one authorized refinement;

@@ -5,6 +5,8 @@
 **Primary task:** within-user ranking of `long_view`
 **Primary score:** contract-defined mean of GAUC and nDCG@5
 **Core rule:** one experiment changes one research mechanism.
+**Traversal:** score-guided depth-first search; deepen the best trusted branch
+before backtracking, rather than probing every research family from baseline.
 
 ```json
 {
@@ -153,8 +155,11 @@ Recommended cohorts:
 ## 4. Direction priority for this run
 
 The default order is expected-value per unit cost, not an instruction to try
-every item. Skip any direction whose prerequisites fail or whose estimated
-cost does not fit the remaining budget.
+every item. Once a direction creates the best trusted parent, continue research
+from that branch until its legal methods are exhausted or verified evidence
+falsifies it. Only then backtrack to the next trusted branch or independent
+direction. Skip any direction whose prerequisites fail or whose estimated cost
+does not fit the remaining budget.
 
 ### Direction 0 — baseline and evaluator parity
 
