@@ -65,6 +65,31 @@ DEFAULT_TARGET_INTERFACE_EXCERPTS = {
     ),
 }
 
+PRODUCTION_TARGET_INTERFACE_EXCERPTS = {
+    **DEFAULT_TARGET_INTERFACE_EXCERPTS,
+    "solution/candidate.py": (
+        "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
+        "-> None; this is the stable production entrypoint and must remain wired "
+        "to every approved helper edited by the experiment. Read only "
+        "invocation.input_root and write exactly invocation.output_path as "
+        "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
+        "invocation.seed; return None. train.csv columns are exactly "
+        "date,user_id,video_id,author_id,tab,duration_ms,long_view; score.csv "
+        "columns are exactly row_id,date,user_id,video_id,author_id,tab,duration_ms "
+        "and never expose long_view. fm_baseline_predictions.csv contains the "
+        "setup-verified official FM score aligned one-to-one with score.csv; its "
+        ".sha256 file authenticates it. These are unconstrained real-valued "
+        "ranking scores, not probabilities. Never sigmoid, clip to [0,1], "
+        "normalize, or rescale the FM parent or the parent-plus-residual result. "
+        "Bound only the residual on the parent's original score scale and preserve "
+        "the exact parent when no supported residual is available. duration_ms is "
+        "video duration, never watch time. Training dates strictly precede score "
+        "dates. Preserve contiguous row_id order, duplicate rows, finite "
+        "deterministic scores, and exclusive output creation. Use all training rows "
+        "or an explicit deterministic representative sample."
+    ),
+}
+
 
 class RunConfig(StrictModel):
     schema_version: Literal["1.0"] = "1.0"

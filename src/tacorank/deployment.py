@@ -26,7 +26,7 @@ from .coding import (
     TRAE_DOCKER_EDIT_TOOL_MARKER,
     hash_trae_runtime_package,
 )
-from .config import DEFAULT_TARGET_INTERFACE_EXCERPTS
+from .config import PRODUCTION_TARGET_INTERFACE_EXCERPTS
 from .docker_host import normalize_local_docker_host
 from .evaluation.proxy import split_validation_indices
 
@@ -95,30 +95,8 @@ def setup_trae_deployment(
             "candidate_proxy",
             "candidate_full",
         ],
-        "target_interface_excerpts": {
-            "candidate": (
-                "def run(invocation: PipelineInvocation) -> None; read only "
-                "invocation.input_root and write exactly invocation.output_path as "
-                "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
-                "invocation.seed; return None. train.csv has the exact columns "
-                "date,user_id,video_id,author_id,tab,duration_ms,long_view, where "
-                "date is an integer YYYYMMDD value; "
-                "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
-                "and never exposes long_view. fm_baseline_predictions.csv is the "
-                "setup-verified official FM score for every score.csv row. These are "
-                "unconstrained real-valued ranking scores, not probabilities. Never "
-                "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
-                "parent-plus-residual result. Preserve it as the strong parent and "
-                "add only a bounded train-only residual on the original score scale "
-                "unless the approved hypothesis explicitly replaces the parent. "
-                "Training dates strictly precede score dates. Preserve contiguous "
-                "score row_id order, duplicate rows, finite deterministic scores, "
-                "and exclusive output creation. The production loader imports "
-                "solution.candidate:run. Keep that entrypoint wired to every helper "
-                "used by the experiment; helper edits are allowed only when each "
-                "path is explicitly authorized by ExperimentSpec target_files."
-            )
-        },
+
+        "target_interface_excerpts": dict(PRODUCTION_TARGET_INTERFACE_EXCERPTS),
         "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
@@ -314,7 +292,7 @@ def setup_live_deployment(
         "active_research_prohibitions": [],
         "prediction_change_no_op_threshold": 0.001,
         "max_single_score_fraction": 0.5,
-        "target_interface_excerpts": dict(DEFAULT_TARGET_INTERFACE_EXCERPTS),
+        "target_interface_excerpts": dict(PRODUCTION_TARGET_INTERFACE_EXCERPTS),
         "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,

@@ -25,6 +25,10 @@ def test_checked_example_resolves_to_canonical_person2_handoff(tmp_path: Path) -
         "# Past-only method\n", encoding="utf-8"
     )
     (repository / "solution").mkdir()
+    for name in ("candidate.py", "features.py", "inference.py"):
+        (repository / "solution" / name).write_text(
+            "# candidate interface\n", encoding="utf-8"
+        )
     (repository / "artifacts").mkdir()
     (repository / "runs").mkdir()
     config = TraeStandaloneConfig(
@@ -35,7 +39,11 @@ def test_checked_example_resolves_to_canonical_person2_handoff(tmp_path: Path) -
         artifact_roots=["artifacts", "runs"],
         editable_roots=["solution"],
         allowed_command_ids=["candidate_smoke"],
-        target_interface_excerpts={"candidate": "def run(invocation) -> None"},
+        target_interface_excerpts={
+            "solution/candidate.py": "def run(invocation) -> None",
+            "solution/features.py": "training-only feature helpers",
+            "solution/inference.py": "aligned output helpers",
+        },
         coding_step_limit=20,
         coding_token_limit=None,
         coding_wall_time_limit_seconds=900,
@@ -62,6 +70,12 @@ def test_checked_example_resolves_to_canonical_person2_handoff(tmp_path: Path) -
     assert context.experiment_spec == spec
     assert context.parent_commit_sha == "a" * 40
     assert context.editable_roots == ["solution"]
+    assert spec.target_files == [
+        "solution/candidate.py",
+        "solution/features.py",
+        "solution/inference.py",
+    ]
+    assert list(context.target_interface_excerpts) == spec.target_files
     assert context.selected_method_cards[0]["method_id"] == (
         "temporal_drift_past_only"
     )

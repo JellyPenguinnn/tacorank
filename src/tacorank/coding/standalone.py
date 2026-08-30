@@ -248,13 +248,27 @@ def build_example_context(
             }
         )
 
+    target_interfaces = {
+        target: config.target_interface_excerpts[target]
+        for target in spec.target_files
+        if target in config.target_interface_excerpts
+    }
+    missing_target_interfaces = sorted(
+        set(spec.target_files) - set(target_interfaces)
+    )
+    if missing_target_interfaces:
+        raise TraeStandaloneError(
+            "example target interface is unavailable: "
+            + missing_target_interfaces[0]
+        )
+
     context_seed = {
         "role": "coder",
         "run_id": spec.run_id,
         "experiment_id": spec.experiment_id,
         "contract_sha256": contract_sha256,
         "experiment_spec": spec.model_dump(mode="json"),
-        "target_interface_excerpts": config.target_interface_excerpts,
+        "target_interface_excerpts": target_interfaces,
         "editable_roots": config.editable_roots,
         "protected_paths": protected_paths,
         "allowed_command_ids": config.allowed_command_ids,
@@ -293,7 +307,7 @@ def build_example_context(
         contract_sha256=contract_sha256,
         experiment_spec=spec,
         parent_commit_sha=spec.parent_commit_sha,
-        target_interface_excerpts=config.target_interface_excerpts,
+        target_interface_excerpts=target_interfaces,
         editable_roots=config.editable_roots,
         protected_paths=protected_paths,
         allowed_command_ids=config.allowed_command_ids,
