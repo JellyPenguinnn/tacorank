@@ -1502,6 +1502,7 @@ class RecoveryContext(ContextDocument):
     previous_repair_fingerprints: List[NonEmptyStr] = Field(default_factory=list)
     recovery_instructions: NonEmptyStr
     remaining_repair_budget: int = Field(ge=0)
+    target_interface_excerpts: Dict[str, str] = Field(default_factory=dict)
     editable_roots: List[str]
     protected_paths: List[str]
 

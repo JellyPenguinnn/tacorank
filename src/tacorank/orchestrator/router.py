@@ -372,9 +372,11 @@ class Harness:
         raise OrchestrationError("recovery experiment specification is missing")
 
     def _contract_summary(self) -> str:
-        contract_path = self.config.repository_root / self.config.contract_path
-        text = contract_path.read_text(encoding="utf-8").strip()
-        return text[:2_000]
+        return (
+            "the frozen benchmark split and evaluator, protected labels and data, "
+            "protected paths, command configuration, baseline identity, and "
+            "submission contract"
+        )
 
     def _remaining_run_budget(self, state) -> dict:
         totals = state.resource_totals

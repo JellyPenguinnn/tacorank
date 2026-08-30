@@ -1242,6 +1242,7 @@ class ContextBuilder:
                 "previous_repair_fingerprints": prior_fingerprints,
                 "recovery_instructions": "Await the deterministic recovery decision.",
                 "remaining_repair_budget": remaining_repair_budget,
+                "target_interface_excerpts": self.config.target_interface_excerpts,
                 "editable_roots": self.config.editable_roots,
                 "protected_paths": self._protected_paths(),
             },

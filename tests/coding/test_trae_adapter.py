@@ -506,6 +506,7 @@ def test_repair_is_a_direct_commit_on_the_same_branch(
         previous_repair_fingerprints=(),
         recovery_instructions="Correct the candidate module only.",
         remaining_repair_budget=1,
+        target_interface_excerpts={"entrypoint": "predict(rows)"},
         editable_roots=("solution",),
         protected_paths=("contract", "runs"),
     )
