@@ -114,6 +114,79 @@ class ExperimentNodeView:
             return True
         return str(enum_value(self.highest_completed_fidelity) or "").lower() == "full"
 
+    @classmethod
+    def from_summary(cls, summary: Any) -> "ExperimentNodeView | None":
+        """Project one verified summary, including non-frontier portfolio nodes."""
+
+        experiment_id = str(get_value(summary, "experiment_id", ""))
+        if not experiment_id:
+            return None
+        score = get_value(summary, "primary_score", None)
+        if score is None:
+            score = get_value(summary, "highest_primary_score", None)
+        if score is None:
+            score = get_value(summary, "score", None)
+        if score is None:
+            score = get_value(get_value(summary, "metric_set", None), "primary_score", None)
+        trust = get_value(summary, "trust_verdict", None)
+        trust = trust or get_value(summary, "trust", None)
+        trust_verdict = enum_value(get_value(trust, "verdict", trust))
+        integrity = get_value(summary, "integrity", None)
+        integrity = integrity or get_value(trust, "integrity", None)
+        stability = get_value(summary, "stability", None)
+        stability = stability or get_value(trust, "stability", None)
+        metric_deltas = get_value(summary, "metric_deltas", None) or {}
+        if not isinstance(metric_deltas, Mapping):
+            metric_deltas = {}
+        prediction_change = get_value(summary, "prediction_change", None)
+        if prediction_change is not None and not isinstance(prediction_change, (int, float)):
+            prediction_change = get_value(prediction_change, "changed_row_fraction", None)
+        try:
+            score = None if score is None else float(score)
+        except (TypeError, ValueError):
+            score = None
+        try:
+            child_count = int(get_value(summary, "child_count", 0) or 0)
+        except (TypeError, ValueError):
+            child_count = 0
+        try:
+            prediction_change = (
+                None if prediction_change is None else float(prediction_change)
+            )
+        except (TypeError, ValueError):
+            prediction_change = None
+        return cls(
+            experiment_id=experiment_id,
+            parent_experiment_id=get_value(summary, "parent_experiment_id", None),
+            parent_commit_sha=get_value(summary, "latest_patch_commit_sha", None)
+            or get_value(summary, "commit_sha", None)
+            or get_value(summary, "latest_commit_sha", None)
+            or get_value(summary, "base_commit_sha", None),
+            family=get_value(summary, "family", None),
+            hypothesis=str(
+                get_value(summary, "hypothesis_summary", None)
+                or get_value(summary, "hypothesis", "")
+            ),
+            trust_verdict=trust_verdict,
+            stability=enum_value(stability),
+            integrity=enum_value(integrity),
+            decision=enum_value(get_value(summary, "decision", None)),
+            highest_completed_fidelity=enum_value(
+                get_value(summary, "highest_completed_fidelity", None)
+                or get_value(summary, "highest_fidelity_completed", None)
+            ),
+            primary_score=score,
+            child_count=child_count,
+            actual_cost=enum_value(get_value(summary, "actual_cost", None)),
+            metric_set=get_value(summary, "metric_set", None),
+            metric_deltas={str(key): float(value) for key, value in metric_deltas.items()},
+            prediction_change=prediction_change,
+            method_card_ids=tuple(
+                map(str, as_list(get_value(summary, "method_card_ids", None)))
+            ),
+            summary=summary,
+        )
+
 
 class GraphView:
     """A transient AIDE view reconstructed from ``PlannerContext``."""
@@ -139,73 +212,9 @@ class GraphView:
 
         nodes: list[ExperimentNodeView] = []
         for summary in summaries:
-            experiment_id = str(get_value(summary, "experiment_id", ""))
-            if not experiment_id:
-                continue
-            score = get_value(summary, "primary_score", None)
-            if score is None:
-                score = get_value(summary, "highest_primary_score", None)
-            if score is None:
-                score = get_value(summary, "score", None)
-            if score is None:
-                score = get_value(get_value(summary, "metric_set", None), "primary_score", None)
-            trust = get_value(summary, "trust_verdict", None)
-            trust = trust or get_value(summary, "trust", None)
-            trust_verdict = enum_value(get_value(trust, "verdict", trust))
-            integrity = get_value(summary, "integrity", None)
-            integrity = integrity or get_value(trust, "integrity", None)
-            stability = get_value(summary, "stability", None)
-            stability = stability or get_value(trust, "stability", None)
-            metric_deltas = get_value(summary, "metric_deltas", None) or {}
-            if not isinstance(metric_deltas, Mapping):
-                metric_deltas = {}
-            prediction_change = get_value(summary, "prediction_change", None)
-            if prediction_change is not None and not isinstance(prediction_change, (int, float)):
-                prediction_change = get_value(prediction_change, "changed_row_fraction", None)
-            try:
-                score = None if score is None else float(score)
-            except (TypeError, ValueError):
-                score = None
-            try:
-                child_count = int(get_value(summary, "child_count", 0) or 0)
-            except (TypeError, ValueError):
-                child_count = 0
-            try:
-                prediction_change = (
-                    None if prediction_change is None else float(prediction_change)
-                )
-            except (TypeError, ValueError):
-                prediction_change = None
-            nodes.append(
-                ExperimentNodeView(
-                    experiment_id=experiment_id,
-                    parent_experiment_id=get_value(summary, "parent_experiment_id", None),
-                    parent_commit_sha=get_value(summary, "latest_patch_commit_sha", None)
-                    or get_value(summary, "commit_sha", None)
-                    or get_value(summary, "latest_commit_sha", None)
-                    or get_value(summary, "base_commit_sha", None),
-                    family=get_value(summary, "family", None),
-                    hypothesis=str(get_value(summary, "hypothesis_summary", None)
-                                   or get_value(summary, "hypothesis", "")),
-                    trust_verdict=trust_verdict,
-                    stability=enum_value(stability),
-                    integrity=enum_value(integrity),
-                    decision=enum_value(get_value(summary, "decision", None)),
-                    highest_completed_fidelity=enum_value(get_value(summary, "highest_completed_fidelity", None)
-                    or get_value(summary, "highest_fidelity_completed", None),
-                    ),
-                    primary_score=score,
-                    child_count=child_count,
-                    actual_cost=enum_value(get_value(summary, "actual_cost", None)),
-                    metric_set=get_value(summary, "metric_set", None),
-                    metric_deltas={str(key): float(value) for key, value in metric_deltas.items()},
-                    prediction_change=prediction_change,
-                    method_card_ids=tuple(
-                        map(str, as_list(get_value(summary, "method_card_ids", None)))
-                    ),
-                    summary=summary,
-                )
-            )
+            node = ExperimentNodeView.from_summary(summary)
+            if node is not None:
+                nodes.append(node)
         return cls(nodes)
 
     def __len__(self) -> int:

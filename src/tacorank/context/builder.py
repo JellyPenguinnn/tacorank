@@ -38,6 +38,7 @@ from ..schemas import (
 )
 from ..research.playbook import load_improvement_playbook
 from ..research.portfolio import load_method_cards
+from ..research.search_eligibility import classify_search_eligibility
 from .redaction import redact
 from .templates import compact_json, render_context
 from .token_estimator import estimate_tokens
@@ -415,6 +416,7 @@ class ContextBuilder:
                     status=node.status.value,
                     duplicate_key=spec.duplicate_key,
                     method_card_ids=list(spec.method_card_ids),
+                    component_experiment_ids=list(spec.component_experiment_ids),
                     supporting_event_ids=support,
                 )
             )
@@ -479,26 +481,44 @@ class ContextBuilder:
                 - int(totals.gpu_weighted_time_ms / 1000),
             )
         )
+        contract_summary = PlannerContractSummary(
+            resolved=True,
+            allowed_families=list(self.config.allowed_research_families),
+            allowed_data=list(self.config.allowed_research_data),
+            research_capabilities=list(self.config.research_capabilities),
+            active_prohibitions=list(self.config.active_research_prohibitions),
+            protected_paths=self._protected_paths(),
+            editable_paths=list(self.config.editable_roots),
+            data_manifest_sha256=self.config.data_manifest_sha256,
+            evaluator_sha256=self.config.evaluator_sha256,
+            epsilon=self.config.convergence_epsilon,
+            prediction_change_no_op_threshold=(
+                self.config.prediction_change_no_op_threshold
+            ),
+        )
+        eligibility_context = {"contract_summary": contract_summary}
+        refinement_frontier_ids = [
+            summary.experiment_id
+            for summary in family_history
+            if classify_search_eligibility(
+                summary, eligibility_context
+            ).refinement_eligible
+        ]
+        ensemble_candidate_ids = [
+            summary.experiment_id
+            for summary in family_history
+            if classify_search_eligibility(
+                summary, eligibility_context
+            ).ensemble_eligible
+        ]
         return {
             "contract_sha256": self.verified_contract.contract_sha256,
-            "contract_summary": PlannerContractSummary(
-                resolved=True,
-                allowed_families=list(self.config.allowed_research_families),
-                allowed_data=list(self.config.allowed_research_data),
-                research_capabilities=list(self.config.research_capabilities),
-                active_prohibitions=list(self.config.active_research_prohibitions),
-                protected_paths=self._protected_paths(),
-                editable_paths=list(self.config.editable_roots),
-                data_manifest_sha256=self.config.data_manifest_sha256,
-                evaluator_sha256=self.config.evaluator_sha256,
-                epsilon=self.config.convergence_epsilon,
-                prediction_change_no_op_threshold=(
-                    self.config.prediction_change_no_op_threshold
-                ),
-            ),
+            "contract_summary": contract_summary,
             "baseline": baseline,
             "current_best": current_best,
             "eligible_frontier": eligible_frontier,
+            "refinement_frontier_ids": refinement_frontier_ids,
+            "ensemble_candidate_ids": ensemble_candidate_ids,
             "family_history": family_history,
             "method_cards": method_cards,
             "playbook": PlannerPlaybookSummary(

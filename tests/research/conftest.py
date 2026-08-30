@@ -29,7 +29,10 @@ def make_summary(
     metric_deltas=None,
     parent_delta: float | None = 0.003,
     prediction_change: float | None = 1.0,
+    prediction_spearman_vs_parent: float | None = 0.5,
     method_card_ids=None,
+    component_experiment_ids=None,
+    best_eligible: bool = False,
 ):
     return SimpleNamespace(
         experiment_id=experiment_id,
@@ -53,8 +56,11 @@ def make_summary(
         metric_deltas=metric_deltas or {},
         parent_delta=parent_delta,
         prediction_change=prediction_change,
+        prediction_spearman_vs_parent=prediction_spearman_vs_parent,
         method_card_ids=method_card_ids or [],
+        component_experiment_ids=component_experiment_ids or [],
         parent_eligible=parent_eligible,
+        best_eligible=best_eligible,
         status="accepted",
     )
 

@@ -155,6 +155,41 @@ def default_portfolio() -> ExperimentPortfolio:
                 falsifier="No primary improvement or mismatch with the competition definition.",
             ),
             MethodCard(
+                method_id="ensemble_diverse_residual_candidate",
+                family="ensemble",
+                summary=(
+                    "Test one fixed blend of the trusted parent and one clean, "
+                    "diverse soft-pruned mechanism."
+                ),
+                tags=("ensemble", "residual", "rank_average", "soft_prune"),
+                cost_tier="low",
+                mechanism=(
+                    "Retain the trusted parent score path and add one bounded, "
+                    "explicitly identified complementary scoring path."
+                ),
+                prerequisites=(
+                    "verified_best_prediction",
+                    "diverse_clean_proxy_member",
+                ),
+                allowed_data=(
+                    "train_interactions",
+                    "user_id",
+                    "video_id",
+                    "author_id",
+                    "tab",
+                    "date",
+                    "duration_ms",
+                    "long_view",
+                    "verified_predictions",
+                ),
+                expected_effect=(
+                    "Improve the trusted parent only when the weaker mechanism "
+                    "contributes complementary within-user ordering."
+                ),
+                falsifier="No fixed blend improves over the trusted parent.",
+                implementation_targets=("solution/candidate.py",),
+            ),
+            MethodCard(
                 method_id="ensemble_confirmed_members",
                 family="ensemble",
                 summary="Rank-average two or three already confirmed complementary candidates.",

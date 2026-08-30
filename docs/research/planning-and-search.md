@@ -13,8 +13,8 @@ remain with the outer harness and evaluation owners.
    applicable rule from `research/CURRENT_RUN_IMPROVEMENT_PLAN.md` and the
    referenced method cards; the playbook itself remains read-only.
 2. `ConvergenceAdvisor` checks only advisory budget/patience conditions.
-3. `SearchPolicy` creates a transient `GraphView` and chooses one eligible
-   parent plus one legal experiment family.
+3. `SearchPolicy` creates a transient `GraphView`, applies the authoritative
+   branch/refinement/ensemble portfolios, and chooses one legal search action.
 4. `ResearchProvider` receives one bounded structured request and may make one
    format-repair call.
 5. `PlanValidator` checks identity, lineage, contract paths, fidelity order,
@@ -30,7 +30,7 @@ become positive research rewards or parent nodes.
 
 ## Search policy
 
-The core policy is deterministic two-phase AIDE-style beam search:
+The core policy is deterministic AIDE-style portfolio search:
 
 - breadth first probes untried high-value families in this order: objective,
   temporal history, multitask, duration bias, temporal features, and model;
@@ -38,14 +38,37 @@ The core policy is deterministic two-phase AIDE-style beam search:
   trusted primary score, fewer children, family diversity, and stable ID
   tie-breaking;
 - only baseline roots with a verified decision and non-root experiments with a
-  trusted full-fidelity result may be parents;
-- LinUCB/UCB and Reflexion-guided branching are optional ablations after the
-  deterministic loop is complete. They are not required for the core path.
+  trusted full-fidelity result may be normal branch parents; a soft node can be
+  used only as the base of its one authorized refinement;
+- clean proxy/full results within `max(5 * epsilon, 0.01)` of their parent, or
+  with a component-metric trade-off, are soft-pruned rather than forgotten;
+- a soft result may receive at most one documented metric-trade-off refinement
+  and never becomes validation-best eligible through that permission;
+- a clean soft result whose prediction Spearman magnitude is below `0.98` may
+  enter one fixed residual-ensemble test from the trusted parent;
+- severe regressions, rejected outputs, suspicious/compromised results, no-ops,
+  unstable results, and invalid/retracted nodes are hard-pruned;
+- a stateless LinUCB ranker is reconstructed from verified ledger history and
+  reorders only the legal choices emitted by these deterministic gates. It
+  cannot invent a family, method, parent, refinement, or ensemble component.
+
+`eligible_frontier`, `refinement_frontier_ids`, and `ensemble_candidate_ids`
+are separate authoritative context collections. Empty collections remain empty;
+Person 1 does not resurrect candidates from generic history. Canonical
+`parent_eligible` and `best_eligible` continue to control trusted branching and
+checkpoint selection.
+
+Semantic duplicate identity is `parent + family + method cards + ensemble
+components`. Rephrasing the same method does not authorize another trial from
+the same parent. A genuine refinement receives a new parent commit and therefore
+a distinct identity.
 
 ## Interfaces owned by Person 1
 
 - `research.graph_view`: read-only lineage projection;
 - `research.search_policy`: deterministic parent/family selection;
+- `research.search_eligibility`: derived hard/soft/refinement/ensemble flags;
+- `research.linucb`: legal-choice-only contextual-bandit ranker;
 - `research.portfolio` and `research.method_cards`: documented method cards;
 - `research.duplicate_detection`: stable duplicate identity;
 - `research.plan_validation`: pure proposal validator;

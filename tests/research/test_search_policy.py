@@ -203,6 +203,184 @@ def test_playbook_branches_after_terminal_proxy_prune(planner_context):
     assert choice.method_card_id == "temporal_history_compact"
 
 
+def test_soft_pairwise_tradeoff_gets_one_bounded_listwise_child(planner_context):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="objective",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        parent_eligible=False,
+        trust_verdict="negative",
+        stability="not_applicable",
+        parent_delta=-0.001,
+        metric_deltas={"GAUC": 0.006, "nDCG@5": -0.008},
+        prediction_change=0.8,
+        prediction_spearman_vs_parent=0.6,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.phase == "refinement"
+    assert choice.reason_code == "SOFT_PRUNE_METRIC_TRADEOFF_REFINEMENT"
+    assert choice.parent.experiment_id == "exp_0001"
+    assert choice.method_card_id == "objective_listwise_user_softmax"
+
+
+def test_soft_diverse_result_can_enter_bounded_ensemble_test(planner_context):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="temporal_history",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        parent_eligible=False,
+        trust_verdict="negative",
+        stability="not_applicable",
+        parent_delta=-0.004,
+        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
+        prediction_change=0.8,
+        prediction_spearman_vs_parent=0.6,
+        method_card_ids=["temporal_history_compact"],
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.phase == "ensemble"
+    assert choice.reason_code == "SOFT_PRUNE_DIVERSE_ENSEMBLE_TEST"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.method_card_id == "ensemble_diverse_residual_candidate"
+    assert choice.component_experiment_ids == ("exp_0001",)
+
+
+def test_soft_full_result_can_enter_bounded_ensemble_test(planner_context):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="temporal_history",
+        fidelity="full",
+        population="public_validation",
+        decision="prune",
+        parent_eligible=False,
+        trust_verdict="negative",
+        stability="single_seed",
+        parent_delta=-0.004,
+        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
+        prediction_change=0.8,
+        prediction_spearman_vs_parent=0.6,
+        method_card_ids=["temporal_history_compact"],
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.phase == "ensemble"
+    assert choice.reason_code == "SOFT_PRUNE_DIVERSE_ENSEMBLE_TEST"
+    assert choice.component_experiment_ids == ("exp_0001",)
+
+
+def test_explicit_empty_soft_portfolios_are_authoritative(planner_context):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="temporal_history",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        parent_eligible=False,
+        trust_verdict="negative",
+        stability="not_applicable",
+        parent_delta=-0.004,
+        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
+        prediction_change=0.8,
+        prediction_spearman_vs_parent=0.6,
+        method_card_ids=["temporal_history_compact"],
+    )
+    context = context_with_latest(planner_context, latest)
+    context.refinement_frontier_ids = []
+    context.ensemble_candidate_ids = []
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.reason_code == "EARLY_FIDELITY_REJECTED"
+    assert choice.phase == "playbook"
+    assert choice.family != "ensemble"
+
+
+def test_severe_proxy_regression_is_not_refined_or_ensembled(planner_context):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        parent_eligible=False,
+        trust_verdict="negative",
+        stability="not_applicable",
+        parent_delta=-0.09,
+        metric_deltas={"GAUC": -0.08, "nDCG@5": -0.10},
+        prediction_change=0.8,
+        prediction_spearman_vs_parent=0.2,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.phase == "playbook"
+    assert choice.reason_code == "EARLY_FIDELITY_REJECTED"
+    assert choice.family == "temporal_history"
+    assert choice.component_experiment_ids == ()
+
+
+def test_failed_method_is_not_retried_from_same_parent(planner_context):
+    pairwise = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        parent_eligible=False,
+        trust_verdict="negative",
+        stability="not_applicable",
+        parent_delta=-0.02,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    listwise = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        parent_eligible=False,
+        trust_verdict="negative",
+        stability="not_applicable",
+        parent_delta=-0.02,
+        method_card_ids=["objective_listwise_user_softmax"],
+    )
+    context = context_with_latest(
+        planner_context,
+        listwise,
+        allowed_families=["objective"],
+    )
+    context.family_history = [pairwise, listwise]
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.action == "blocked"
+    assert choice.reason_code == "NO_ELIGIBLE_METHOD"
+
+
 @pytest.mark.parametrize(
     ("metric_deltas", "reason_code"),
     [

@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .graph_view import as_list, enum_value, get_value
+from .graph_view import as_list, enum_value, get_value, has_value
+from .search_eligibility import classify_search_eligibility
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,18 @@ def _is_clean_full_result(summary: Any) -> bool:
     )
 
 
+def _is_clean_evaluated_result(summary: Any) -> bool:
+    integrity = _normalized(get_value(summary, "integrity", None))
+    fidelity = _normalized(get_value(summary, "highest_completed_fidelity", None))
+    population = _normalized(get_value(summary, "population", None))
+    return (
+        integrity == "clean"
+        and get_value(summary, "output_accepted", None) is True
+        and fidelity in {"proxy", "full"}
+        and population in {"internal_proxy", "public_validation"}
+    )
+
+
 def available_capabilities(context: Any) -> frozenset[str]:
     """Derive auditable facts from frozen data permissions and verified history."""
 
@@ -58,7 +71,9 @@ def available_capabilities(context: Any) -> frozenset[str]:
     history = as_list(get_value(context, "family_history", None))
 
     if baseline is not None and _is_clean_full_result(baseline):
-        capabilities.update({"baseline_parity", "objective_data_frame_verified"})
+        capabilities.update(
+            {"baseline_parity", "objective_data_frame_verified", "verified_best_prediction"}
+        )
     if {"train_interactions", "user_id", "long_view"}.issubset(allowed_data):
         capabilities.update(
             {"within_user_positive_negative_pairs", "user_impression_groups"}
@@ -77,7 +92,7 @@ def available_capabilities(context: Any) -> frozenset[str]:
         for summary in history
         if "objective_pairwise_bpr"
         in {str(item) for item in as_list(get_value(summary, "method_card_ids", None))}
-        and _is_clean_full_result(summary)
+        and _is_clean_evaluated_result(summary)
     ]
     if pairwise_results:
         capabilities.add("pairwise_tested")
@@ -106,6 +121,24 @@ def available_capabilities(context: Any) -> frozenset[str]:
     ]
     if len(confirmed) >= 2:
         capabilities.add("two_confirmed_clean_members")
+    authorized_ensemble_ids = (
+        {
+            str(item)
+            for item in as_list(get_value(context, "ensemble_candidate_ids", None))
+        }
+        if has_value(context, "ensemble_candidate_ids")
+        else None
+    )
+    if any(
+        (
+            authorized_ensemble_ids is None
+            or str(get_value(summary, "experiment_id", ""))
+            in authorized_ensemble_ids
+        )
+        and classify_search_eligibility(summary, context).ensemble_eligible
+        for summary in history
+    ):
+        capabilities.add("diverse_clean_proxy_member")
     return frozenset(capabilities)
 
 

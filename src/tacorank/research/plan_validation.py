@@ -8,8 +8,16 @@ import re
 from typing import Any
 
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
-from .graph_view import GraphView, as_list, enum_value, get_value
+from .graph_view import (
+    ExperimentNodeView,
+    GraphView,
+    as_list,
+    enum_value,
+    get_value,
+    has_value,
+)
 from .method_eligibility import evaluate_method_card, method_card_map
+from .search_eligibility import classify_search_eligibility
 
 
 HIDDEN_PATTERNS = (
@@ -158,14 +166,128 @@ class PlanValidator:
         graph = GraphView.from_context(context)
         parent_id = get_value(spec, "parent_experiment_id", None)
         parent = graph.get(str(parent_id)) if parent_id else None
+        historical_summaries = as_list(get_value(context, "family_history", None))
+        historical_by_id = {
+            str(get_value(summary, "experiment_id", "")): summary
+            for summary in historical_summaries
+            if str(get_value(summary, "experiment_id", ""))
+        }
+        refinement_ids = (
+            {
+                str(item)
+                for item in as_list(
+                    get_value(context, "refinement_frontier_ids", None)
+                )
+            }
+            if has_value(context, "refinement_frontier_ids")
+            else {
+                experiment_id
+                for experiment_id, summary in historical_by_id.items()
+                if classify_search_eligibility(
+                    summary, context
+                ).refinement_eligible
+            }
+        )
+        refinement_by_id = {
+            experiment_id: historical_by_id[experiment_id]
+            for experiment_id in refinement_ids
+            if experiment_id in historical_by_id
+        }
+        ensemble_ids = (
+            {
+                str(item)
+                for item in as_list(
+                    get_value(context, "ensemble_candidate_ids", None)
+                )
+            }
+            if has_value(context, "ensemble_candidate_ids")
+            else {
+                experiment_id
+                for experiment_id, summary in historical_by_id.items()
+                if classify_search_eligibility(summary, context).ensemble_eligible
+            }
+        )
+        ensemble_by_id = {
+            experiment_id: historical_by_id[experiment_id]
+            for experiment_id in ensemble_ids
+            if experiment_id in historical_by_id
+        }
+        choice_phase = str(get_value(choice, "phase", "")) if choice is not None else ""
+        if parent is None and choice_phase == "refinement" and parent_id:
+            summary = refinement_by_id.get(str(parent_id))
+            if (
+                summary is not None
+                and classify_search_eligibility(summary, context).refinement_eligible
+            ):
+                parent = ExperimentNodeView.from_summary(summary)
         if parent is None:
             errors.append("UNKNOWN_PARENT")
-        elif not parent.is_parent_eligible:
+        elif not parent.is_parent_eligible and choice_phase != "refinement":
             errors.append("INELIGIBLE_PARENT")
-        elif get_value(spec, "parent_commit_sha", None) and parent.parent_commit_sha:
+        elif not parent.is_parent_eligible:
+            summary = refinement_by_id.get(parent.experiment_id)
+            if (
+                summary is None
+                or not classify_search_eligibility(summary, context).refinement_eligible
+            ):
+                errors.append("INELIGIBLE_REFINEMENT_PARENT")
+        if (
+            parent is not None
+            and get_value(spec, "parent_commit_sha", None)
+            and parent.parent_commit_sha
+            and get_value(spec, "parent_commit_sha") != parent.parent_commit_sha
+        ):
             # The summary's commit_sha represents the code state being branched from.
-            if get_value(spec, "parent_commit_sha") != parent.parent_commit_sha:
-                errors.append("PARENT_COMMIT_MISMATCH")
+            errors.append("PARENT_COMMIT_MISMATCH")
+
+        component_ids = [
+            str(item)
+            for item in as_list(get_value(spec, "component_experiment_ids", None))
+        ]
+        if len(component_ids) != len(set(component_ids)):
+            errors.append("DUPLICATE_COMPONENT_EXPERIMENT")
+        if any(not SHARED_ID_PATTERN.fullmatch(item) for item in component_ids):
+            errors.append("INVALID_COMPONENT_EXPERIMENT_ID")
+        required_components = tuple(
+            str(item)
+            for item in as_list(
+                get_value(choice, "component_experiment_ids", None)
+                if choice is not None
+                else None
+            )
+        )
+        if required_components and tuple(component_ids) != required_components:
+            errors.append("COMPONENT_POLICY_MISMATCH")
+        if family != "ensemble" and component_ids:
+            errors.append("COMPONENTS_REQUIRE_ENSEMBLE_FAMILY")
+        if family == "ensemble" and not component_ids:
+            errors.append("ENSEMBLE_COMPONENT_REQUIRED")
+        component_method_ids = {
+            str(item)
+            for item in as_list(get_value(spec, "method_card_ids", None))
+        }
+        residual_ensemble = (
+            "ensemble_diverse_residual_candidate" in component_method_ids
+        )
+        for component_id in component_ids:
+            if component_id == str(parent_id):
+                errors.append("ENSEMBLE_COMPONENT_DUPLICATES_PARENT")
+                continue
+            component = historical_by_id.get(component_id)
+            if component is None:
+                errors.append("UNKNOWN_COMPONENT_EXPERIMENT")
+                continue
+            search = classify_search_eligibility(component, context)
+            soft_authorized = component_id in ensemble_by_id
+            if residual_ensemble and not (
+                soft_authorized and search.ensemble_eligible
+            ):
+                errors.append("INELIGIBLE_ENSEMBLE_COMPONENT")
+            elif not residual_ensemble and not (
+                (soft_authorized and search.ensemble_eligible)
+                or search.branch_eligible
+            ):
+                errors.append("INELIGIBLE_ENSEMBLE_COMPONENT")
 
         target_files = as_list(get_value(spec, "target_files", None))
         normalized_files = [_normalized_path(path) for path in target_files]
@@ -297,6 +419,8 @@ class PlanValidator:
         ).lower()
         if any(pattern in text for pattern in HIDDEN_PATTERNS):
             errors.append("HIDDEN_TEST_REFERENCE")
+        if any(component_id.lower() not in text for component_id in component_ids):
+            errors.append("ENSEMBLE_COMPONENT_NOT_DESCRIBED")
 
         supplied_duplicate_key = get_value(spec, "duplicate_key", None)
         if duplicate_detector is not None and not duplicate_detector.validate(spec):

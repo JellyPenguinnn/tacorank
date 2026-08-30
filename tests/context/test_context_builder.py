@@ -28,6 +28,8 @@ def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_e
     assert first.contract_summary.evaluator_sha256 == harness.config.evaluator_sha256
     assert first.playbook.rule_order[0] == "output_rejected"
     assert first.playbook.method_order["objective"][0] == "objective_pairwise_bpr"
+    assert first.refinement_frontier_ids == []
+    assert first.ensemble_candidate_ids == []
     pairwise = next(
         card for card in first.method_cards if card.method_id == "objective_pairwise_bpr"
     )
@@ -60,6 +62,8 @@ def test_planner_history_preserves_complete_evaluation_evidence(
     assert latest.trust_flags == []
     assert latest.parent_eligible is True
     assert latest.best_eligible is True
+    assert context.refinement_frontier_ids == []
+    assert context.ensemble_candidate_ids == []
 
 
 def test_mandatory_context_cannot_be_silently_truncated(harness, baseline_evaluation):

@@ -42,7 +42,7 @@
     "duration_bias": ["duration_bias_censored_watch_time"],
     "features": ["temporal_drift_past_only"],
     "model": ["model_compact_ranker"],
-    "ensemble": ["ensemble_confirmed_members"],
+    "ensemble": ["ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]
   }
 }
@@ -97,6 +97,27 @@ Apply these rules from top to bottom. The first matching rule wins.
 Only a full, verified, public-validation result with `trust.verdict = accepted`
 and `trust.integrity = clean` may create a future parent. A positive proxy score
 can justify more evaluation, but never a new trusted branch.
+
+### Hard prune, soft prune, and portfolio retention
+
+Canonical `parent_eligible` and `best_eligible` remain unchanged. Person 1 may
+derive two narrower, non-checkpoint permissions from verified evidence:
+
+- **hard prune:** rejected output, suspicious/compromised integrity, no-op,
+  unstable result, invalid/retracted lineage, or primary regression worse than
+  `max(5 * epsilon, 0.01)`. Never branch, refine, or ensemble this result;
+- **soft prune:** clean accepted output at proxy/full fidelity, meaningful
+  prediction change, and either primary delta above that regression floor or a
+  component-metric trade-off. Retain the node as evidence, not as a checkpoint;
+- **bounded refinement:** a soft-pruned node with a documented metric trade-off
+  may receive at most one child when a method card names the follow-up;
+- **ensemble candidate:** a soft-pruned node may enter one fixed blend test only
+  when its prediction Spearman magnitude versus the parent is below `0.98`.
+
+These permissions never change validation-best selection. A soft node remains
+`parent_eligible = false` and `best_eligible = false`; Person 1 must label the
+proposal as a refinement or ensemble action, and the plan validator must
+recompute eligibility from the same verified context.
 
 ## 3. Metric-shape diagnosis
 

@@ -25,17 +25,25 @@ def _normalize(value: Any) -> Any:
 def duplicate_payload(spec: Any) -> dict[str, Any]:
     """Return the schema-v1 identity fields for a materially same plan.
 
-    The memory contract defines duplicate identity as normalized
-    ``parent + family + change``.  Target-file and fidelity differences are
-    implementation details and must not silently create a second experiment
-    with the same research change.
+    A reviewed method card is the semantic mechanism identity.  Free-text
+    rephrasing, target-file order, and fidelity details must not silently turn
+    the same method on the same parent into a new experiment.  Uncarded legacy
+    plans retain normalized change text as a compatibility fallback.
     """
 
+    methods = [str(item) for item in get_value(spec, "method_card_ids", ()) or ()]
     return {
         "parent_commit_sha": get_value(spec, "parent_commit_sha", ""),
         "parent_experiment_id": get_value(spec, "parent_experiment_id", ""),
         "family": get_value(spec, "family", ""),
-        "change_summary": get_value(spec, "change_summary", ""),
+        "method_card_ids": methods,
+        "component_experiment_ids": [
+            str(item)
+            for item in get_value(spec, "component_experiment_ids", ()) or ()
+        ],
+        "legacy_change_summary": (
+            "" if methods else get_value(spec, "change_summary", "")
+        ),
     }
 
 

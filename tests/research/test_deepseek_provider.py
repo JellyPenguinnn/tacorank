@@ -16,6 +16,8 @@ from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.research.search_policy import SearchPolicy
 from tacorank.schemas import TokenMeasurement
 
+from .conftest import make_summary
+
 
 def candidate(**updates):
     value = {
@@ -122,6 +124,50 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert provider.resource_delta.llm_input_tokens == 101
     assert provider.resource_delta.llm_output_tokens == 37
     assert provider.resource_delta.token_measurement == TokenMeasurement.PROVIDER
+
+
+def test_deepseek_provider_preserves_policy_owned_ensemble_components(
+    planner_context,
+):
+    component = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="temporal_history",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        parent_eligible=False,
+        trust_verdict="negative",
+        stability="not_applicable",
+        parent_delta=-0.004,
+        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
+        prediction_change=0.8,
+        prediction_spearman_vs_parent=0.6,
+        method_card_ids=["temporal_history_compact"],
+    )
+    planner_context.family_history = [component]
+    planner_context.refinement_frontier_ids = []
+    planner_context.ensemble_candidate_ids = ["exp_0001"]
+    choice = SearchPolicy().choose(planner_context)
+    calls = []
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, timeout
+        calls.append(payload)
+        return response(candidate(component_experiment_ids=["hostile_component"]))
+
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(ProviderRequest(planner_context, choice))
+    )
+
+    assert choice.phase == "ensemble"
+    assert result["family"] == "ensemble"
+    assert result["method_card_ids"] == ["ensemble_diverse_residual_candidate"]
+    assert result["component_experiment_ids"] == ["exp_0001"]
+    prompt = json.loads(calls[0]["messages"][1]["content"])
+    assert prompt["policy"]["component_experiment_ids"] == ["exp_0001"]
+    assert prompt["context"]["ensemble_candidate_ids"] == ["exp_0001"]
 
 
 def test_research_planner_requests_one_deepseek_repair(planner_context):

@@ -518,6 +518,10 @@ class ExperimentSpec(StrictModel):
     falsification_condition: NonEmptyStr
     estimated_cost: CostEstimate
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
+    # Ensemble proposals retain one canonical Git parent and identify any
+    # additional clean component experiments explicitly.  Non-ensemble plans
+    # leave this empty.
+    component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
     duplicate_key: NonEmptyStr
 
@@ -530,6 +534,14 @@ class ExperimentSpec(StrictModel):
     @classmethod
     def validate_optional_id(cls, value: Optional[str]) -> Optional[str]:
         return None if value is None else _validate_id(value, "parent_experiment_id")
+
+    @field_validator("component_experiment_ids")
+    @classmethod
+    def validate_component_experiment_ids(cls, values: List[str]) -> List[str]:
+        normalized = [_validate_id(value, "component_experiment_id") for value in values]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("component_experiment_ids must be unique")
+        return normalized
 
     @field_validator("target_files")
     @classmethod
@@ -1124,6 +1136,7 @@ class PlannerExperimentSummary(StrictModel):
     status: NonEmptyStr
     duplicate_key: str = ""
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
+    component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)
 
 
@@ -1156,12 +1169,25 @@ class PlannerContext(ContextDocument):
     # This collection is authoritative. An empty list means there is no legal
     # parent; consumers must not reconstruct eligibility from history.
     eligible_frontier: List[PlannerExperimentSummary] = Field(default_factory=list)
+    # These are authoritative non-checkpoint portfolios. They do not alter
+    # parent_eligible/best_eligible and are consumed only by the matching
+    # bounded refinement or ensemble policy.
+    refinement_frontier_ids: List[NonEmptyStr] = Field(default_factory=list)
+    ensemble_candidate_ids: List[NonEmptyStr] = Field(default_factory=list)
     family_history: List[PlannerExperimentSummary] = Field(default_factory=list)
     method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
     playbook: PlannerPlaybookSummary
     target_interface_excerpts: Dict[str, NonEmptyStr]
     remaining_budget: PlannerBudgetSummary
     convergence: PlannerConvergenceSummary
+
+    @field_validator("refinement_frontier_ids", "ensemble_candidate_ids")
+    @classmethod
+    def validate_search_portfolio_ids(cls, values: List[str]) -> List[str]:
+        normalized = [_validate_id(value, "experiment_id") for value in values]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("planner search portfolio IDs must be unique")
+        return normalized
 
     @field_validator("target_interface_excerpts")
     @classmethod
