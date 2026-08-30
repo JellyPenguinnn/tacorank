@@ -267,8 +267,11 @@ def _snapshot(repository_root: Path, relative_path: str) -> ProtectedSnapshot:
         # snapshot from ``missing`` and therefore invalidates verification.
         return ProtectedSnapshot(normalized, "missing", hashlib.sha256(b"").hexdigest(), 0)
     if target.is_file():
-        digest, size = _hash_file(target)
         if gitlink is not None:
+            submodule_root = repository_root.joinpath(*gitlink.path.split("/"))
+            submodule_path = normalized[len(gitlink.path) :].lstrip("/")
+            canonical = _hash_git_worktree_file(submodule_root, submodule_path)
+            digest, size = canonical or _hash_file(target)
             digest = _hash_json(
                 {
                     "gitlink_path": gitlink.path,
@@ -277,6 +280,13 @@ def _snapshot(repository_root: Path, relative_path: str) -> ProtectedSnapshot:
                 }
             )
             return ProtectedSnapshot(normalized, "submodule_file", digest, size)
+        tracked = _tracked_files_within(repository_root, normalized)
+        if tracked == (normalized,):
+            canonical = _hash_git_worktree_file(repository_root, normalized)
+            if canonical is not None:
+                digest, size = canonical
+                return ProtectedSnapshot(normalized, "file", digest, size)
+        digest, size = _hash_file(target)
         return ProtectedSnapshot(normalized, "file", digest, size)
     if not target.is_dir():
         raise ProtectedManifestError("unsupported protected path type: {}".format(normalized))
@@ -313,7 +323,8 @@ def _snapshot(repository_root: Path, relative_path: str) -> ProtectedSnapshot:
                 raise ProtectedManifestError(
                     "tracked protected path is not a regular file: {}".format(relative)
                 )
-            digest, size = _hash_file(child)
+            canonical = _hash_git_worktree_file(repository_root, relative)
+            digest, size = canonical or _hash_file(child)
             total_size += size
             entries.append({"path": relative, "sha256": digest, "size_bytes": size})
         return ProtectedSnapshot(
@@ -463,6 +474,44 @@ def _run_git(repository: Path, arguments: Sequence[str]) -> Optional[bytes]:
     except (OSError, subprocess.SubprocessError):
         return None
     return completed.stdout if completed.returncode == 0 else None
+
+
+def _hash_git_worktree_file(
+    repository_root: Path,
+    relative_path: str,
+) -> Optional[Tuple[str, int]]:
+    """Hash tracked content through Git's clean-filter identity.
+
+    A Windows checkout may contain CRLF while a Docker or macOS worktree for
+    the same index content contains LF.  Bind such non-binary, line-ending-only
+    variants to the indexed bytes rather than to a platform-specific checkout
+    representation.  Any other worktree edit is hashed as-is and therefore
+    still fails verification.
+    """
+
+    try:
+        normalized = normalize_policy_path(relative_path)
+    except ValueError:
+        return None
+    indexed = _run_git(repository_root, ("show", ":" + normalized))
+    if indexed is None:
+        return None
+    try:
+        worktree = repository_root.joinpath(*normalized.split("/")).read_bytes()
+    except OSError:
+        return None
+    canonical = worktree
+    if worktree == indexed or _text_line_endings_equivalent(worktree, indexed):
+        canonical = indexed
+    return hashlib.sha256(canonical).hexdigest(), len(canonical)
+
+
+def _text_line_endings_equivalent(left: bytes, right: bytes) -> bool:
+    """Return whether two non-binary byte strings differ only by CRLF/LF."""
+
+    if b"\x00" in left or b"\x00" in right:
+        return False
+    return left.replace(b"\r\n", b"\n") == right.replace(b"\r\n", b"\n")
 
 
 def _hash_file(path: Path) -> Tuple[str, int]:

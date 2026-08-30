@@ -327,9 +327,10 @@ This proves a real integrated baseline path, live cross-iteration continuation, 
 - Candidate code runs in disposable worktrees and CPU Docker containers with bounded resources and output quotas.
 - Gate B validates prediction structure, row identity, finiteness, and producer lineage before evaluation.
 - Expected failures produce typed, redacted, hash-addressed evidence; repair and same-commit retries are bounded.
+- Recovery retries only the owning stage on immutable input. Verified candidate defects receive a grounded Trae repair prompt; malformed agent protocol, infrastructure, quota, and controller failures are not misrepresented as code defects. A candidate-scoped integrity rejection receives one clean Trae restart from the declared trusted parent, never an edit to the rejected candidate or a safety gate.
 - Every semantic solver pass records its diff hash, redacted Trae trajectory/process log, verifier findings, provider calls, tokens, and elapsed action time in attempt-local artifacts.
 - Malformed or truncated DeepSeek tool arguments are converted into an in-loop Trae correction step. If Trae still exits unsuccessfully, its redacted process log, trajectory when available, exact provider-token accounting, and wall time are ledgered; the same frozen coding assignment receives one clean retry before only that experiment is abandoned.
-- Deliberate integrity violations terminate the run and remain in the ledger.
+- Candidate-scoped integrity violations remain in the ledger, discard the rejected candidate, and receive at most one clean restart from the trusted parent. Credential findings, protected identity/control-plane mismatches, and repeated integrity violations remain fail-closed; only those system-scoped cases terminate the run as `fatal_integrity`.
 - Convergence counts terminal trusted full-fidelity research iterations, not confirmation-seed executions.
 - Finalization selects only the validation best, requires clean reproduction for a candidate, and keeps test identities out of planning and evaluation feedback.
 - Datasets, credentials, `.tacorank/`, submissions, environments, run ledgers, and generated artifacts are ignored and must never be committed.
@@ -494,6 +495,7 @@ Production never falls back to fake adapters. Deterministic fakes remain behind 
 | Docker preflight cannot reach the daemon | Start Docker Desktop or the configured compatible daemon, then rerun `preflight`. |
 | Trae reports `pexpect` has no `spawn` | The deployment predates the cross-platform Docker bridge. Preserve its evidence, update TacoRank, and create a fresh `setup-live` deployment and run ID. |
 | Trae exits with a Windows `UnicodeEncodeError` for a status glyph | Update TacoRank to a revision that forces UTF-8 for the isolated Trae subprocess, commit the tracked change, and create a fresh deployment and run ID. Do not reuse the finalized or hash-bound deployment. |
+| Gate A reports many protected paths changed although Git and `changed_file_match` are clean | Preserve the run evidence and update TacoRank. Protected manifests canonicalize tracked non-binary CRLF/LF checkout variants across Windows, macOS, and Linux while continuing to reject genuine text or binary tampering. Create a fresh deployment from the fixed commit. |
 | DeepSeek authentication or model preflight fails | Export a valid `DEEPSEEK_API_KEY` in the current shell; never place it in a tracked file. |
 | The run identifier already has a ledger | Choose a new `--run-id` in `setup-live`; completed ledgers are immutable and are not reused for new runs. |
 | `resume` rejects the current phase | The last durable state is mid-adapter and ambiguous. Preserve the ledger and evidence for operator review instead of fabricating a result. |

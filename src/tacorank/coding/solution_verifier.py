@@ -51,9 +51,11 @@ errors. When accepted is false, include at least one error and one required chan
 """
 
 
-COMPACT_RETRY_INSTRUCTION = """The previous response was malformed or incomplete.
-Return only the required compact JSON object. Preserve the same review conclusion,
-use at most five findings and five required changes, and omit all optional prose.
+COMPACT_RETRY_INSTRUCTION = """The previous response failed deterministic protocol
+validation. Correct only the response protocol; review the same candidate and do not
+request a code change merely because the prior JSON was malformed. Return only the
+required compact JSON object, use at most five findings and five required changes,
+and omit all optional prose.
 """
 
 
@@ -236,7 +238,7 @@ class DeepSeekSolutionVerifier:
                 )
             system = SOLUTION_VERIFIER_SYSTEM_PROMPT
             if call_index:
-                system += "\n" + COMPACT_RETRY_INSTRUCTION
+                system += "\n" + _protocol_retry_instruction(last_error)
             payload = {
                 "model": self.model,
                 "messages": [
@@ -265,9 +267,18 @@ class DeepSeekSolutionVerifier:
                     if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower()
                     else "TRAE_PROVIDER_UNAVAILABLE"
                 )
+                last_error = (
+                    "solution verifier provider request timed out"
+                    if code == "TRAE_PROVIDER_TIMEOUT"
+                    else "solution verifier provider request was unavailable"
+                )
+                if call_index == 0:
+                    # Keep the staged candidate intact and retry only the
+                    # verifier/provider within this bounded review call.
+                    continue
                 raise SolutionVerifierError(
                     code,
-                    "solution verifier provider request failed",
+                    last_error + " after one owner-stage retry",
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     wall_time_ms=_elapsed_ms(started),
@@ -371,8 +382,9 @@ def _completion_document(
 def _validate_document(
     document: Mapping[str, Any],
 ) -> tuple[bool, str, Tuple[SolutionFinding, ...], Tuple[str, ...]]:
-    if set(document) != {"accepted", "summary", "findings", "required_changes"}:
-        raise ValueError("verifier JSON keys differ from the required schema")
+    expected_keys = {"accepted", "summary", "findings", "required_changes"}
+    if set(document) != expected_keys:
+        raise ValueError(_schema_key_error("verifier JSON", document, expected_keys))
     accepted = document.get("accepted")
     summary = document.get("summary")
     raw_findings = document.get("findings")
@@ -396,13 +408,16 @@ def _validate_document(
 
 
 def _finding(value: Any) -> SolutionFinding:
-    if not isinstance(value, Mapping) or set(value) != {
+    expected_keys = {
         "code",
         "severity",
         "path",
         "message",
-    }:
-        raise ValueError("finding keys differ from the required schema")
+    }
+    if not isinstance(value, Mapping):
+        raise ValueError("finding must be an object with the required schema")
+    if set(value) != expected_keys:
+        raise ValueError(_schema_key_error("finding", value, expected_keys))
     code = _bounded_text(value.get("code"), "finding code", 80)
     if not code.replace("_", "").isalnum() or code.upper() != code:
         raise ValueError("finding code must be stable uppercase identifier text")
@@ -420,6 +435,67 @@ def _bounded_text(value: Any, label: str, maximum: int) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > maximum:
         raise ValueError(f"{label} must be a non-empty bounded string")
     return value.strip()
+
+
+def _protocol_retry_instruction(last_error: str) -> str:
+    """Build a bounded, parser-grounded verifier self-correction prompt."""
+
+    diagnostic = {
+        "error_code": _protocol_error_code(last_error),
+        "parser_error": last_error[:1000],
+        "proposed_fix": (
+            "Return exactly the documented top-level object and use only "
+            "code, severity, path, and message inside each finding."
+        ),
+    }
+    return COMPACT_RETRY_INSTRUCTION + "\nParser diagnostic:\n" + json.dumps(
+        diagnostic,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _protocol_error_code(error: str) -> str:
+    normalized = error.lower()
+    if normalized.startswith("finding keys differ"):
+        return "FINDING_KEYS_MISMATCH"
+    if normalized.startswith("verifier json keys differ"):
+        return "TOP_LEVEL_KEYS_MISMATCH"
+    if "malformed json" in normalized:
+        return "COMPLETION_JSON_MALFORMED"
+    if "provider request timed out" in normalized:
+        return "VERIFIER_PROVIDER_TIMEOUT"
+    if "provider request was unavailable" in normalized:
+        return "VERIFIER_PROVIDER_UNAVAILABLE"
+    if "finish cleanly" in normalized:
+        return "COMPLETION_TRUNCATED"
+    if "empty" in normalized:
+        return "COMPLETION_EMPTY"
+    return "VERIFIER_SCHEMA_VALIDATION_FAILED"
+
+
+def _schema_key_error(
+    label: str,
+    value: Mapping[str, Any],
+    expected: set[str],
+) -> str:
+    actual = {
+        key
+        for key in value
+        if isinstance(key, str)
+        and key.isascii()
+        and 0 < len(key) <= 64
+        and key.replace("_", "").isalnum()
+    }
+    invalid_count = len(value) - len(actual)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    return (
+        f"{label} keys differ from the required schema; "
+        f"missing={missing!r}; unexpected={unexpected!r}; "
+        f"invalid_key_count={invalid_count}"
+    )
 
 
 def _elapsed_ms(started: float) -> int:

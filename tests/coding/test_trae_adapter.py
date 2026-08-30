@@ -111,6 +111,8 @@ trajectory = {
     "fake_environment": {
         "PYTHON_DOTENV_DISABLED": os.environ.get("PYTHON_DOTENV_DISABLED"),
         "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
+        "PYTHONUTF8": os.environ.get("PYTHONUTF8"),
+        "PYTHONIOENCODING": os.environ.get("PYTHONIOENCODING"),
         "PATH": os.environ.get("PATH"),
         "DOCKER_CONFIG": os.environ.get("DOCKER_CONFIG"),
         "HOME": os.environ.get("HOME"),
@@ -576,6 +578,9 @@ def test_semantic_review_revises_then_accepts_and_records_complete_evidence(
             encoding="utf-8"
         )
     )
+    assert "# TacoRank bounded implementation-fidelity revision" in trajectory["task"]
+    assert "The approved mechanism is not fully wired." in trajectory["task"]
+    assert "Complete the approved mechanism wiring." in trajectory["task"]
     verification_meta = trajectory["tacorank_solution_verification"]
     assert verification_meta["accepted"] is True
     assert verification_meta["completed_attempts"] == 2

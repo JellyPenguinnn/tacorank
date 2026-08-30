@@ -501,6 +501,108 @@ class TraeCodingWorker:
             self.config.repair_wall_time_limit_seconds,
         )
 
+    async def restart_from_trusted_parent(
+        self, context: Any, decision: Any
+    ) -> Any:
+        """Discard an integrity-rejected candidate and recode from its parent."""
+
+        self._schema_factories()
+        self._verify_install_identity()
+        self._verify_runtime_root()
+        identity = self._resolve_identity(
+            self.identity_resolver.for_repair(context, decision)
+        )
+        repair_attempt = _context_int(context, "repair_attempt")
+        if identity.attempt != repair_attempt + 1:
+            raise CodingWorkerError(
+                "CANDIDATE_IDENTITY_MISMATCH",
+                "resolved coding attempt does not follow the recovery attempt",
+            )
+        rejected = _context_text(context, "current_patch_commit_sha")
+        original_spec = getattr(context, "original_experiment_spec", None)
+        if original_spec is None:
+            raise CodingWorkerError(
+                "RECOVERY_CONTEXT_INVALID", "missing original_experiment_spec"
+            )
+        trusted_parent = _model_field(original_spec, "parent_commit_sha")
+        prompt = build_repair_prompt(
+            context,
+            decision,
+            step_limit=self.config.repair_step_limit,
+            token_limit=self.config.repair_token_limit,
+            wall_time_limit_seconds=self.config.repair_wall_time_limit_seconds,
+            allowed_command_ids=self.config.repair_allowed_command_ids,
+            redactor=self.redactor,
+        )
+        run_id = _context_text(context, "run_id")
+        experiment_id = _context_text(context, "experiment_id")
+        try:
+            record = self.worktrees.attach(
+                run_id, experiment_id, rejected, require_clean=True
+            )
+        except GitOperationError as exc:
+            raise CodingWorkerError(exc.code, str(exc)) from exc
+        return await asyncio.to_thread(
+            self._restart_candidate,
+            context,
+            record,
+            rejected,
+            trusted_parent,
+            identity,
+            prompt,
+        )
+
+    def _restart_candidate(
+        self,
+        context: Any,
+        record: WorktreeRecord,
+        rejected_commit_sha: str,
+        trusted_parent_commit_sha: str,
+        identity: CandidateIdentity,
+        prompt: str,
+    ) -> Any:
+        try:
+            with self.worktrees.acquire_lease(
+                record,
+                timeout_seconds=self.config.worktree_lease_timeout_seconds,
+            ):
+                restored = self.worktrees.restore_trusted_parent(
+                    record,
+                    rejected_commit_sha=rejected_commit_sha,
+                    trusted_parent_commit_sha=trusted_parent_commit_sha,
+                )
+                try:
+                    return self._produce_candidate_with_lease(
+                        context,
+                        restored,
+                        trusted_parent_commit_sha,
+                        identity,
+                        prompt,
+                        self.config.repair_step_limit,
+                        self.config.repair_token_limit,
+                        self.config.repair_wall_time_limit_seconds,
+                    )
+                except Exception as primary_error:
+                    try:
+                        self.worktrees.discard_uncommitted_changes(
+                            restored,
+                            expected_commit_sha=trusted_parent_commit_sha,
+                        )
+                    except GitOperationError as cleanup_error:
+                        raise CodingWorkerError(
+                            "CODING_WORKTREE_CLEANUP_FAILED",
+                            "failed clean restart could not be restored to the trusted parent",
+                            resource_delta=getattr(
+                                primary_error, "resource_delta", None
+                            ),
+                            diagnostic_artifacts=getattr(
+                                primary_error, "diagnostic_artifacts", ()
+                            ),
+                        ) from primary_error
+                    raise
+        except GitOperationError as exc:
+            raise CodingWorkerError(exc.code, str(exc)) from exc
+
     def _produce_candidate(
         self,
         context: Any,
@@ -3171,6 +3273,12 @@ class FakeCodingWorker:
 
     async def repair_patch(self, context: Any, decision: Any) -> Any:
         self.calls.append(("repair_patch", context, decision))
+        return _fake_result(self.repair_result)
+
+    async def restart_from_trusted_parent(
+        self, context: Any, decision: Any
+    ) -> Any:
+        self.calls.append(("restart_from_trusted_parent", context, decision))
         return _fake_result(self.repair_result)
 
 

@@ -201,6 +201,7 @@ class MonitorAction(str, Enum):
 
 class RecoveryAction(str, Enum):
     TRAE_REPAIR = "trae_repair"
+    RESTART_FROM_TRUSTED_PARENT = "restart_from_trusted_parent"
     RETRY_SAME_COMMIT = "retry_same_commit"
     ADJUST_APPROVED_RUNTIME_SETTING = "adjust_approved_runtime_setting"
     RETURN_TO_PLANNER = "return_to_planner"
@@ -1516,6 +1517,8 @@ class CoderContext(ContextDocument):
     active_lessons: List[Dict[str, Any]] = Field(default_factory=list)
     coding_invariants: List[NonEmptyStr] = Field(default_factory=list)
     prior_result_summaries: List[CoderPriorResultSummary] = Field(default_factory=list)
+    owner_retry_error_summary: Optional[NonEmptyStr] = None
+    owner_retry_instructions: Optional[NonEmptyStr] = None
     step_limit: int = Field(gt=0)
     token_limit: Optional[int] = Field(gt=0)
     wall_time_limit_seconds: int = Field(gt=0)

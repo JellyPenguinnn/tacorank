@@ -410,7 +410,13 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         decision = payload.decision
         node = state.experiments.get(decision.experiment_id)
         _require(node is not None and node.status == ExperimentStatus.RECOVERING, "nothing is recoverable")
-        consumes_repair = int(decision.action == RecoveryAction.TRAE_REPAIR)
+        consumes_repair = int(
+            decision.action
+            in {
+                RecoveryAction.TRAE_REPAIR,
+                RecoveryAction.RESTART_FROM_TRUSTED_PARENT,
+            }
+        )
         expected_attempt = min(
             max(1, node.repair_count + 1),
             max(1, state.max_repairs_per_experiment),

@@ -43,6 +43,11 @@ class CodingWorker(Protocol):
     ) -> PatchCandidate:
         ...
 
+    async def restart_from_trusted_parent(
+        self, context: RecoveryContext, decision: RecoveryDecision
+    ) -> PatchCandidate:
+        ...
+
 
 class PatchGate(Protocol):
     async def check(self, candidate: PatchCandidate) -> PatchCheckResult:

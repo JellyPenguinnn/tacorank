@@ -98,7 +98,9 @@ def test_transient_initial_coding_failure_gets_one_bounded_retry():
     ctx.failure_stage = "coding"
     first = decide(result, ctx)
     assert first.action == RecoveryAction.RETRY_SAME_COMMIT
-    assert first.reason_code == "TRANSIENT_CODING_RETRY"
+    assert first.reason_code == "TRANSIENT_CODING_WORKER_RETRY"
+    assert "Give Trae this exact diagnostic" in first.instructions
+    assert "DIAGNOSIS" in first.instructions
 
     second_ctx = context(
         previous=[classify_failure(result).fingerprint], retries=1
@@ -106,6 +108,37 @@ def test_transient_initial_coding_failure_gets_one_bounded_retry():
     second_ctx.failure_stage = "coding"
     second = decide(result, second_ctx)
     assert second.action == RecoveryAction.ABANDON
+
+
+def test_correctable_coding_protocol_failure_reissues_owner_with_diagnostic():
+    result = run_failure("code_error", "must-patch task produced no Git diff")
+    result.failure_stage = "coding"
+    result.error_class = "NO_PATCH"
+    ctx = context()
+    ctx.failure_stage = "coding"
+
+    decision = decide(result, ctx)
+
+    assert decision.action == RecoveryAction.RETRY_SAME_COMMIT
+    assert decision.reason_code == "TRANSIENT_CODING_WORKER_RETRY"
+    assert "must-patch task produced no Git diff" in decision.instructions
+    assert "Give Trae this exact diagnostic" in decision.instructions
+    assert "REPAIR_PLAN" in decision.instructions
+    assert decision.remaining_repair_budget == 2
+
+
+def test_coding_configuration_failure_is_not_given_to_candidate_agent():
+    result = run_failure("code_error", "pinned runtime identity does not match")
+    result.failure_stage = "coding"
+    result.error_class = "TRAE_RUNTIME_IDENTITY_MISMATCH"
+    ctx = context()
+    ctx.failure_stage = "coding"
+
+    decision = decide(result, ctx)
+
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "CODING_WORKER_FAILURE"
+    assert decision.remaining_repair_budget == 2
 
 
 def test_integrity_registry_covers_path_data_and_output_boundaries():
@@ -132,6 +165,199 @@ def test_disk_quota_failure_abandons_without_same_commit_retry():
     decision = decide(result)
     assert decision.action == RecoveryAction.ABANDON
     assert decision.reason_code == "DISK_QUOTA_EXHAUSTED"
+
+
+def test_malformed_solution_verifier_is_terminal_after_internal_retries():
+    result = run_failure(
+        "code_error",
+        "solution verifier finding keys differ from the required schema",
+    )
+    result.failure_stage = "coding"
+    result.error_class = "SOLUTION_VERIFIER_MALFORMED"
+    ctx = context()
+    ctx.failure_stage = "coding"
+
+    classification = classify_failure(result)
+    decision = decide(result, ctx)
+
+    assert classification.owner == "solution_verifier"
+    assert not classification.owner_retryable
+    assert not classification.trae_repairable
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "SOLUTION_VERIFIER_RETRY_EXHAUSTED"
+    assert "Preserve the candidate trajectory" in decision.instructions
+    assert "do not rerun Trae" in decision.instructions
+    assert decision.remaining_repair_budget == 2
+
+
+def test_repeated_malformed_solution_verifier_does_not_consume_repair_budget():
+    result = run_failure(
+        "code_error",
+        "solution verifier finding keys differ from the required schema",
+    )
+    result.failure_stage = "coding"
+    result.error_class = "SOLUTION_VERIFIER_MALFORMED"
+    fingerprint = classify_failure(result).fingerprint
+    ctx = context(previous=[fingerprint], retries=1)
+    ctx.failure_stage = "coding"
+
+    decision = decide(result, ctx)
+
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "SOLUTION_VERIFIER_RETRY_EXHAUSTED"
+    assert decision.remaining_repair_budget == 2
+
+
+def test_verifier_provider_exhaustion_does_not_rerun_coding_worker():
+    result = run_failure(
+        "code_error",
+        "solution verifier provider request failed after bounded retries",
+    )
+    result.failure_stage = "coding"
+    result.error_class = "TRAE_PROVIDER_UNAVAILABLE"
+    ctx = context()
+    ctx.failure_stage = "coding"
+
+    classification = classify_failure(result)
+    decision = decide(result, ctx)
+
+    assert classification.owner == "solution_verifier"
+    assert not classification.owner_retryable
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "SOLUTION_VERIFIER_RETRY_EXHAUSTED"
+    assert "do not rerun Trae" in decision.instructions
+    assert decision.remaining_repair_budget == 2
+
+
+def test_escaped_patch_gate_exception_is_not_sent_to_trae():
+    result = run_failure("code_error", "receipt store returned inconsistent bytes")
+    result.failure_stage = "patch_gate"
+    result.error_class = "RuntimeError"
+    ctx = context()
+    ctx.failure_stage = "patch_gate"
+
+    classification = classify_failure(result)
+    decision = decide(result, ctx)
+
+    assert classification.owner == "patch_gate"
+    assert classification.control_plane_failure
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "CONTROL_PLANE_INVARIANT_FAILURE"
+    assert "do not ask Trae" in decision.instructions
+
+
+def test_transient_evaluator_provider_failure_retries_evaluator_only():
+    result = run_failure(
+        "infrastructure_error", "evaluation provider is temporarily unavailable"
+    )
+    result.failure_stage = "evaluation"
+    result.error_class = "EVALUATOR_PROVIDER_UNAVAILABLE"
+    ctx = context()
+    ctx.failure_stage = "evaluation"
+
+    classification = classify_failure(result)
+    decision = decide(result, ctx)
+
+    assert classification.owner == "evaluator"
+    assert classification.owner_retryable
+    assert decision.action == RecoveryAction.RETRY_SAME_COMMIT
+    assert decision.reason_code == "TRANSIENT_EVALUATOR_RETRY"
+    assert "Retry only the evaluator stage" in decision.instructions
+    assert decision.remaining_repair_budget == 2
+
+
+def test_contract_identity_mismatch_is_control_plane_not_code_repair():
+    result = SimpleNamespace(
+        accepted=False,
+        checks=[],
+        violations=[
+            SimpleNamespace(
+                code="CONTRACT_HASH_MISMATCH",
+                message="protected manifest differs from sealed identity",
+            )
+        ],
+    )
+
+    classification = classify_failure(result)
+    decision = decide(result)
+
+    assert classification.control_plane_failure
+    assert not classification.trae_repairable
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "CONTROL_PLANE_INVARIANT_FAILURE"
+
+
+def test_typed_gate_a_interface_rejection_routes_to_grounded_trae_repair():
+    result = SimpleNamespace(
+        accepted=False,
+        checks=[SimpleNamespace(name="interface", status="fail")],
+        violations=[
+            SimpleNamespace(
+                code="INTERFACE_MISMATCH",
+                message="candidate callable signature is incompatible",
+            )
+        ],
+    )
+
+    classification = classify_failure(result)
+    decision = decide(result)
+
+    assert classification.failure_class == "contract_error"
+    assert classification.trae_repairable
+    assert not classification.control_plane_failure
+    assert decision.action == RecoveryAction.TRAE_REPAIR
+    assert "candidate callable signature is incompatible" in decision.instructions
+
+
+def test_typed_output_contract_rejection_routes_to_grounded_trae_repair():
+    result = SimpleNamespace(
+        accepted=False,
+        checks={"header": "fail", "row_count": "pass"},
+        violations=[],
+    )
+
+    classification = classify_failure(result)
+    decision = decide(result)
+
+    assert classification.failure_class == "output_contract"
+    assert classification.trae_repairable
+    assert not classification.control_plane_failure
+    assert decision.action == RecoveryAction.TRAE_REPAIR
+    assert "header" in decision.instructions
+
+
+def test_candidate_interface_failure_remains_a_grounded_trae_repair():
+    result = run_failure(
+        "interface_error", "candidate emitted the wrong prediction columns"
+    )
+
+    classification = classify_failure(result)
+    decision = decide(result)
+
+    assert classification.owner == "execution_runner"
+    assert classification.trae_repairable
+    assert decision.action == RecoveryAction.TRAE_REPAIR
+    assert "wrong prediction columns" in decision.instructions
+    assert "DIAGNOSIS:" in decision.instructions
+
+
+@pytest.mark.parametrize(
+    "outcome,summary",
+    [
+        ("code_error", "NameError in candidate implementation"),
+        ("interface_error", "candidate output columns do not match"),
+        ("contract_error", "candidate command contract does not match"),
+        ("numerical_error", "candidate scores contain NaN"),
+    ],
+)
+def test_typed_candidate_defects_are_the_only_general_trae_repairs(
+    outcome, summary
+):
+    decision = decide(run_failure(outcome, summary))
+
+    assert decision.action == RecoveryAction.TRAE_REPAIR
+    assert summary in decision.instructions
+    assert decision.remaining_repair_budget == 1
 
 
 @pytest.mark.parametrize("dimension", ["wall_time_seconds", "token", "gpu_seconds"])
@@ -238,11 +464,48 @@ def test_oom_without_contract_approved_adjustment_rolls_back():
         ("TARGET_LABEL_ACCESS", "candidate read target labels"),
     ],
 )
-def test_deliberate_integrity_codes_abandon_without_repair(code, message):
+def test_candidate_integrity_codes_restart_once_from_trusted_parent(code, message):
     result = SimpleNamespace(
         accepted=False,
         checks=[],
         violations=[SimpleNamespace(code=code, message=message)],
+    )
+    decision = decide(result)
+
+    assert decision.action == RecoveryAction.RESTART_FROM_TRUSTED_PARENT
+    assert decision.reason_code == "CANDIDATE_INTEGRITY_CLEAN_RESTART"
+    assert decision.remaining_repair_budget == 1
+    assert "Do not edit, bypass, or weaken" in decision.instructions
+
+
+def test_repeated_candidate_integrity_violation_abandons_only_experiment():
+    result = SimpleNamespace(
+        accepted=False,
+        checks=[],
+        violations=[
+            SimpleNamespace(
+                code="PROTECTED_PATH_MODIFIED",
+                message="candidate patch touches a protected path",
+            )
+        ],
+    )
+    fingerprint = classify_failure(result).fingerprint
+    decision = decide(result, context(previous=[fingerprint], remaining=1))
+
+    assert decision.action == RecoveryAction.ABANDON
+    assert decision.reason_code == "CANDIDATE_INTEGRITY_RETRY_EXHAUSTED"
+
+
+def test_secret_detection_remains_terminal_integrity_violation():
+    result = SimpleNamespace(
+        accepted=False,
+        checks=[],
+        violations=[
+            SimpleNamespace(
+                code="SECRET_DETECTED",
+                message="credential material was detected",
+            )
+        ],
     )
     decision = decide(result)
 

@@ -425,6 +425,41 @@ class WorktreeManager:
         _git(actual_path, ("clean", "-ffdx", "--", "."))
         self.verify(record, expected_commit_sha=expected, require_clean=True)
 
+    def restore_trusted_parent(
+        self,
+        record: WorktreeRecord,
+        *,
+        rejected_commit_sha: str,
+        trusted_parent_commit_sha: str,
+    ) -> WorktreeRecord:
+        """Discard a rejected candidate and restore its declared parent.
+
+        This history rewrite is limited to the leased disposable experiment
+        branch.  Both endpoints are resolved locally, the rejected tip must be
+        the exact registered worktree HEAD, and the trusted parent must be its
+        ancestor.  It is used only for candidate-scoped integrity recovery;
+        the rejected commit remains cited by immutable ledger/artifact evidence.
+        """
+
+        actual_path, rejected = self._verify_identity_and_head(
+            record, expected_commit_sha=rejected_commit_sha
+        )
+        trusted = resolve_commit(self.repository, trusted_parent_commit_sha)
+        require_ancestor(self.repository, trusted, rejected)
+        _git(actual_path, ("reset", "--hard", trusted))
+        _git(actual_path, ("clean", "-ffdx", "--", "."))
+        restored = WorktreeRecord(
+            repository=self.repository,
+            path=actual_path,
+            branch=record.branch,
+            run_id=record.run_id,
+            experiment_id=record.experiment_id,
+            commit_sha=trusted,
+        )
+        self._initialize_submodules(restored, trusted)
+        self.verify(restored, expected_commit_sha=trusted, require_clean=True)
+        return restored
+
     def _verify_identity_and_head(
         self,
         record: WorktreeRecord,

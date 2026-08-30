@@ -4,10 +4,23 @@ import asyncio
 
 from tacorank.memory.replay import replay
 from tacorank.coding.trae_adapter import CodingWorkerError
-from tacorank.orchestrator.fakes import FakeCodingWorker, FakeExecutionRunner
+from tacorank.orchestrator.fakes import (
+    FakeCodingWorker,
+    FakeExecutionRunner,
+    FakeOutputGate,
+    FakePatchGate,
+)
 from tacorank.orchestrator.state import ExperimentStatus
 from tacorank.recovery.policy import RecoveryManager
-from tacorank.schemas import EventType, RecoveryAction, RunOutcome
+from tacorank.schemas import (
+    CheckResult,
+    CheckStatus,
+    EventType,
+    PatchCheckResult,
+    RecoveryAction,
+    RunOutcome,
+    Violation,
+)
 
 
 class RepairingCodingWorker(FakeCodingWorker):
@@ -39,13 +52,65 @@ class FailingRepairWorker(RepairingCodingWorker):
         raise RuntimeError("TRAE_REPORTED_FAILURE: trajectory was unsuccessful")
 
 
-class TransientInitialCodingWorker(FakeCodingWorker):
+class IntegrityRestartingCodingWorker(RepairingCodingWorker):
+    def __init__(self, artifacts):
+        super().__init__(artifacts)
+        self.restart_calls = []
+
+    async def restart_from_trusted_parent(self, context, decision):
+        self.restart_calls.append((context, decision))
+        values = self.initial_patch.model_dump(mode="json")
+        values.update(
+            {
+                "context_id": context.context_id,
+                "base_commit_sha": context.original_experiment_spec.parent_commit_sha,
+                "patch_commit_sha": "d" * 40,
+            }
+        )
+        return self.initial_patch.__class__.model_validate(values)
+
+
+class IntegrityRejectOncePatchGate(FakePatchGate):
     def __init__(self, artifacts):
         super().__init__(artifacts)
         self.calls = 0
 
+    async def check(self, candidate):
+        self.calls += 1
+        if self.calls == 1:
+            return PatchCheckResult(
+                run_id=candidate.run_id,
+                experiment_id=candidate.experiment_id,
+                attempt=candidate.attempt,
+                patch_commit_sha=candidate.patch_commit_sha,
+                diff_sha256=candidate.diff_sha256,
+                accepted=False,
+                checks=[
+                    CheckResult(
+                        name="protected_path",
+                        status=CheckStatus.FAIL,
+                        summary="candidate patch touches a protected path",
+                    )
+                ],
+                violations=[
+                    Violation(
+                        code="PROTECTED_PATH_MODIFIED",
+                        message="candidate patch touches a protected path",
+                    )
+                ],
+            )
+        return await super().check(candidate)
+
+
+class TransientInitialCodingWorker(FakeCodingWorker):
+    def __init__(self, artifacts):
+        super().__init__(artifacts)
+        self.calls = 0
+        self.contexts = []
+
     async def create_patch(self, context, spec):
         self.calls += 1
+        self.contexts.append(context)
         if self.calls == 1:
             raise CodingWorkerError(
                 "TRAE_LAUNCH_FAILED",
@@ -166,6 +231,98 @@ class OomOnceRunner(FakeExecutionRunner):
         return result
 
 
+class RaisingOnceEvaluator:
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.evaluate_requests = []
+
+    async def evaluate(self, request):
+        self.evaluate_requests.append(request)
+        if len(self.evaluate_requests) == 1:
+            raise CodingWorkerError(
+                "EVALUATOR_PROVIDER_UNAVAILABLE",
+                "evaluation provider is temporarily unavailable",
+            )
+        return await self.delegate.evaluate(request)
+
+    async def decide(self, result, context):
+        return await self.delegate.decide(result, context)
+
+
+class RaisingOnceDecisionEvaluator:
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.decide_inputs = []
+
+    async def evaluate(self, request):
+        return await self.delegate.evaluate(request)
+
+    async def decide(self, result, context):
+        self.decide_inputs.append((result, context))
+        if len(self.decide_inputs) == 1:
+            raise CodingWorkerError(
+                "EVALUATOR_PROVIDER_UNAVAILABLE",
+                "evaluation decision provider is temporarily unavailable",
+            )
+        return await self.delegate.decide(result, context)
+
+
+class RaisingOncePatchGate:
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.candidates = []
+
+    async def check(self, candidate):
+        self.candidates.append(candidate)
+        if len(self.candidates) == 1:
+            raise CodingWorkerError(
+                "PROVIDER_UNAVAILABLE",
+                "patch gate provider is temporarily unavailable",
+            )
+        return await self.delegate.check(candidate)
+
+
+class RaisingOnceOutputGate:
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.results = []
+
+    async def check(self, result):
+        self.results.append(result)
+        if len(self.results) == 1:
+            raise CodingWorkerError(
+                "PROVIDER_UNAVAILABLE",
+                "output gate provider is temporarily unavailable",
+            )
+        return await self.delegate.check(result)
+
+
+def test_first_attempt_stage_results_keep_direct_stage_causation(
+    harness, baseline_evaluation
+):
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
+    events = harness.events()
+    by_id = {event.event_id: event for event in events}
+    expected_parent_types = {
+        EventType.PATCH_CHECKED: {EventType.PATCH_CREATED},
+        EventType.OUTPUT_CHECKED: {EventType.EXECUTION_FINISHED},
+        EventType.EVALUATION_COMPLETED: {EventType.OUTPUT_CHECKED},
+        EventType.EXPERIMENT_DECIDED: {
+            EventType.OUTPUT_CHECKED,
+            EventType.EVALUATION_COMPLETED,
+        },
+    }
+    for event in events:
+        if event.event_type not in expected_parent_types:
+            continue
+        cause = by_id[event.causation_event_id]
+        assert cause.event_type in expected_parent_types[event.event_type]
+
+
 def test_real_recovery_repairs_gates_reruns_and_replays(
     harness, baseline_evaluation
 ):
@@ -211,6 +368,37 @@ def test_real_recovery_repairs_gates_reruns_and_replays(
     assert replay(events).experiments["exp_001"].repair_count == 1
 
 
+def test_candidate_integrity_failure_restarts_from_parent_and_continues(
+    harness, baseline_evaluation
+):
+    artifacts = harness.event_store.artifact_store
+    worker = IntegrityRestartingCodingWorker(artifacts)
+    gate = IntegrityRejectOncePatchGate(artifacts)
+    harness.coding_worker = worker
+    harness.patch_gate = gate
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert state.stop_reason_code is None
+    assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
+    assert state.experiments["exp_001"].repair_count == 1
+    assert len(worker.restart_calls) == 1
+    restart_context, restart_decision = worker.restart_calls[0]
+    assert restart_decision.action == RecoveryAction.RESTART_FROM_TRUSTED_PARENT
+    assert restart_decision.reason_code == "CANDIDATE_INTEGRITY_CLEAN_RESTART"
+    assert restart_context.current_patch_commit_sha == "a" * 40
+    assert "PROTECTED_PATH_MODIFIED" in restart_context.error_summary
+    assert gate.calls >= 2
+    recovery_events = [
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    ]
+    assert recovery_events[-1].action == RecoveryAction.RESTART_FROM_TRUSTED_PARENT
+
+
 def test_trae_exception_is_recorded_and_stops_fail_closed(
     harness, baseline_evaluation
 ):
@@ -251,6 +439,13 @@ def test_transient_initial_coding_failure_retries_and_persists_redacted_tail(
     state = asyncio.run(harness.run_one_experiment())
 
     assert worker.calls == 2
+    assert worker.contexts[0].owner_retry_error_summary is None
+    assert "failed to launch Trae" in worker.contexts[1].owner_retry_error_summary
+    assert "sk-test-secret" not in worker.contexts[1].owner_retry_error_summary
+    assert "[REDACTED]" in worker.contexts[1].owner_retry_error_summary
+    assert "Retry the same coding assignment once" in (
+        worker.contexts[1].owner_retry_instructions
+    )
     assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
     events = harness.events()
     failure = next(
@@ -382,6 +577,160 @@ def test_runner_exception_is_retried_as_infrastructure_failure(
         if event.event_type == EventType.RECOVERY_DECIDED
     )
     assert decision.action == RecoveryAction.RETRY_SAME_COMMIT
+
+
+def test_evaluator_exception_retries_evaluator_without_rerunning_candidate(
+    harness, baseline_evaluation
+):
+    runner = FakeExecutionRunner(harness.event_store.artifact_store)
+    evaluator = RaisingOnceEvaluator(harness.evaluator)
+    harness.runner = runner
+    harness.evaluator = evaluator
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+    assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
+    assert len(evaluator.evaluate_requests) >= 2
+    assert evaluator.evaluate_requests[0] == evaluator.evaluate_requests[1]
+    execution_starts = [
+        event
+        for event in harness.events()
+        if event.event_type == EventType.EXECUTION_STARTED
+    ]
+    # One smoke, one proxy, and three full-seed executions: the transient
+    # evaluator retry must not create an extra execution attempt.
+    assert len(execution_starts) == 5
+    failure = next(
+        event
+        for event in harness.events()
+        if event.event_type == EventType.ADAPTER_FAILED
+    )
+    assert failure.payload.result.failure_stage == "evaluation"
+    decision = next(
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    )
+    assert decision.action == RecoveryAction.RETRY_SAME_COMMIT
+    recovery_event = next(
+        event
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    )
+    evaluation_event = next(
+        event
+        for event in harness.events()
+        if event.event_type == EventType.EVALUATION_COMPLETED
+    )
+    assert evaluation_event.causation_event_id == recovery_event.event_id
+
+
+def test_patch_gate_exception_retries_gate_against_same_candidate(
+    harness, baseline_evaluation
+):
+    gate = RaisingOncePatchGate(FakePatchGate(harness.event_store.artifact_store))
+    harness.patch_gate = gate
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
+    assert len(gate.candidates) == 2
+    assert gate.candidates[0] == gate.candidates[1]
+    decision = next(
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    )
+    assert decision.action == RecoveryAction.RETRY_SAME_COMMIT
+    assert decision.reason_code == "TRANSIENT_PATCH_GATE_RETRY"
+    recovery_event = next(
+        event
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    )
+    patch_check_event = next(
+        event
+        for event in harness.events()
+        if event.event_type == EventType.PATCH_CHECKED
+    )
+    assert patch_check_event.causation_event_id == recovery_event.event_id
+
+
+def test_evaluation_decision_exception_retries_decider_without_reevaluation(
+    harness, baseline_evaluation
+):
+    evaluator = RaisingOnceDecisionEvaluator(harness.evaluator)
+    harness.evaluator = evaluator
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
+    assert len(evaluator.decide_inputs) >= 2
+    assert evaluator.decide_inputs[0] == evaluator.decide_inputs[1]
+    decision = next(
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    )
+    assert decision.reason_code == "TRANSIENT_EVALUATOR_RETRY"
+    recovery_event = next(
+        event
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    )
+    experiment_decision = next(
+        event
+        for event in harness.events()
+        if event.event_type == EventType.EXPERIMENT_DECIDED
+        and event.causation_event_id == recovery_event.event_id
+    )
+    assert experiment_decision.causation_event_id == recovery_event.event_id
+
+
+def test_output_gate_exception_retries_gate_without_rerunning_candidate(
+    harness, baseline_evaluation
+):
+    runner = FakeExecutionRunner(harness.event_store.artifact_store)
+    gate = RaisingOnceOutputGate(FakeOutputGate())
+    harness.runner = runner
+    harness.output_gate = gate
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
+    assert len(gate.results) == 6
+    assert gate.results[0] == gate.results[1]
+    execution_starts = [
+        event
+        for event in harness.events()
+        if event.event_type == EventType.EXECUTION_STARTED
+    ]
+    assert len(execution_starts) == 5
+    decision = next(
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    )
+    assert decision.action == RecoveryAction.RETRY_SAME_COMMIT
+    assert decision.reason_code == "TRANSIENT_OUTPUT_GATE_RETRY"
+    recovery_event = next(
+        event
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    )
+    output_event = next(
+        event
+        for event in harness.events()
+        if event.event_type == EventType.OUTPUT_CHECKED
+    )
+    assert output_event.causation_event_id == recovery_event.event_id
 
 
 def test_approved_runtime_adjustment_is_applied_without_code_repair(

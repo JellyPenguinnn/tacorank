@@ -71,6 +71,33 @@ DELIBERATE_INTEGRITY_CODES = frozenset(
     }
 )
 
+# These findings are caused by one disposable candidate and can be recovered
+# without trusting or editing that candidate: discard its branch tip, restore
+# the declared parent commit, and issue one constrained coding restart.  Secret
+# findings are intentionally excluded because the credential/evidence boundary
+# may already be compromised and requires operator review.
+CANDIDATE_SCOPED_INTEGRITY_CODES = frozenset(
+    {
+        code.value
+        for code in (
+            ViolationCode.PROTECTED_PATH_MODIFIED,
+            ViolationCode.PATH_TRAVERSAL,
+            ViolationCode.SYMLINK_ESCAPE,
+            ViolationCode.SUBMODULE_ESCAPE,
+            ViolationCode.HIDDEN_LABEL_ACCESS,
+            ViolationCode.FUTURE_INFORMATION_LEAKAGE,
+            ViolationCode.UNAPPROVED_NETWORK,
+            ViolationCode.OUTPUT_PROTECTED_DATA,
+        )
+    }
+    | {
+        "FORBIDDEN_INPUT_DETECTED",
+        "NETWORK_ACCESS",
+        "TARGET_LABEL_ACCESS",
+        "UNAUTHORIZED_NETWORK_ACCESS",
+    }
+)
+
 
 @dataclass(frozen=True)
 class PolicyViolation:
