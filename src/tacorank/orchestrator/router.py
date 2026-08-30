@@ -80,6 +80,15 @@ class OrchestrationError(RuntimeError):
     pass
 
 
+class ResumablePlanningError(OrchestrationError):
+    """Provider output is invalid, but the durable planning checkpoint is safe.
+
+    This is deliberately distinct from control-plane failures.  Callers can
+    replace the planner and resume from the persisted ``planner_context``
+    without marking the run stopped or fabricating a recovery event.
+    """
+
+
 class Harness:
     def __init__(
         self,
@@ -634,6 +643,12 @@ class Harness:
     async def run_one_experiment(self) -> object:
         try:
             return await self._run_one_experiment()
+        except ResumablePlanningError:
+            # Invalid provider output is an expected, operator-resumable
+            # boundary.  Preserve the planning checkpoint and let the caller
+            # inspect/replace the provider instead of converting it into a
+            # stopped run.
+            raise
         except Exception as error:
             try:
                 return await self._handle_unexpected_adapter_failure(error)
@@ -672,7 +687,7 @@ class Harness:
             )
             if planner_output.action == PlannerAction.BLOCKED:
                 if planner_output.reason_code == "INVALID_PROVIDER_PLAN":
-                    raise OrchestrationError(
+                    raise ResumablePlanningError(
                         "research provider failed bounded plan validation; "
                         "resume from the persisted planner checkpoint"
                     )
@@ -680,8 +695,9 @@ class Harness:
             else:
                 decision = self.deterministic_stop()
                 if not decision.stop:
-                    raise OrchestrationError(
-                        "planner stop recommendation is advisory and no frozen stop rule matched"
+                    raise ResumablePlanningError(
+                        "planner stop recommendation is invalid and no frozen stop rule matched; "
+                        "resume from the persisted planner checkpoint"
                     )
             self.stop(decision)
             return self.state()
@@ -689,7 +705,10 @@ class Harness:
         spec = planner_output.spec
         assert spec is not None
         if spec.context_id != planner_context.context_id:
-            raise OrchestrationError("planner proposal cites a different context")
+            raise ResumablePlanningError(
+                "planner proposal cites a different context; "
+                "resume from the persisted planner checkpoint"
+            )
         proposal_event = self._append(
             ExperimentProposedPayload(spec=spec),
             stage="proposed",
