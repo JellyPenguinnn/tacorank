@@ -170,6 +170,59 @@ def test_ignored_worktree_change_is_rejected(
     assert failure.value.code == "WORKTREE_DIRTY"
 
 
+def test_discard_uncommitted_changes_restores_only_the_verified_disposable_worktree(
+    repository: tuple[Path, str], tmp_path: Path
+) -> None:
+    root, _ = repository
+    (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    _git(root, "add", ".gitignore")
+    _git(root, "commit", "-q", "-m", "ignore generated file")
+    base = _git(root, "rev-parse", "HEAD")
+    manager = WorktreeManager(root, tmp_path / "worktrees")
+    record = manager.create("retry", "exp1", base)
+    root_local_change = root / "developer-note.txt"
+    root_local_change.write_text("preserve me\n", encoding="utf-8")
+
+    (record.path / "solution" / "model.py").write_text("VALUE = 99\n", encoding="utf-8")
+    (record.path / "staged.txt").write_text("staged\n", encoding="utf-8")
+    (record.path / "ignored.txt").write_text("ignored\n", encoding="utf-8")
+    _git(record.path, "add", "--all", "--", ".")
+
+    with manager.acquire_lease(record, timeout_seconds=1):
+        manager.discard_uncommitted_changes(record, expected_commit_sha=base)
+
+    assert (record.path / "solution" / "model.py").read_text(
+        encoding="utf-8"
+    ) == "VALUE = 1\n"
+    assert not (record.path / "staged.txt").exists()
+    assert not (record.path / "ignored.txt").exists()
+    assert manager.verify(record, expected_commit_sha=base, require_clean=True) == base
+    assert root_local_change.read_text(encoding="utf-8") == "preserve me\n"
+
+
+def test_discard_uncommitted_changes_refuses_an_advanced_branch(
+    repository: tuple[Path, str], tmp_path: Path
+) -> None:
+    root, base = repository
+    manager = WorktreeManager(root, tmp_path / "worktrees")
+    record = manager.create("retry", "advanced", base)
+    candidate = record.path / "solution" / "model.py"
+    candidate.write_text("VALUE = 2\n", encoding="utf-8")
+    sealed = commit_staged_patch(
+        record.path,
+        stage_and_capture(record.path, base),
+        message="sealed candidate",
+    )
+
+    with manager.acquire_lease(record, timeout_seconds=1):
+        with pytest.raises(GitOperationError) as failure:
+            manager.discard_uncommitted_changes(record, expected_commit_sha=base)
+
+    assert failure.value.code == "WORKTREE_COMMIT_MISMATCH"
+    assert _git(record.path, "rev-parse", "HEAD") == sealed.patch_commit_sha
+    assert candidate.read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
 def test_worktree_lease_is_exclusive_bounded_and_stale_safe(
     repository: tuple[Path, str], tmp_path: Path
 ) -> None:
@@ -351,7 +404,10 @@ def test_submodule_initialization_uses_only_allowlisted_local_objects(
     with pytest.raises(GitOperationError) as failure:
         manager.verify(record, expected_commit_sha=base, require_clean=False)
     assert failure.value.code == "SUBMODULE_DIRTY"
-    _git(submodule, "checkout", "--", "payload.txt")
+    with manager.acquire_lease(record, timeout_seconds=1):
+        manager.discard_uncommitted_changes(record, expected_commit_sha=base)
+    assert (submodule / "payload.txt").read_text(encoding="utf-8") == "reviewed\n"
+    assert manager.verify(record, expected_commit_sha=base, require_clean=True) == base
     manager.remove(
         record,
         expected_commit_sha=base,

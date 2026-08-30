@@ -31,9 +31,9 @@ TacoRank is a deterministic, evidence-tracked harness for autonomous recommender
 
 ## Features
 
-- A complete researcher → coding worker → Gate A → CPU execution → Gate B → evaluation → reflection loop.
+- A complete researcher → Trae coding ↔ bounded implementation verifier → Gate A → CPU execution → Gate B → evaluation → reflection loop.
 - A deterministic controller that alone owns workflow state, budgets, recovery, convergence, promotion, rollback, and final selection.
-- Production adapters for DeepSeek research planning and the pinned Trae coding worker, with isolated test doubles restricted to tests.
+- Production adapters for DeepSeek research planning, the pinned Trae coding worker, and a strict plan-to-code verifier, with isolated test doubles restricted to tests.
 - Disposable Git worktrees, protected-path enforcement, symbolic execution commands, Docker isolation, resource limits, and typed recovery decisions.
 - An append-only, hash-chained event ledger with replayable state, immutable evidence artifacts, and reproducible derived reports.
 - KuaiRand-Pure evaluation fidelity: within-user ranking on `long_view`, protected GAUC and nDCG@5, label-free test inference, and official submission checking.
@@ -67,10 +67,12 @@ flowchart LR
     H[Human-frozen contract] --> O[Deterministic controller]
     O --> P1[Research planner]
     P1 -->|PlannerOutput / ExperimentSpec| O
-    O --> P3[Trae coding and execution]
-    P3 -->|TelemetrySample| P4[Health and recovery]
+    O --> P3[Trae coding]
+    P3 <--> V[Plan-to-code verifier, max 5]
+    P3 --> X[Gate A and CPU execution]
+    X -->|TelemetrySample| P4[Health and recovery]
     P4 -->|MonitorDirective / RecoveryDecision| O
-    P3 -->|Patch and run results| O
+    X -->|Patch and run results| O
     O --> P5[Evaluation and reflection]
     P5 -->|EvaluationResult / decision| O
     O --> E[(events.jsonl)]
@@ -96,7 +98,7 @@ Only the controller may append events or change workflow state. Role components 
 | Python | 3.9 or newer | TacoRank CLI and control plane |
 | Python | 3.12.x | Isolated pinned Trae runtime created by setup |
 | Docker | Running Docker-compatible daemon | Hardened Trae tools and CPU candidate execution |
-| DeepSeek | `DEEPSEEK_API_KEY` with model access | Research planning and Trae coding |
+| DeepSeek | `DEEPSEEK_API_KEY` with model access | Research planning, Trae coding, and bounded implementation review |
 | KuaiRand-Pure | Local official data, or network access for setup download | Training, evaluation, and submission generation |
 
 The live workflow is CPU-only. On macOS, Docker Desktop or a Docker-compatible daemon such as Colima is sufficient.
@@ -179,7 +181,7 @@ export DEEPSEEK_API_KEY='your-key'
   --input examples/trae/experiment-spec.json
 ```
 
-The local-only preflight checks the pinned Trae runtime and Docker tool boundary without reading a credential. The live preflight authenticates to DeepSeek and verifies `deepseek-v4-flash` access with high reasoning. The example creates a real patch in a disposable worktree and applies Gate A, then deliberately stops before dataset access, training, evaluation, or ledger creation.
+The local-only preflight checks the pinned Trae runtime and Docker tool boundary without reading a credential. The live preflight authenticates to DeepSeek and verifies `deepseek-v4-flash` access with high reasoning. The example creates a real patch in a disposable worktree, checks it against the exact ExperimentSpec through at most five bounded plan-to-code review/revision passes, and applies Gate A, then deliberately stops before dataset access, training, evaluation, or ledger creation.
 
 ## Run operations
 
@@ -238,7 +240,7 @@ src/tacorank/
   memory/            append-only event store and replay
   context/           bounded role-specific context construction
   orchestrator/      deterministic state machine and adapter routing
-  coding/            pinned Trae adapter, prompts, and redaction
+  coding/            pinned Trae adapter, semantic verifier, prompts, and redaction
   git/               experiment refs, patches, and disposable worktrees
   safety/            protected manifests, Gate A, and Gate B
   execution/         symbolic commands, Docker runner, and telemetry
@@ -304,7 +306,7 @@ Deterministic tests do not substitute for a live provider, Docker, data, or elap
 
 As of 2026-08-30:
 
-- The current complete automated suite passes 509 tests, with 11 expected platform skips.
+- The current complete automated suite passes 549 tests, with 11 expected platform skips.
 - A bounded live CPU run used the production DeepSeek researcher, pinned Trae worker, hardened Docker runner, and official KuaiRand-Pure data.
 - Trae produced a pairwise BPR candidate that changed only `solution/candidate.py`; all 14 Gate A checks and all 11 Gate B checks passed for both smoke and proxy execution.
 - Protected proxy evaluation scored GAUC `0.62112551`, nDCG@5 `0.51277198`, and primary `0.56694875`, so the controller correctly pruned the candidate.
@@ -312,16 +314,20 @@ As of 2026-08-30:
 - A separate live iterative regression run completed its first real coding, Gate A, CPU smoke/proxy, Gate B, protected evaluation, and prune cycle, then durably created and proposed `exp_002` and entered its new Trae coding context. It was intentionally stopped during that second coding pass after the continuation behavior was observed.
 - Post-run forensics found that the editable popularity parent scored `0.580721929` while the separately evaluated official FM scored `0.601468756`. The repaired candidate now reproduces the official FM bytes exactly; a full 124,909-row CPU replay returned GAUC `0.6671326322`, nDCG@5 `0.5358048805`, and primary `0.6014687564`.
 - The `exp_006` malformed DeepSeek tool-argument path is covered by an executable compatibility-patch test plus integration with Waihong's bounded self-recovery policy. The worker retains redacted evidence and exact provider-token/wall-time accounting; malformed arguments are corrected inside Trae first, while any remaining adapter failure follows the policy's classified same-commit retry, abandon, or stop decision. A new live provider run still requires a fresh clean deployment and is not implied by these deterministic checks.
+- Deterministic regression coverage now also exercises the five-review plan-to-code boundary, verifier JSON repair, Trae revision/exhaustion behavior, cumulative token/artifact accounting, ExperimentSpec target-file enforcement, and the isolated Gate A entrypoint import. These checks do not retroactively claim that the historical paid run used the new verifier.
 
 This proves a real integrated baseline path, live cross-iteration continuation, and current executable FM parity—not elapsed live convergence or a winning candidate. The bounded acceptance could not exercise three non-improving full iterations, and the candidate-best clean-reproduction path was not entered because the candidate failed proxy. Deterministic integration tests cover those control paths. Full historical evidence and scope are recorded in [`docs/person3-handoff.md`](docs/person3-handoff.md).
 
 ## Safety and reproducibility
 
 - Gate A binds an accepted patch to its commit, diff, contract, protected manifest, and data identities before execution.
+- Before Gate A, a strict DeepSeek verifier checks that the changed code materially implements the approved ExperimentSpec. It runs at most five reviews (the initial solution plus at most four bounded Trae revisions); it cannot inspect metrics, accept execution safety, or replace Gate A.
+- Gate A rejects cumulative changes outside `ExperimentSpec.target_files` and imports `solution.candidate:run` inside a read-only, network-disabled Docker boundary before issuing a receipt.
 - The runner resolves reviewed symbolic commands and never accepts raw LLM shell commands.
 - Candidate code runs in disposable worktrees and CPU Docker containers with bounded resources and output quotas.
 - Gate B validates prediction structure, row identity, finiteness, and producer lineage before evaluation.
 - Expected failures produce typed, redacted, hash-addressed evidence; repair and same-commit retries are bounded.
+- Every semantic solver pass records its diff hash, redacted Trae trajectory/process log, verifier findings, provider calls, tokens, and elapsed action time in attempt-local artifacts.
 - Malformed or truncated DeepSeek tool arguments are converted into an in-loop Trae correction step. If Trae still exits unsuccessfully, its redacted process log, trajectory when available, exact provider-token accounting, and wall time are ledgered; the same frozen coding assignment receives one clean retry before only that experiment is abandoned.
 - Deliberate integrity violations terminate the run and remain in the ledger.
 - Convergence counts terminal trusted full-fidelity research iterations, not confirmation-seed executions.
@@ -473,6 +479,7 @@ Production never falls back to fake adapters. Deterministic fakes remain behind 
 - Candidate execution is CPU-only; GPU commands fail closed until a hard per-container GPU-memory limit is available.
 - Automatic resume is supported only at durable planning checkpoints. A crash during a provider, coding, execution, or protected-evaluation call requires operator review at the last unambiguous boundary.
 - Live success depends on the current machine, credential, provider, Docker daemon, network, and official data. Passing deterministic tests alone does not prove those external dependencies are available.
+- Semantic verification is an implementation-alignment check, not evidence that a research idea will improve protected metrics; smoke, proxy, full execution, Gate B, and protected evaluation remain authoritative.
 - The finalized live acceptance was intentionally bounded to one experiment. A later live run proved transition into a second iteration but was intentionally stopped there; neither is evidence of elapsed three-iteration convergence.
 
 ## Documentation

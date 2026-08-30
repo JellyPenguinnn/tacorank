@@ -29,6 +29,7 @@ from tacorank.git.patches import (
     WrittenArtifact,
     commit_staged_patch,
     stage_and_capture,
+    validate_relative_path,
     write_artifact,
 )
 from tacorank.git.refs import GitOperationError, require_ancestor, resolve_commit
@@ -37,8 +38,19 @@ from tacorank.git.worktrees import WorktreeManager, WorktreeRecord
 from tacorank.run_layout import experiment_artifact_prefix
 
 from .output_parser import ParsedTrajectory, TrajectoryParseError, parse_trajectory_file
-from .prompts import build_coding_prompt, build_repair_prompt, prompt_sha256
+from .prompts import (
+    build_coding_prompt,
+    build_repair_prompt,
+    build_solution_revision_prompt,
+    prompt_sha256,
+)
 from .redaction import SecretRedactor
+from .solution_verifier import (
+    AcceptingSolutionVerifier,
+    DeepSeekSolutionVerifier,
+    SolutionVerifier,
+    SolutionVerifierError,
+)
 
 
 _REVIEWED_TRAE_SOURCE_REVISION = "e839e559ac61bdd0e057c375dd1dee391fee797d"
@@ -179,6 +191,13 @@ class TraeConfig:
     repair_token_limit: Optional[int]
     repair_wall_time_limit_seconds: int
     repair_allowed_command_ids: Tuple[str, ...]
+    solution_verification_max_attempts: int = 5
+    solution_verification_timeout_seconds: int = 120
+    solution_verification_max_output_tokens: int = 4096
+    solution_verification_max_source_bytes: int = 512 * 1024
+    solution_revision_step_limit: int = 32
+    solution_revision_wall_time_limit_seconds: int = 600
+    solution_verifier_credential_environment_name: str = "DEEPSEEK_API_KEY"
     approved_environment_names: Tuple[str, ...] = ()
     credential_environment_names: Tuple[str, ...] = ()
     credential_environment_aliases: Tuple[Tuple[str, str], ...] = ()
@@ -257,6 +276,14 @@ class _IsolationSession:
     image_digest: Optional[str]
 
 
+@dataclass(frozen=True)
+class _TraePass:
+    parsed: ParsedTrajectory
+    trajectory_bytes: bytes
+    trajectory_artifact: Any
+    process_artifact: Any
+
+
 class TraeCodingWorker:
     """Real CodingWorker adapter for initial and repair patch creation.
 
@@ -275,6 +302,7 @@ class TraeCodingWorker:
         identity_resolver: CandidateIdentityResolver,
         factories: Optional[SchemaFactories] = None,
         process_environment: Optional[Mapping[str, str]] = None,
+        solution_verifier: Optional[SolutionVerifier] = None,
     ) -> None:
         self.worktrees = worktrees
         self.artifact_repository_root = Path(artifact_repository_root).resolve(strict=True)
@@ -295,6 +323,9 @@ class TraeCodingWorker:
             self.config.credential_environment_names,
         )
         self._environment = self._sanitized_environment()
+        self.solution_verifier = solution_verifier
+        if self.solution_verifier is None and self.config.trusted_test_mode:
+            self.solution_verifier = AcceptingSolutionVerifier()
         self._verify_config_file()
 
     def preflight(self) -> None:
@@ -483,16 +514,35 @@ class TraeCodingWorker:
                 record,
                 timeout_seconds=self.config.worktree_lease_timeout_seconds,
             ):
-                return self._produce_candidate_with_lease(
-                    context,
-                    record,
-                    base_commit_sha,
-                    identity,
-                    prompt,
-                    step_limit,
-                    token_limit,
-                    wall_time_limit_seconds,
-                )
+                try:
+                    return self._produce_candidate_with_lease(
+                        context,
+                        record,
+                        base_commit_sha,
+                        identity,
+                        prompt,
+                        step_limit,
+                        token_limit,
+                        wall_time_limit_seconds,
+                    )
+                except Exception as primary_error:
+                    try:
+                        self.worktrees.discard_uncommitted_changes(
+                            record, expected_commit_sha=base_commit_sha
+                        )
+                    except GitOperationError as cleanup_error:
+                        if cleanup_error.code != "WORKTREE_COMMIT_MISMATCH":
+                            raise CodingWorkerError(
+                                "CODING_WORKTREE_CLEANUP_FAILED",
+                                "failed coding attempt could not be restored for recovery",
+                                resource_delta=getattr(
+                                    primary_error, "resource_delta", None
+                                ),
+                                diagnostic_artifacts=getattr(
+                                    primary_error, "diagnostic_artifacts", ()
+                                ),
+                            ) from primary_error
+                    raise
         except GitOperationError as exc:
             raise CodingWorkerError(exc.code, str(exc)) from exc
 
@@ -508,6 +558,7 @@ class TraeCodingWorker:
         wall_time_limit_seconds: int,
     ) -> Any:
         started = time.monotonic()
+        deadline = started + wall_time_limit_seconds
         try:
             base = resolve_commit(record.path, base_commit_sha)
             self.worktrees.verify(
@@ -524,168 +575,261 @@ class TraeCodingWorker:
             record.experiment_id,
             attempt=identity.attempt,
         )
+        experiment_spec = self._experiment_spec(context)
+        target_files = self._target_files(experiment_spec)
+        current_prompt = prompt
+        current_step_limit = step_limit
+        current_token_limit = token_limit
+        current_wall_limit = wall_time_limit_seconds
+        passes: list[_TraePass] = []
+        reviews: list[dict[str, Any]] = []
+        provider_input_tokens = 0
+        provider_output_tokens = 0
+        previous_diff_sha: Optional[str] = None
+        staged = None
 
-        with tempfile.TemporaryDirectory(prefix="tacorank-trae-") as temporary:
-            temporary_root = Path(temporary)
-            prompt_path = temporary_root / "task.md"
-            prompt_path.write_text(prompt, encoding="utf-8")
-            prompt_path.chmod(0o600)
-            raw_trajectory_path = temporary_root / "trajectory.json"
-            process_output_path = temporary_root / "process.log"
-            docker_config_root = temporary_root / "docker-config"
-            docker_config_root.mkdir(mode=0o700)
-            action_environment = self._action_environment(
-                temporary_root,
-                docker_config_root=docker_config_root,
-            )
-            isolation = self._start_isolation(
-                record,
-                identity,
-                docker_config_root=docker_config_root,
-            )
+        for review_attempt in range(1, self.config.solution_verification_max_attempts + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CodingWorkerError(
+                    "TRAE_TIMEOUT",
+                    "coding action exhausted its wall budget before semantic verification",
+                    resource_delta=self._combined_resource_delta(
+                        started, provider_input_tokens, provider_output_tokens
+                    ),
+                )
+            solver_wall_limit = min(current_wall_limit, max(1, int(remaining)))
+            pass_prefix = f"{artifact_prefix}/solution_review/pass_{review_attempt:03d}"
             try:
-                command = self._build_command(
-                    prompt_path,
-                    record.path,
-                    raw_trajectory_path,
-                    step_limit,
-                    isolation,
-                )
-                process = _run_bounded_process(
-                    command,
-                    cwd=runtime_root,
-                    environment=action_environment,
-                    timeout_seconds=wall_time_limit_seconds,
-                    termination_grace_seconds=self.config.termination_grace_seconds,
-                    output_path=process_output_path,
-                    max_output_bytes=self.config.max_process_output_bytes,
-                    redactor=self.redactor,
-                )
-                if process.timed_out:
-                    raise self._process_failure(
-                        "TRAE_TIMEOUT",
-                        f"Trae exceeded the {wall_time_limit_seconds}s wall limit",
-                        output_tail=process.output_tail,
-                        started=started,
-                        process_output_path=process_output_path,
-                        artifact_prefix=artifact_prefix,
-                    )
-                if process.output_limited:
-                    raise self._process_failure(
-                        "TRAE_OUTPUT_LIMIT",
-                        "Trae process output exceeded its hard byte limit",
-                        output_tail=process.output_tail,
-                        started=started,
-                        process_output_path=process_output_path,
-                        artifact_prefix=artifact_prefix,
-                    )
-                if process.exit_code != 0:
-                    raise self._process_failure(
-                        "TRAE_PROCESS_FAILED",
-                        f"Trae exited with code {process.exit_code}",
-                        output_tail=process.output_tail,
-                        started=started,
-                        process_output_path=process_output_path,
-                        artifact_prefix=artifact_prefix,
-                    )
-
-                try:
-                    parsed = parse_trajectory_file(
-                        raw_trajectory_path,
-                        max_bytes=self.config.max_trajectory_bytes,
-                    )
-                except TrajectoryParseError as exc:
-                    raise self._process_failure(
-                        exc.code,
-                        str(exc),
-                        output_tail=process.output_tail,
-                        started=started,
-                        process_output_path=process_output_path,
-                        artifact_prefix=artifact_prefix,
-                    ) from exc
-                trajectory_bytes = self._redacted_trajectory_bytes(
-                    parsed,
-                    prompt,
-                    token_limit=token_limit,
-                    isolation=isolation,
+                trae_pass = self._run_trae_pass(
+                    record=record,
+                    identity=identity,
+                    prompt=current_prompt,
+                    step_limit=current_step_limit,
+                    token_limit=current_token_limit,
+                    wall_time_limit_seconds=solver_wall_limit,
+                    artifact_prefix=pass_prefix,
+                    failure_artifact_prefix=(
+                        artifact_prefix if review_attempt == 1 else pass_prefix
+                    ),
                     install_identity=install_identity,
+                    runtime_root=runtime_root,
                     runtime_identity=runtime_identity,
                 )
-                try:
-                    self._validate_trajectory(parsed, step_limit, token_limit)
-                except CodingWorkerError as exc:
-                    try:
-                        failure_written = write_artifact(
-                            self.artifact_repository_root,
-                            f"{artifact_prefix}/trae_failure_trajectory.json",
-                            trajectory_bytes,
-                            content_type="application/json",
-                        )
-                        process_written = self._retain_process_log(
-                            process_output_path,
-                            f"{artifact_prefix}/trae_process.log",
-                        )
-                    except (
-                        CodingWorkerError,
-                        GitOperationError,
-                        OSError,
-                    ) as artifact_error:
-                        raise CodingWorkerError(
-                            "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
-                            "validated Trae failure evidence could not be retained",
-                            resource_delta=self._resource_delta(started, parsed),
-                        ) from artifact_error
-                    diagnostic = (exc.output_tail or "").strip()
-                    raise CodingWorkerError(
-                        exc.code,
-                        exc.summary,
-                        output_tail=diagnostic or None,
-                        resource_delta=self._resource_delta(started, parsed),
-                        diagnostic_artifacts=(
-                            self._artifact_ref(failure_written, "trajectory"),
-                            self._artifact_ref(process_written, "log"),
-                        ),
-                    ) from exc
-            except BaseException as primary_error:
-                try:
-                    self._close_isolation(
-                        isolation,
-                        docker_config_root=docker_config_root,
-                    )
-                except CodingWorkerError as cleanup_error:
-                    raise cleanup_error from primary_error
-                raise
-            else:
-                self._close_isolation(
-                    isolation,
-                    docker_config_root=docker_config_root,
+            except CodingWorkerError as exc:
+                failed_delta = exc.resource_delta
+                failed_input = int(
+                    getattr(failed_delta, "llm_input_tokens", 0) or 0
                 )
+                failed_output = int(
+                    getattr(failed_delta, "llm_output_tokens", 0) or 0
+                )
+                raise CodingWorkerError(
+                    exc.code,
+                    exc.summary,
+                    output_tail=exc.output_tail,
+                    resource_delta=self._combined_resource_delta(
+                        started,
+                        provider_input_tokens + failed_input,
+                        provider_output_tokens + failed_output,
+                    ),
+                    diagnostic_artifacts=exc.diagnostic_artifacts,
+                ) from exc
+            passes.append(trae_pass)
+            provider_input_tokens += trae_pass.parsed.usage.input_tokens
+            provider_output_tokens += trae_pass.parsed.usage.output_tokens
+            pass_artifacts = (
+                trae_pass.trajectory_artifact,
+                trae_pass.process_artifact,
+            )
 
-        try:
-            self.worktrees.verify(
-                record, expected_commit_sha=base, require_clean=False
+            try:
+                staged = self._capture_candidate(record, base)
+            except CodingWorkerError as exc:
+                raise CodingWorkerError(
+                    exc.code,
+                    exc.summary,
+                    output_tail=exc.output_tail,
+                    resource_delta=self._combined_resource_delta(
+                        started, provider_input_tokens, provider_output_tokens
+                    ),
+                    diagnostic_artifacts=pass_artifacts,
+                ) from exc
+            if previous_diff_sha == staged.diff_sha256:
+                raise CodingWorkerError(
+                    "SOLUTION_REVISION_NO_CHANGE",
+                    "semantic revision completed without changing the cumulative patch",
+                    resource_delta=self._combined_resource_delta(
+                        started, provider_input_tokens, provider_output_tokens
+                    ),
+                    diagnostic_artifacts=pass_artifacts,
+                )
+            try:
+                source_by_path = self._candidate_source_snapshot(
+                    record.path,
+                    tuple(sorted(set(staged.changed_files) | set(target_files))),
+                )
+            except CodingWorkerError as exc:
+                raise CodingWorkerError(
+                    exc.code,
+                    exc.summary,
+                    output_tail=exc.output_tail,
+                    resource_delta=self._combined_resource_delta(
+                        started, provider_input_tokens, provider_output_tokens
+                    ),
+                    diagnostic_artifacts=pass_artifacts,
+                ) from exc
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CodingWorkerError(
+                    "TRAE_TIMEOUT",
+                    "coding action exhausted its wall budget before semantic verification",
+                    resource_delta=self._combined_resource_delta(
+                        started, provider_input_tokens, provider_output_tokens
+                    ),
+                    diagnostic_artifacts=pass_artifacts,
+                )
+            try:
+                verification = self._resolved_solution_verifier().verify(
+                    experiment_spec=experiment_spec,
+                    target_interface_excerpts=getattr(
+                        context, "target_interface_excerpts", {}
+                    ),
+                    selected_method_cards=getattr(context, "selected_method_cards", ()),
+                    active_lessons=getattr(context, "active_lessons", ()),
+                    diff_sha256=staged.diff_sha256,
+                    diff_text=staged.diff.decode("utf-8", errors="strict"),
+                    source_by_path=source_by_path,
+                    timeout_seconds=min(
+                        self.config.solution_verification_timeout_seconds,
+                        max(1, int(remaining)),
+                    ),
+                )
+            except SolutionVerifierError as exc:
+                provider_input_tokens += exc.input_tokens
+                provider_output_tokens += exc.output_tokens
+                failure_payload = {
+                    "schema_version": "1.0",
+                    "review_attempt": review_attempt,
+                    "diff_sha256": staged.diff_sha256,
+                    "accepted": False,
+                    "provider_error_code": exc.code,
+                    "summary": self.redactor.redact(exc.summary),
+                    "resource_delta": {
+                        "llm_input_tokens": exc.input_tokens,
+                        "llm_output_tokens": exc.output_tokens,
+                        "token_measurement": "provider",
+                        "wall_time_ms": exc.wall_time_ms,
+                    },
+                }
+                try:
+                    written = self._write_json_artifact(
+                        f"{pass_prefix}/verification.json", failure_payload
+                    )
+                except (CodingWorkerError, GitOperationError, OSError) as error:
+                    raise CodingWorkerError(
+                        "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                        "solution verifier failure evidence could not be retained",
+                        resource_delta=self._combined_resource_delta(
+                            started, provider_input_tokens, provider_output_tokens
+                        ),
+                        diagnostic_artifacts=pass_artifacts,
+                    ) from error
+                raise CodingWorkerError(
+                    exc.code,
+                    exc.summary,
+                    resource_delta=self._combined_resource_delta(
+                        started, provider_input_tokens, provider_output_tokens
+                    ),
+                    diagnostic_artifacts=(
+                        *pass_artifacts,
+                        self._artifact_ref(written, "report"),
+                    ),
+                ) from exc
+
+            provider_input_tokens += verification.input_tokens
+            provider_output_tokens += verification.output_tokens
+            review_payload = {
+                "schema_version": "1.0",
+                "review_attempt": review_attempt,
+                "diff_sha256": staged.diff_sha256,
+                "provider": "deepseek" if verification.provider_calls else "trusted_test",
+                "model_id": self.config.model_id,
+                "reasoning_effort": self.config.reasoning_effort,
+                **verification.as_payload(),
+            }
+            try:
+                review_written = self._write_json_artifact(
+                    f"{pass_prefix}/verification.json", review_payload
+                )
+            except (CodingWorkerError, GitOperationError, OSError) as error:
+                raise CodingWorkerError(
+                    "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                    "solution verification evidence could not be retained",
+                    resource_delta=self._combined_resource_delta(
+                        started, provider_input_tokens, provider_output_tokens
+                    ),
+                    diagnostic_artifacts=pass_artifacts,
+                ) from error
+            review_payload["artifacts"] = {
+                "trajectory": self._artifact_payload(trae_pass.trajectory_artifact),
+                "process_log": self._artifact_payload(trae_pass.process_artifact),
+                "verification": self._artifact_payload(
+                    self._artifact_ref(review_written, "report")
+                ),
+            }
+            reviews.append(review_payload)
+            if verification.accepted:
+                break
+            if review_attempt == self.config.solution_verification_max_attempts:
+                try:
+                    index_written = self._write_solution_verification_index(
+                        artifact_prefix, identity, reviews, accepted=False
+                    )
+                except (CodingWorkerError, GitOperationError, OSError) as error:
+                    raise CodingWorkerError(
+                        "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                        "solution verification index could not be retained",
+                        resource_delta=self._combined_resource_delta(
+                            started, provider_input_tokens, provider_output_tokens
+                        ),
+                        diagnostic_artifacts=pass_artifacts,
+                    ) from error
+                raise CodingWorkerError(
+                    "SOLUTION_VERIFICATION_FAILED",
+                    "candidate did not implement the approved research plan after "
+                    f"{review_attempt} bounded reviews",
+                    output_tail="; ".join(verification.required_changes)[:4096],
+                    resource_delta=self._combined_resource_delta(
+                        started, provider_input_tokens, provider_output_tokens
+                    ),
+                    diagnostic_artifacts=(
+                        *pass_artifacts,
+                        self._artifact_ref(index_written, "report"),
+                    ),
+                )
+            previous_diff_sha = staged.diff_sha256
+            current_prompt = build_solution_revision_prompt(
+                context,
+                experiment_spec,
+                verification.as_payload(),
+                review_attempt=review_attempt,
+                max_review_attempts=self.config.solution_verification_max_attempts,
+                step_limit=self.config.solution_revision_step_limit,
+                wall_time_limit_seconds=self.config.solution_revision_wall_time_limit_seconds,
+                redactor=self.redactor,
             )
-        except GitOperationError as exc:
-            raise CodingWorkerError(exc.code, str(exc)) from exc
-        try:
-            staged = stage_and_capture(
-                record.path,
-                base,
-                max_diff_bytes=self.config.max_patch_bytes,
-            )
-        except GitOperationError as exc:
-            raise CodingWorkerError(exc.code, str(exc)) from exc
-        if staged.is_empty:
-            raise CodingWorkerError("NO_PATCH", "must-patch task produced no Git diff")
-        if len(staged.diff) > self.config.max_patch_bytes:
+            current_step_limit = self.config.solution_revision_step_limit
+            current_token_limit = self.config.repair_token_limit
+            current_wall_limit = self.config.solution_revision_wall_time_limit_seconds
+        else:  # pragma: no cover - loop is structurally exhaustive
             raise CodingWorkerError(
-                "PATCH_TOO_LARGE",
-                "candidate patch exceeds the configured artifact byte limit",
+                "SOLUTION_VERIFICATION_FAILED", "solution verification did not terminate"
             )
-        if self.redactor.contains_known_secret(staged.diff):
+
+        if staged is None or not reviews or not reviews[-1]["accepted"]:
             raise CodingWorkerError(
-                "CREDENTIAL_IN_PATCH",
-                "candidate patch contains a credential from the approved environment",
+                "SOLUTION_VERIFICATION_FAILED", "solution verification did not accept a patch"
             )
         try:
             sealed = commit_staged_patch(
@@ -697,9 +841,27 @@ class TraeCodingWorker:
                 ),
             )
         except GitOperationError as exc:
-            raise CodingWorkerError(exc.code, str(exc)) from exc
+            raise CodingWorkerError(
+                exc.code,
+                str(exc),
+                resource_delta=self._combined_resource_delta(
+                    started, provider_input_tokens, provider_output_tokens
+                ),
+                diagnostic_artifacts=(
+                    passes[-1].trajectory_artifact,
+                    passes[-1].process_artifact,
+                ),
+            ) from exc
 
         try:
+            verification_written = self._write_solution_verification_index(
+                artifact_prefix, identity, reviews, accepted=True
+            )
+            annotated_trajectory = self._annotated_trajectory_bytes(
+                passes[-1].trajectory_bytes,
+                verification_artifact=self._artifact_ref(verification_written, "report"),
+                completed_attempts=len(reviews),
+            )
             diff_written = write_artifact(
                 self.artifact_repository_root,
                 f"{artifact_prefix}/patch.diff",
@@ -709,16 +871,41 @@ class TraeCodingWorker:
             trajectory_written = write_artifact(
                 self.artifact_repository_root,
                 f"{artifact_prefix}/trae_trajectory.json",
-                trajectory_bytes,
+                annotated_trajectory,
                 content_type="application/json",
             )
-        except GitOperationError as exc:
-            raise CodingWorkerError(exc.code, str(exc)) from exc
+        except CodingWorkerError as exc:
+            raise CodingWorkerError(
+                exc.code,
+                exc.summary,
+                output_tail=exc.output_tail,
+                resource_delta=self._combined_resource_delta(
+                    started, provider_input_tokens, provider_output_tokens
+                ),
+                diagnostic_artifacts=(
+                    passes[-1].trajectory_artifact,
+                    passes[-1].process_artifact,
+                ),
+            ) from exc
+        except (GitOperationError, OSError) as exc:
+            raise CodingWorkerError(
+                "CANDIDATE_EVIDENCE_WRITE_FAILED",
+                "sealed candidate evidence could not be retained",
+                resource_delta=self._combined_resource_delta(
+                    started, provider_input_tokens, provider_output_tokens
+                ),
+                diagnostic_artifacts=(
+                    passes[-1].trajectory_artifact,
+                    passes[-1].process_artifact,
+                ),
+            ) from exc
 
         diff_artifact = self._artifact_ref(diff_written, "diff")
         trajectory_artifact = self._artifact_ref(trajectory_written, "trajectory")
         factories = self._schema_factories()
-        resource_delta = self._resource_delta(started, parsed)
+        resource_delta = self._combined_resource_delta(
+            started, provider_input_tokens, provider_output_tokens
+        )
         return factories.patch_candidate(
             schema_version="1.0",
             run_id=record.run_id,
@@ -736,8 +923,451 @@ class TraeCodingWorker:
                 self.config.trae_source_revision or self.config.trae_version
             ),
             model_id=self.config.model_id,
-            steps_used=parsed.steps_used,
+            steps_used=sum(item.parsed.steps_used for item in passes),
             resource_delta=resource_delta,
+        )
+
+    def _run_trae_pass(
+        self,
+        *,
+        record: WorktreeRecord,
+        identity: CandidateIdentity,
+        prompt: str,
+        step_limit: int,
+        token_limit: Optional[int],
+        wall_time_limit_seconds: int,
+        artifact_prefix: str,
+        failure_artifact_prefix: str,
+        install_identity: Mapping[str, Any],
+        runtime_root: Path,
+        runtime_identity: Mapping[str, Any],
+    ) -> _TraePass:
+        pass_started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="tacorank-trae-") as temporary:
+            temporary_root = Path(temporary)
+            prompt_path = temporary_root / "task.md"
+            prompt_path.write_text(prompt, encoding="utf-8")
+            prompt_path.chmod(0o600)
+            raw_trajectory_path = temporary_root / "trajectory.json"
+            process_output_path = temporary_root / "process.log"
+            docker_config_root = temporary_root / "docker-config"
+            docker_config_root.mkdir(mode=0o700)
+            action_environment = self._action_environment(
+                temporary_root, docker_config_root=docker_config_root
+            )
+            isolation = self._start_isolation(
+                record, identity, docker_config_root=docker_config_root
+            )
+            try:
+                process = _run_bounded_process(
+                    self._build_command(
+                        prompt_path,
+                        record.path,
+                        raw_trajectory_path,
+                        step_limit,
+                        isolation,
+                    ),
+                    cwd=runtime_root,
+                    environment=action_environment,
+                    timeout_seconds=wall_time_limit_seconds,
+                    termination_grace_seconds=self.config.termination_grace_seconds,
+                    output_path=process_output_path,
+                    max_output_bytes=self.config.max_process_output_bytes,
+                    redactor=self.redactor,
+                )
+                if process.timed_out:
+                    raise self._process_failure(
+                        "TRAE_TIMEOUT",
+                        f"Trae exceeded the {wall_time_limit_seconds}s wall limit",
+                        output_tail=process.output_tail,
+                        started=pass_started,
+                        process_output_path=process_output_path,
+                        raw_trajectory_path=raw_trajectory_path,
+                        prompt=prompt,
+                        token_limit=token_limit,
+                        isolation=isolation,
+                        install_identity=install_identity,
+                        runtime_identity=runtime_identity,
+                        artifact_prefix=failure_artifact_prefix,
+                    )
+                if process.output_limited:
+                    raise self._process_failure(
+                        "TRAE_OUTPUT_LIMIT",
+                        "Trae process output exceeded its hard byte limit",
+                        output_tail=process.output_tail,
+                        started=pass_started,
+                        process_output_path=process_output_path,
+                        raw_trajectory_path=raw_trajectory_path,
+                        prompt=prompt,
+                        token_limit=token_limit,
+                        isolation=isolation,
+                        install_identity=install_identity,
+                        runtime_identity=runtime_identity,
+                        artifact_prefix=failure_artifact_prefix,
+                    )
+                if process.exit_code != 0:
+                    raise self._process_failure(
+                        "TRAE_PROCESS_FAILED",
+                        f"Trae exited with code {process.exit_code}",
+                        output_tail=process.output_tail,
+                        started=pass_started,
+                        process_output_path=process_output_path,
+                        raw_trajectory_path=raw_trajectory_path,
+                        prompt=prompt,
+                        token_limit=token_limit,
+                        isolation=isolation,
+                        install_identity=install_identity,
+                        runtime_identity=runtime_identity,
+                        artifact_prefix=failure_artifact_prefix,
+                    )
+                try:
+                    parsed = parse_trajectory_file(
+                        raw_trajectory_path,
+                        max_bytes=self.config.max_trajectory_bytes,
+                    )
+                except TrajectoryParseError as exc:
+                    raise self._process_failure(
+                        exc.code,
+                        str(exc),
+                        output_tail=process.output_tail,
+                        started=pass_started,
+                        process_output_path=process_output_path,
+                        raw_trajectory_path=raw_trajectory_path,
+                        prompt=prompt,
+                        token_limit=token_limit,
+                        isolation=isolation,
+                        install_identity=install_identity,
+                        runtime_identity=runtime_identity,
+                        artifact_prefix=failure_artifact_prefix,
+                    ) from exc
+                trajectory_bytes = self._redacted_trajectory_bytes(
+                    parsed,
+                    prompt,
+                    token_limit=token_limit,
+                    isolation=isolation,
+                    install_identity=install_identity,
+                    runtime_identity=runtime_identity,
+                )
+                try:
+                    self._validate_trajectory(parsed, step_limit, token_limit)
+                except CodingWorkerError as exc:
+                    try:
+                        failure_written = write_artifact(
+                            self.artifact_repository_root,
+                            f"{failure_artifact_prefix}/trae_failure_trajectory.json",
+                            trajectory_bytes,
+                            content_type="application/json",
+                        )
+                        process_written = self._retain_process_log(
+                            process_output_path,
+                            f"{failure_artifact_prefix}/trae_process.log",
+                        )
+                    except (CodingWorkerError, GitOperationError, OSError) as error:
+                        raise CodingWorkerError(
+                            "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                            "invalid Trae pass evidence could not be retained",
+                            resource_delta=self._resource_delta(pass_started, parsed),
+                        ) from error
+                    raise CodingWorkerError(
+                        exc.code,
+                        exc.summary,
+                        output_tail=(exc.output_tail or "").strip() or None,
+                        resource_delta=self._resource_delta(pass_started, parsed),
+                        diagnostic_artifacts=(
+                            self._artifact_ref(failure_written, "trajectory"),
+                            self._artifact_ref(process_written, "log"),
+                        ),
+                    ) from exc
+                try:
+                    trajectory_written = write_artifact(
+                        self.artifact_repository_root,
+                        f"{artifact_prefix}/trae_trajectory.json",
+                        trajectory_bytes,
+                        content_type="application/json",
+                    )
+                    process_written = self._retain_process_log(
+                        process_output_path, f"{artifact_prefix}/trae_process.log"
+                    )
+                except (CodingWorkerError, GitOperationError, OSError) as exc:
+                    raise CodingWorkerError(
+                        "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                        "successful Trae pass evidence could not be retained",
+                        resource_delta=self._resource_delta(pass_started, parsed),
+                    ) from exc
+            except BaseException as primary_error:
+                try:
+                    self._close_isolation(
+                        isolation, docker_config_root=docker_config_root
+                    )
+                except CodingWorkerError as cleanup_error:
+                    raise cleanup_error from primary_error
+                raise
+            else:
+                self._close_isolation(isolation, docker_config_root=docker_config_root)
+        return _TraePass(
+            parsed=parsed,
+            trajectory_bytes=trajectory_bytes,
+            trajectory_artifact=self._artifact_ref(trajectory_written, "trajectory"),
+            process_artifact=self._artifact_ref(process_written, "log"),
+        )
+
+    def _resolved_solution_verifier(self) -> SolutionVerifier:
+        verifier = self.solution_verifier
+        if verifier is not None:
+            return verifier
+        credential = self._source_environment.get(
+            self.config.solution_verifier_credential_environment_name, ""
+        )
+        try:
+            verifier = DeepSeekSolutionVerifier(
+                api_key=credential,
+                model=self.config.model_id,
+                base_url=self.config.provider_base_url or "https://api.deepseek.com",
+                max_output_tokens=self.config.solution_verification_max_output_tokens,
+                reasoning_effort=self.config.reasoning_effort,
+                redactor=self.redactor,
+            )
+        except SolutionVerifierError as exc:
+            raise CodingWorkerError(exc.code, exc.summary) from exc
+        self.solution_verifier = verifier
+        return verifier
+
+    @staticmethod
+    def _experiment_spec(context: Any) -> Any:
+        spec = getattr(context, "experiment_spec", None)
+        if spec is None:
+            spec = getattr(context, "original_experiment_spec", None)
+        if spec is None:
+            raise CodingWorkerError(
+                "CONTEXT_INVALID", "coding context has no approved ExperimentSpec"
+            )
+        return spec
+
+    @staticmethod
+    def _target_files(experiment_spec: Any) -> Tuple[str, ...]:
+        values = (
+            experiment_spec.get("target_files")
+            if isinstance(experiment_spec, Mapping)
+            else getattr(experiment_spec, "target_files", None)
+        )
+        if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+            raise CodingWorkerError(
+                "CONTEXT_INVALID", "ExperimentSpec target_files is invalid"
+            )
+        try:
+            normalized = tuple(validate_relative_path(str(item)) for item in values)
+        except (TypeError, ValueError) as exc:
+            raise CodingWorkerError(
+                "CONTEXT_INVALID", "ExperimentSpec target_files is invalid"
+            ) from exc
+        if not normalized or len(normalized) != len(set(normalized)):
+            raise CodingWorkerError(
+                "CONTEXT_INVALID", "ExperimentSpec target_files must be non-empty and unique"
+            )
+        return normalized
+
+    def _capture_candidate(self, record: WorktreeRecord, base: str) -> Any:
+        try:
+            self.worktrees.verify(record, expected_commit_sha=base, require_clean=False)
+            staged = stage_and_capture(
+                record.path, base, max_diff_bytes=self.config.max_patch_bytes
+            )
+        except GitOperationError as exc:
+            raise CodingWorkerError(exc.code, str(exc)) from exc
+        if staged.is_empty:
+            raise CodingWorkerError("NO_PATCH", "must-patch task produced no Git diff")
+        if len(staged.diff) > self.config.max_patch_bytes:
+            raise CodingWorkerError(
+                "PATCH_TOO_LARGE",
+                "candidate patch exceeds the configured artifact byte limit",
+            )
+        if self.redactor.contains_known_secret(staged.diff):
+            raise CodingWorkerError(
+                "CREDENTIAL_IN_PATCH",
+                "candidate patch contains a credential from the approved environment",
+            )
+        return staged
+
+    def _candidate_source_snapshot(
+        self, worktree: Path, relative_paths: Sequence[str]
+    ) -> Mapping[str, Optional[str]]:
+        root = Path(worktree).resolve(strict=True)
+        remaining = self.config.solution_verification_max_source_bytes
+        snapshot: dict[str, Optional[str]] = {}
+        for raw_path in sorted(set(relative_paths)):
+            try:
+                relative = validate_relative_path(raw_path)
+            except (TypeError, ValueError) as exc:
+                raise CodingWorkerError(
+                    "SOLUTION_SOURCE_INVALID",
+                    "candidate source path is not canonical",
+                ) from exc
+            path = root.joinpath(*relative.split("/"))
+            if path.is_symlink():
+                raise CodingWorkerError(
+                    "SOLUTION_SOURCE_INVALID",
+                    "semantic verification refuses candidate symlinks",
+                )
+            if not path.exists():
+                snapshot[relative] = None
+                continue
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(root)
+            except (OSError, ValueError) as exc:
+                raise CodingWorkerError(
+                    "SOLUTION_SOURCE_INVALID",
+                    "candidate source escaped the experiment worktree",
+                ) from exc
+            if not resolved.is_file():
+                raise CodingWorkerError(
+                    "SOLUTION_SOURCE_INVALID",
+                    "candidate source is not a regular file",
+                )
+            try:
+                content = resolved.read_bytes()
+            except OSError as exc:
+                raise CodingWorkerError(
+                    "SOLUTION_SOURCE_INVALID", "candidate source could not be read"
+                ) from exc
+            remaining -= len(content)
+            if remaining < 0:
+                raise CodingWorkerError(
+                    "SOLUTION_SOURCE_TOO_LARGE",
+                    "candidate source exceeds the semantic verification byte limit",
+                )
+            try:
+                snapshot[relative] = content.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise CodingWorkerError(
+                    "SOLUTION_SOURCE_INVALID",
+                    "semantic verification requires UTF-8 candidate source",
+                ) from exc
+        return snapshot
+
+    def _write_json_artifact(
+        self, relative_path: str, payload: Mapping[str, Any]
+    ) -> WrittenArtifact:
+        rendered = self.redactor.redact(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+                allow_nan=False,
+            )
+        ).encode("utf-8") + b"\n"
+        if self.redactor.contains_known_secret(rendered):
+            raise CodingWorkerError(
+                "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                "known credential remained in semantic verification evidence",
+            )
+        return write_artifact(
+            self.artifact_repository_root,
+            relative_path,
+            rendered,
+            content_type="application/json",
+        )
+
+    @staticmethod
+    def _artifact_payload(artifact: Any) -> Mapping[str, Any]:
+        if hasattr(artifact, "model_dump"):
+            return artifact.model_dump(mode="json")
+        return {
+            name: getattr(artifact, name)
+            for name in (
+                "artifact_id",
+                "kind",
+                "path",
+                "sha256",
+                "size_bytes",
+                "content_type",
+            )
+            if hasattr(artifact, name)
+        }
+
+    def _write_solution_verification_index(
+        self,
+        artifact_prefix: str,
+        identity: CandidateIdentity,
+        reviews: Sequence[Mapping[str, Any]],
+        *,
+        accepted: bool,
+    ) -> WrittenArtifact:
+        return self._write_json_artifact(
+            f"{artifact_prefix}/solution_verification.json",
+            {
+                "schema_version": "1.0",
+                "candidate_attempt": identity.attempt,
+                "max_review_attempts": self.config.solution_verification_max_attempts,
+                "completed_review_attempts": len(reviews),
+                "accepted": accepted,
+                "reviews": list(reviews),
+            },
+        )
+
+    def _annotated_trajectory_bytes(
+        self,
+        trajectory_bytes: bytes,
+        *,
+        verification_artifact: Any,
+        completed_attempts: int,
+    ) -> bytes:
+        try:
+            document = json.loads(trajectory_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CodingWorkerError(
+                "TRAJECTORY_MALFORMED",
+                "validated Trae trajectory could not be annotated",
+            ) from exc
+        if not isinstance(document, dict) or "tacorank_solution_verification" in document:
+            raise CodingWorkerError(
+                "TRAJECTORY_RESERVED_KEY",
+                "Trae trajectory uses reserved semantic verification metadata key",
+            )
+        document["tacorank_solution_verification"] = {
+            "schema_version": "1.0",
+            "accepted": True,
+            "completed_attempts": completed_attempts,
+            "max_attempts": self.config.solution_verification_max_attempts,
+            "artifact": self._artifact_payload(verification_artifact),
+        }
+        rendered = (
+            json.dumps(
+                document,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        if len(rendered) > self.config.max_trajectory_bytes:
+            raise CodingWorkerError(
+                "TRAJECTORY_TOO_LARGE",
+                "annotated trajectory exceeds the configured artifact size limit",
+            )
+        if self.redactor.contains_known_secret(rendered):
+            raise CodingWorkerError(
+                "TRAJECTORY_REDACTION_FAILED",
+                "known credential remained in annotated trajectory",
+            )
+        return rendered
+
+    def _combined_resource_delta(
+        self, started: float, input_tokens: int, output_tokens: int
+    ) -> Any:
+        return self._schema_factories().resource_delta(
+            llm_input_tokens=max(0, input_tokens),
+            llm_output_tokens=max(0, output_tokens),
+            token_measurement="provider",
+            wall_time_ms=max(0, int((time.monotonic() - started) * 1000)),
+            cpu_time_ms=0,
+            gpu_time_ms=0,
+            gpu_count=0,
+            peak_rss_mb=None,
+            peak_gpu_memory_mb=None,
+            manual_interventions=0,
         )
 
     def _resource_delta(
@@ -790,6 +1420,12 @@ class TraeCodingWorker:
         output_tail: str,
         started: float,
         process_output_path: Path,
+        raw_trajectory_path: Path,
+        prompt: str,
+        token_limit: Optional[int],
+        isolation: _IsolationSession,
+        install_identity: Mapping[str, Any],
+        runtime_identity: Mapping[str, Any],
         artifact_prefix: str,
     ) -> CodingWorkerError:
         try:
@@ -803,13 +1439,53 @@ class TraeCodingWorker:
                 "Trae process failure evidence could not be retained",
                 resource_delta=self._resource_delta(started),
             )
-        reference = self._artifact_ref(written, "log")
+        process_reference = self._artifact_ref(written, "log")
+        parsed: Optional[ParsedTrajectory] = None
+        trajectory_reference = None
+        try:
+            parsed = parse_trajectory_file(
+                raw_trajectory_path,
+                max_bytes=self.config.max_trajectory_bytes,
+            )
+        except (TrajectoryParseError, OSError):
+            parsed = None
+        else:
+            try:
+                trajectory_bytes = self._redacted_trajectory_bytes(
+                    parsed,
+                    prompt,
+                    token_limit=token_limit,
+                    isolation=isolation,
+                    install_identity=install_identity,
+                    runtime_identity=runtime_identity,
+                )
+                trajectory_written = write_artifact(
+                    self.artifact_repository_root,
+                    f"{artifact_prefix}/trae_failure_trajectory.json",
+                    trajectory_bytes,
+                    content_type="application/json",
+                )
+                trajectory_reference = self._artifact_ref(
+                    trajectory_written, "trajectory"
+                )
+            except (CodingWorkerError, GitOperationError, OSError):
+                return CodingWorkerError(
+                    "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                    "Trae trajectory failure evidence could not be retained",
+                    resource_delta=self._resource_delta(started, parsed),
+                    diagnostic_artifacts=(process_reference,),
+                )
+        references = (
+            (trajectory_reference, process_reference)
+            if trajectory_reference is not None
+            else (process_reference,)
+        )
         return CodingWorkerError(
             code,
             summary,
             output_tail=output_tail.strip() or None,
-            resource_delta=self._resource_delta(started),
-            diagnostic_artifacts=(reference,),
+            resource_delta=self._resource_delta(started, parsed),
+            diagnostic_artifacts=references,
         )
 
     def _artifact_ref(self, artifact: WrittenArtifact, kind: str) -> Any:
@@ -1590,6 +2266,12 @@ class TraeCodingWorker:
             "max_process_output_bytes",
             "max_trajectory_bytes",
             "max_patch_bytes",
+            "solution_verification_max_attempts",
+            "solution_verification_timeout_seconds",
+            "solution_verification_max_output_tokens",
+            "solution_verification_max_source_bytes",
+            "solution_revision_step_limit",
+            "solution_revision_wall_time_limit_seconds",
         )
         for field in integer_fields:
             value = getattr(config, field)
@@ -1603,6 +2285,20 @@ class TraeCodingWorker:
                 raise CodingWorkerError("TRAE_CONFIG_INVALID", f"invalid {field}")
         if config.repair_step_limit > config.max_steps_cap:
             raise CodingWorkerError("TRAE_CONFIG_INVALID", "repair step limit exceeds cap")
+        if config.solution_revision_step_limit > config.max_steps_cap:
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID", "solution revision step limit exceeds cap"
+            )
+        if not 1 <= config.solution_verification_max_attempts <= 5:
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID",
+                "solution verification attempts must be between one and five",
+            )
+        if config.solution_verification_max_output_tokens < 256:
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID",
+                "solution verifier output-token limit must be at least 256",
+            )
         if (
             config.max_token_cap is not None
             and (
@@ -1613,6 +2309,13 @@ class TraeCodingWorker:
             raise CodingWorkerError("TRAE_CONFIG_INVALID", "repair token limit exceeds cap")
         if config.repair_wall_time_limit_seconds > config.max_wall_time_seconds_cap:
             raise CodingWorkerError("TRAE_CONFIG_INVALID", "repair wall limit exceeds cap")
+        if (
+            config.solution_revision_wall_time_limit_seconds
+            > config.max_wall_time_seconds_cap
+        ):
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID", "solution revision wall limit exceeds cap"
+            )
         if not config.repair_allowed_command_ids:
             raise CodingWorkerError(
                 "TRAE_CONFIG_INVALID", "repair command allowlist cannot be empty"
@@ -1620,6 +2323,20 @@ class TraeCodingWorker:
         if not isinstance(config.trusted_test_mode, bool):
             raise CodingWorkerError(
                 "TRAE_CONFIG_INVALID", "trusted_test_mode must be a boolean"
+            )
+        credential_name = config.solution_verifier_credential_environment_name
+        if not isinstance(credential_name, str) or not credential_name:
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID",
+                "solution verifier credential environment name is invalid",
+            )
+        if not config.trusted_test_mode and (
+            credential_name not in config.credential_environment_names
+            or credential_name not in config.approved_environment_names
+        ):
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID",
+                "solution verifier credential must be an approved credential environment name",
             )
         if config.reviewed_tool_names != _DEFAULT_REVIEWED_TOOLS:
             raise CodingWorkerError(

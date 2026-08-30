@@ -22,6 +22,12 @@ from tacorank.coding.trae_adapter import (
     TraeConfig,
     hash_trae_runtime_package,
 )
+from tacorank.coding.solution_verifier import (
+    AcceptingSolutionVerifier,
+    SolutionFinding,
+    SolutionVerificationResult,
+    SolutionVerifierError,
+)
 from tacorank.git.patches import capture_commit_patch
 from tacorank.git.worktrees import WorktreeManager
 from tacorank.run_layout import experiment_artifact_prefix
@@ -115,6 +121,9 @@ trajectory = {
     "fake_cwd": str(Path.cwd()),
 }
 trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+if behavior == "process_failure_with_trajectory":
+    print("provider failed after saving trajectory")
+    raise SystemExit(9)
 print("finished " + os.environ.get("FAKE_TRAE_SECRET", ""))
 '''
 
@@ -255,6 +264,8 @@ models:
         repair_token_limit=40,
         repair_wall_time_limit_seconds=2,
         repair_allowed_command_ids=("candidate_smoke",),
+        solution_revision_step_limit=3,
+        solution_revision_wall_time_limit_seconds=2,
         approved_environment_names=(
             "FAKE_TRAE_BEHAVIOR",
             "FAKE_TRAE_SECRET",
@@ -262,6 +273,7 @@ models:
             "PYTHON_DOTENV_DISABLED",
         ),
         credential_environment_names=("FAKE_TRAE_SECRET",),
+        solution_verifier_credential_environment_name="FAKE_TRAE_SECRET",
         trae_source_revision="e839e559ac61bdd0e057c375dd1dee391fee797d",
         trusted_test_mode=True,
         version_timeout_seconds=2,
@@ -320,7 +332,7 @@ models:
     )
 
 
-def _worker(parts: SimpleNamespace) -> TraeCodingWorker:
+def _worker(parts: SimpleNamespace, solution_verifier: Any = None) -> TraeCodingWorker:
     return TraeCodingWorker(
         worktrees=parts.worktrees,
         artifact_repository_root=parts.repository,
@@ -328,7 +340,58 @@ def _worker(parts: SimpleNamespace) -> TraeCodingWorker:
         identity_resolver=parts.resolver,
         factories=parts.factories,
         process_environment=parts.environment,
+        solution_verifier=solution_verifier or AcceptingSolutionVerifier(),
     )
+
+
+class _SequencedVerifier:
+    def __init__(self, accepted: list[bool]) -> None:
+        self.accepted = list(accepted)
+        self.calls = []
+
+    def verify(self, **values: Any) -> SolutionVerificationResult:
+        self.calls.append(values)
+        accepted = self.accepted.pop(0)
+        return SolutionVerificationResult(
+            accepted=accepted,
+            summary=("implementation matches" if accepted else "mechanism is incomplete"),
+            findings=(
+                ()
+                if accepted
+                else (
+                    SolutionFinding(
+                        "MECHANISM_INCOMPLETE",
+                        "error",
+                        "solution/candidate.py",
+                        "The approved mechanism is not fully wired.",
+                    ),
+                )
+            ),
+            required_changes=(
+                () if accepted else ("Complete the approved mechanism wiring.",)
+            ),
+            input_tokens=3,
+            output_tokens=2,
+            wall_time_ms=1,
+            provider_calls=1,
+        )
+
+
+class _UnavailableThenAcceptingVerifier:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def verify(self, **values: Any) -> SolutionVerificationResult:
+        self.calls += 1
+        if self.calls == 1:
+            raise SolutionVerifierError(
+                "TRAE_PROVIDER_UNAVAILABLE",
+                "solution verifier provider request failed",
+                input_tokens=3,
+                output_tokens=1,
+                wall_time_ms=1,
+            )
+        return AcceptingSolutionVerifier().verify(**values)
 
 
 def _production_worker(parts: SimpleNamespace) -> tuple[TraeCodingWorker, Path]:
@@ -484,6 +547,89 @@ def test_real_adapter_emits_person2_canonical_models(
     assert candidate.diff_artifact.artifact_id == "sha256-" + candidate.diff_sha256
 
 
+def test_semantic_review_revises_then_accepts_and_records_complete_evidence(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    parts.context.wall_time_limit_seconds = 3
+    verifier = _SequencedVerifier([False, True])
+
+    candidate = asyncio.run(
+        _worker(parts, verifier).create_patch(parts.context, parts.spec)
+    )
+
+    assert len(verifier.calls) == 2
+    assert verifier.calls[0]["diff_sha256"] != verifier.calls[1]["diff_sha256"]
+    assert candidate.steps_used == 2
+    assert candidate.resource_delta.llm_input_tokens == 20
+    assert candidate.resource_delta.llm_output_tokens == 12
+    trajectory = json.loads(
+        (parts.repository / candidate.trajectory_artifact.path).read_text(
+            encoding="utf-8"
+        )
+    )
+    verification_meta = trajectory["tacorank_solution_verification"]
+    assert verification_meta["accepted"] is True
+    assert verification_meta["completed_attempts"] == 2
+    index_path = parts.repository / verification_meta["artifact"]["path"]
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    assert index["accepted"] is True
+    assert [item["accepted"] for item in index["reviews"]] == [False, True]
+    assert all(
+        (parts.repository / item["artifacts"]["process_log"]["path"]).is_file()
+        for item in index["reviews"]
+    )
+
+
+def test_semantic_review_exhaustion_fails_without_sealing_a_patch(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    parts.context.wall_time_limit_seconds = 3
+    parts.config = replace(parts.config, solution_verification_max_attempts=2)
+    verifier = _SequencedVerifier([False, False])
+
+    with pytest.raises(CodingWorkerError) as failure:
+        asyncio.run(_worker(parts, verifier).create_patch(parts.context, parts.spec))
+
+    assert failure.value.code == "SOLUTION_VERIFICATION_FAILED"
+    assert len(verifier.calls) == 2
+    assert failure.value.resource_delta.llm_input_tokens == 20
+    assert failure.value.resource_delta.llm_output_tokens == 12
+    assert _git(parts.worktrees.path_for("run1", "exp1"), "rev-parse", "HEAD") == parts.base
+    assert any(artifact.kind == "report" for artifact in failure.value.diagnostic_artifacts)
+
+
+def test_transient_verifier_failure_leaves_clean_worktree_for_same_commit_retry(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    verifier = _UnavailableThenAcceptingVerifier()
+    worker = _worker(parts, verifier)
+
+    with pytest.raises(CodingWorkerError) as failure:
+        asyncio.run(worker.create_patch(parts.context, parts.spec))
+
+    assert failure.value.code == "TRAE_PROVIDER_UNAVAILABLE"
+    worktree = parts.worktrees.path_for("run1", "exp1")
+    assert _git(worktree, "rev-parse", "HEAD") == parts.base
+    assert _git(
+        worktree,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignored=matching",
+    ) == ""
+
+    parts.resolver.initial = CandidateIdentity(2, "event-spec-1")
+    candidate = asyncio.run(worker.create_patch(parts.context, parts.spec))
+
+    assert verifier.calls == 2
+    assert candidate.attempt == 2
+    assert candidate.base_commit_sha == parts.base
+    assert (worktree / "solution" / "candidate.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
 def test_repair_is_a_direct_commit_on_the_same_branch(
     adapter_parts: SimpleNamespace,
 ) -> None:
@@ -604,6 +750,27 @@ def test_reported_failure_retains_only_redacted_bounded_diagnostic(
     assert parts.secret.encode("utf-8") not in process_log.read_bytes()
 
 
+def test_process_failure_retains_available_trajectory_usage_and_clean_retry_state(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    parts.environment["FAKE_TRAE_BEHAVIOR"] = "process_failure_with_trajectory"
+
+    with pytest.raises(CodingWorkerError) as failure:
+        asyncio.run(_worker(parts).create_patch(parts.context, parts.spec))
+
+    assert failure.value.code == "TRAE_PROCESS_FAILED"
+    assert failure.value.resource_delta.llm_input_tokens == 7
+    assert failure.value.resource_delta.llm_output_tokens == 4
+    assert {artifact.kind for artifact in failure.value.diagnostic_artifacts} == {
+        "trajectory",
+        "log",
+    }
+    worktree = parts.worktrees.path_for("run1", "exp1")
+    assert _git(worktree, "rev-parse", "HEAD") == parts.base
+    assert _git(worktree, "status", "--porcelain=v1") == ""
+
+
 def test_candidate_identity_is_required_before_worktree_or_trae(
     adapter_parts: SimpleNamespace,
 ) -> None:
@@ -627,6 +794,18 @@ def test_context_limits_are_checked_before_worktree_creation(
         asyncio.run(_worker(parts).create_patch(parts.context, parts.spec))
     assert failure.value.code == "CODING_LIMIT_INVALID"
     assert not parts.worktrees.path_for("run1", "exp1").exists()
+
+
+def test_solution_verifier_output_budget_is_validated_at_startup(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    parts.config = replace(parts.config, solution_verification_max_output_tokens=255)
+
+    with pytest.raises(CodingWorkerError) as failure:
+        _worker(parts)
+
+    assert failure.value.code == "TRAE_CONFIG_INVALID"
 
 
 def test_missing_shared_schema_models_fail_explicitly(
@@ -688,6 +867,8 @@ def test_production_docker_boundary_has_exact_lifecycle_and_cli(
     adapter_parts: SimpleNamespace,
 ) -> None:
     parts = adapter_parts
+    parts.context.wall_time_limit_seconds = 10
+    parts.config = replace(parts.config, max_wall_time_seconds_cap=10)
     worker, docker = _production_worker(parts)
     candidate = asyncio.run(worker.create_patch(parts.context, parts.spec))
 

@@ -228,6 +228,7 @@ class PatchGate:
         protected_manifest_sha256: Optional[str] = None,
         data_manifest_sha256: Optional[str] = None,
         experiment_root_commit_sha: Optional[str] = None,
+        authorized_changed_files: Optional[Sequence[str]] = None,
     ) -> Any:
         """Return Person 2's ``PatchCheckResult``; never consult an LLM."""
 
@@ -238,6 +239,7 @@ class PatchGate:
             protected_manifest_sha256=protected_manifest_sha256,
             data_manifest_sha256=data_manifest_sha256,
             experiment_root_commit_sha=experiment_root_commit_sha,
+            authorized_changed_files=authorized_changed_files,
         )
 
     def _check_sync(
@@ -248,6 +250,7 @@ class PatchGate:
         protected_manifest_sha256: Optional[str] = None,
         data_manifest_sha256: Optional[str] = None,
         experiment_root_commit_sha: Optional[str] = None,
+        authorized_changed_files: Optional[Sequence[str]] = None,
     ) -> Any:
 
         factories = self.factories or SharedSchemaFactories.from_shared_module()
@@ -342,6 +345,26 @@ class PatchGate:
         cumulative_changes = git_state.cumulative_changes if git_state is not None else ()
         if git_state is not None:
             findings.extend(self.path_policy.inspect(cumulative_changes))
+        if authorized_changed_files is not None:
+            try:
+                authorized = frozenset(
+                    normalize_policy_path(path) for path in authorized_changed_files
+                )
+            except (TypeError, ValueError):
+                authorized = frozenset()
+            actual_paths = (
+                git_state.cumulative_changed_files if git_state is not None else ()
+            )
+            for path in actual_paths:
+                if path not in authorized:
+                    findings.append(
+                        PolicyViolation(
+                            ViolationCode.UNAPPROVED_TARGET_FILE,
+                            "changed_file_match",
+                            "candidate changed a file not authorized by the ExperimentSpec",
+                            path,
+                        )
+                    )
 
         identity_hashes_valid = all(
             isinstance(value, str) and SHA256_RE.fullmatch(value) is not None
