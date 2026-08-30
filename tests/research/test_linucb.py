@@ -12,7 +12,7 @@ def _choice(context, family, method):
         parent=parent,
         family=family,
         cost_tier="medium",
-        phase="breadth",
+        phase="depth",
         reason_code="TEST",
         reason="test",
         method_card_id=method,
