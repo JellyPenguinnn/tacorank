@@ -95,7 +95,7 @@ def test_planner_history_preserves_complete_evaluation_evidence(
     assert context.refinement_frontier_ids == []
     assert context.ensemble_candidate_ids == []
     assert proposed.target_stage == proposed.family
-    assert proposed.target_files == ["solution/candidate.py"]
+    assert proposed.target_files == ["solution/experiment_config.py"]
     assert [fidelity.value for fidelity in proposed.fidelity_plan] == [
         "smoke",
         "proxy",
@@ -161,7 +161,7 @@ def test_implementation_binding_rejects_missing_configured_entrypoint(
     harness, baseline_evaluation
 ):
     harness.bootstrap(baseline_evaluation)
-    (harness.config.repository_root / "solution/candidate.py").unlink()
+    (harness.config.repository_root / "solution/experiment_config.py").unlink()
     context = harness.context_builder.build_planner(harness.events())
     values = {
         "run_id": context.run_id,
@@ -224,7 +224,7 @@ def test_controller_binds_codeblind_proposal_to_coder_contract(
     spec = harness.context_builder.bind_implementation(ResearchProposal(**values))
 
     assert spec.target_stage == "objective"
-    assert spec.target_files == ["solution/candidate.py"]
+    assert spec.target_files == ["solution/experiment_config.py"]
     assert [fidelity.value for fidelity in spec.fidelity_plan] == [
         "smoke",
         "proxy",

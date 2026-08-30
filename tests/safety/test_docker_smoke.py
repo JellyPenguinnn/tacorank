@@ -67,7 +67,7 @@ def test_docker_smoke_uses_read_only_no_network_import_boundary(
     )
 
     assert passed
-    assert "import succeeded" in summary
+    assert "synthetic execution succeeded" in summary
     calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
     run = calls[0]
     assert run[0] == "run"

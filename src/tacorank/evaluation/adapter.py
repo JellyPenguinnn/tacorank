@@ -15,6 +15,7 @@ from .diagnostics import DiagnosticFeatures, compute_evaluation_diagnostics
 from .metrics import normalize_binary_labels, validate_metric_set
 from .no_op import analyze_prediction_change
 from .trust import TrustConfig, TrustEvidence, assess_trust
+from .uncertainty import PairedDeltaInterval, paired_user_delta_interval
 from .types import (
     EvaluationResult,
     Fidelity,
@@ -154,10 +155,14 @@ class EvaluationInputs:
     parent: MetricSet
     previous_best: MetricSet
     parent_scores: Optional[Sequence[float]] = None
+    previous_best_scores: Optional[Sequence[float]] = None
     diagnostic_features: Optional[DiagnosticFeatures] = None
     baseline_scores: Optional[Sequence[float]] = None
+    training_diagnostics: Mapping[str, float] = field(default_factory=dict)
     seed_evaluation_event_ids: Tuple[str, ...] = ()
     internal_proxy_delta: Optional[float] = None
+    internal_proxy_ci_lower: Optional[float] = None
+    internal_proxy_ci_upper: Optional[float] = None
     unbiased_audit_delta: Optional[float] = None
     val_b_delta: Optional[float] = None
     forbidden_inputs: Tuple[str, ...] = ()
@@ -440,6 +445,66 @@ class EvaluationService:
         seed_scores = tuple(
             result.metric_set.primary_score for result in prior_seed_results
         ) + (metric_set.primary_score,)
+        seed_parent_deltas = tuple(
+            result.parent_delta.primary for result in prior_seed_results
+        ) + (parent_delta.primary,)
+        seed_best_deltas = tuple(
+            result.previous_best_delta.primary for result in prior_seed_results
+        ) + (best_delta.primary,)
+        parent_interval = self._paired_interval(
+            request, request.parent_scores, salt=0x5A17
+        )
+        if request.previous_best_scores is request.parent_scores:
+            best_interval = parent_interval
+        else:
+            best_interval = self._paired_interval(
+                request, request.previous_best_scores, salt=0x8C31
+            )
+        val_a_interval = self._validation_arm_interval(
+            request, request.parent_scores, arm="val_a", salt=0xA317
+        )
+        val_b_interval = self._validation_arm_interval(
+            request, request.parent_scores, arm="val_b", salt=0xB421
+        )
+        diagnostic_summary = diagnostic_summary.model_copy(
+            update={
+                "paired_parent_delta_stderr": parent_interval.standard_error,
+                "paired_parent_delta_ci_lower": parent_interval.lower,
+                "paired_parent_delta_ci_upper": parent_interval.upper,
+                "paired_best_delta_stderr": best_interval.standard_error,
+                "paired_best_delta_ci_lower": best_interval.lower,
+                "paired_best_delta_ci_upper": best_interval.upper,
+                "val_b_delta_ci_lower": (
+                    val_b_interval.lower if val_b_interval is not None else None
+                ),
+                "val_b_delta_ci_upper": (
+                    val_b_interval.upper if val_b_interval is not None else None
+                ),
+                "val_a_delta_ci_lower": (
+                    val_a_interval.lower if val_a_interval is not None else None
+                ),
+                "val_a_delta_ci_upper": (
+                    val_a_interval.upper if val_a_interval is not None else None
+                ),
+                "paired_bootstrap_samples": parent_interval.bootstrap_samples,
+            }
+        )
+        paired_parent_stderr = max(
+            [parent_interval.standard_error]
+            + [
+                float(result.diagnostics.paired_parent_delta_stderr)
+                for result in prior_seed_results
+                if result.diagnostics.paired_parent_delta_stderr is not None
+            ]
+        )
+        paired_best_stderr = max(
+            [best_interval.standard_error]
+            + [
+                float(result.diagnostics.paired_best_delta_stderr)
+                for result in prior_seed_results
+                if result.diagnostics.paired_best_delta_stderr is not None
+            ]
+        )
         trust = assess_trust(
             TrustEvidence(
                 population=request.population,
@@ -449,18 +514,40 @@ class EvaluationService:
                 metric_deltas=aggregate_parent_delta.metrics,
                 prediction_change=change,
                 seed_scores=seed_scores,
+                seed_parent_deltas=seed_parent_deltas,
+                seed_best_deltas=seed_best_deltas,
+                paired_parent_delta_stderr=paired_parent_stderr,
+                paired_parent_delta_ci_lower=parent_interval.lower,
+                paired_parent_delta_ci_upper=parent_interval.upper,
+                paired_best_delta_stderr=paired_best_stderr,
+                paired_best_delta_ci_lower=best_interval.lower,
+                paired_best_delta_ci_upper=best_interval.upper,
                 output_gate_evidence=True,
                 evaluator_hash_matches=True,
                 contract_hash_matches=True,
                 forbidden_inputs=request.forbidden_inputs,
                 alignment_suspect=request.alignment_suspect,
                 internal_proxy_delta=request.internal_proxy_delta,
+                internal_proxy_ci_lower=request.internal_proxy_ci_lower,
+                internal_proxy_ci_upper=request.internal_proxy_ci_upper,
                 unbiased_audit_delta=request.unbiased_audit_delta,
                 val_a_delta=diagnostic_summary.validation_arm_deltas.get("val_a"),
+                val_a_delta_ci_lower=(
+                    val_a_interval.lower if val_a_interval is not None else None
+                ),
+                val_a_delta_ci_upper=(
+                    val_a_interval.upper if val_a_interval is not None else None
+                ),
                 val_b_delta=(
                     request.val_b_delta
                     if request.val_b_delta is not None
                     else diagnostic_summary.validation_arm_deltas.get("val_b")
+                ),
+                val_b_delta_ci_lower=(
+                    val_b_interval.lower if val_b_interval is not None else None
+                ),
+                val_b_delta_ci_upper=(
+                    val_b_interval.upper if val_b_interval is not None else None
                 ),
                 delta_correlation=request.delta_correlation,
                 delta_correlation_experiment_id=(
@@ -524,6 +611,13 @@ class EvaluationService:
                 ),
             }
         )
+        diagnostic_metrics.update(
+            {
+                "training_%s" % key: float(value)
+                for key, value in request.training_diagnostics.items()
+                if math.isfinite(float(value))
+            }
+        )
         return EvaluationResult(
             run_id=request.run_id,
             experiment_id=request.experiment_id,
@@ -544,6 +638,49 @@ class EvaluationService:
             diagnostic_metrics=diagnostic_metrics,
             diagnostics=diagnostic_summary,
             seed_evidence_event_ids=request.seed_evaluation_event_ids,
+        )
+
+    @staticmethod
+    def _paired_interval(
+        request: EvaluationInputs,
+        reference_scores: Optional[Sequence[float]],
+        *,
+        salt: int,
+    ) -> PairedDeltaInterval:
+        if reference_scores is None:
+            reference_scores = request.predictions.scores
+        return paired_user_delta_interval(
+            request.predictions.user_ids,
+            request.labels,
+            request.predictions.scores,
+            reference_scores,
+            seed=int(request.seed) ^ salt,
+        )
+
+    @staticmethod
+    def _validation_arm_interval(
+        request: EvaluationInputs,
+        reference_scores: Optional[Sequence[float]],
+        *,
+        arm: str,
+        salt: int,
+    ) -> Optional[PairedDeltaInterval]:
+        features = request.diagnostic_features
+        if features is None or reference_scores is None:
+            return None
+        indices = [
+            index
+            for index, value in enumerate(features.validation_arms)
+            if value == arm
+        ]
+        if not indices:
+            return None
+        return paired_user_delta_interval(
+            [request.predictions.user_ids[index] for index in indices],
+            [request.labels[index] for index in indices],
+            [request.predictions.scores[index] for index in indices],
+            [reference_scores[index] for index in indices],
+            seed=int(request.seed) ^ salt,
         )
 
     def _resolve_seed_results(

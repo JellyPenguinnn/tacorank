@@ -64,6 +64,9 @@ def repository(tmp_path: Path) -> Path:
     (tmp_path / "solution/candidate.py").write_text(
         "def run(invocation):\n    return None\n", encoding="utf-8"
     )
+    (tmp_path / "solution/experiment_config.py").write_text(
+        "CONFIG = {'formulation': 'passthrough'}\n", encoding="utf-8"
+    )
     (tmp_path / "artifacts").mkdir()
     (tmp_path / "runs").mkdir()
     return tmp_path

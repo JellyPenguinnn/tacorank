@@ -120,6 +120,13 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
         ),
         encoding="utf-8",
     )
+    for name in ("experiment_config.py", "research_scaffold.py"):
+        (root / "solution" / name).write_text(
+            (Path(__file__).parents[2] / "solution" / name).read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
     deployment.mkdir(parents=True)
     data.mkdir(parents=True)
     for name in deployment_module.RAW_REQUIRED:

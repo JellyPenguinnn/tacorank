@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"objective_pairwise_bpr","family":"objective","status":"candidate","tags":["pairwise","within_user","ranking"],"cost_tier":"medium","prerequisites":["baseline_parity","within_user_positive_negative_pairs"],"allowed_data":["train_interactions","user_id","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"implementation_targets":["solution/candidate.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"objective_pairwise_bpr","family":"objective","status":"candidate","tags":["pairwise","within_user","ranking"],"cost_tier":"medium","prerequisites":["baseline_parity","within_user_positive_negative_pairs"],"allowed_data":["train_interactions","user_id","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"implementation_targets":["solution/experiment_config.py"],"sources":[]}
 ```
 
 ## Mechanism
@@ -34,10 +34,9 @@ pairwise residual from observed positive/negative impressions of the same user.
 Use deterministic small non-zero factor initialization (zero-initializing both
 factor sides produces zero latent gradients), multiple representative passes,
 and capped per-user pairs. Verify that the residual has non-zero variance and
-that repeated items can receive different user-conditioned scores. Implement
-and wire the mechanism through `solution/candidate.py`; helper modules may be
-added only when that entrypoint imports and uses them. Do not invent
-`solution/train.py` as a replacement entrypoint.
+that repeated items can receive different user-conditioned scores. Select the
+mechanism and its bounded hyperparameters through `solution/experiment_config.py`;
+the reusable executable scaffold remains unchanged across configuration trials.
 
 ## Sources
 

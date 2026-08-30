@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+import re
 from typing import Deque, Optional, Sequence, Tuple
 
 from ..config import RunConfig, VerifiedContract
@@ -33,6 +34,7 @@ from ..schemas import (
     ExperimentDecision,
     ExperimentDecisionKind,
     ExperimentProposedPayload,
+    ExperimentSpec,
     ExecutionFinishedPayload,
     ExecutionStartedPayload,
     Fidelity,
@@ -87,6 +89,17 @@ class ResumablePlanningError(OrchestrationError):
     replace the planner and resume from the persisted ``planner_context``
     without marking the run stopped or fabricating a recovery event.
     """
+
+
+def _is_search_space_exhaustion(reason_code: str) -> bool:
+    """Return true only for planner outcomes that prove no legal choice remains."""
+
+    normalized = reason_code.strip().upper()
+    return (
+        "EXHAUSTED" in normalized
+        or normalized.startswith("NO_LEGAL_")
+        or normalized in {"NO_METHOD_CARDS", "NO_ELIGIBLE_METHOD"}
+    )
 
 
 class Harness:
@@ -775,6 +788,12 @@ class Harness:
                         "research provider failed bounded plan validation; "
                         "resume from the persisted planner checkpoint"
                     )
+                if not _is_search_space_exhaustion(planner_output.reason_code):
+                    raise ResumablePlanningError(
+                        "planner blocked on %s without proving search-space exhaustion; "
+                        "resume from the persisted planner checkpoint"
+                        % planner_output.reason_code
+                    )
                 decision = self.deterministic_stop(no_legal_proposal=True)
             else:
                 decision = self.deterministic_stop()
@@ -1287,6 +1306,7 @@ class Harness:
                 baseline_score=baseline[self.config.primary_metric_name],
                 parent_score=parent[self.config.primary_metric_name],
                 previous_best_score=best[self.config.primary_metric_name],
+                promote_inconclusive_proxy=self._promote_inconclusive_proxy(spec),
             )
             try:
                 decision = await self.evaluator.decide(evaluation, decision_context)
@@ -1369,16 +1389,21 @@ class Harness:
                 continue
             if decision.best_eligible:
                 current = self.state()
+                aggregate_score = (
+                    evaluation.trust.seed_mean
+                    if evaluation.trust.seed_mean is not None
+                    else evaluation.metric_set.primary_score
+                )
                 if (
                     current.best_primary_score is None
-                    or evaluation.metric_set.primary_score > current.best_primary_score
+                    or aggregate_score > current.best_primary_score
                 ):
                     self._append(
                         BestUpdatedPayload(
                             experiment_id=spec.experiment_id,
                             commit_sha=patch.patch_commit_sha,
                             primary_metric_name=evaluation.metric_set.primary_metric_name,
-                            primary_score=evaluation.metric_set.primary_score,
+                            primary_score=aggregate_score,
                             decision_event_id=decision_event.event_id,
                         ),
                         stage="best_updated",
@@ -1389,6 +1414,24 @@ class Harness:
             return self.state()
 
         return self.state()
+
+    def _promote_inconclusive_proxy(self, spec: ExperimentSpec) -> bool:
+        """Run full fidelity for every Nth uncertain campaign candidate.
+
+        Clearly positive proxy candidates always promote in the decision layer.
+        This flag preserves a periodic full-fidelity checkpoint while screening
+        the other statistically unresolved configurations at proxy fidelity.
+        """
+
+        campaign = self.config.research_campaign
+        if campaign is None or spec.campaign_id != campaign.campaign_id:
+            return True
+        if spec.variant_id is None:
+            return True
+        match = re.search(r"_(\d+)$", spec.variant_id)
+        if match is None:
+            return True
+        return int(match.group(1)) % campaign.proxy_checkpoint_interval == 0
 
     async def run_until_stopped(self) -> object:
         """Run sequential research iterations until a frozen stop rule matches.

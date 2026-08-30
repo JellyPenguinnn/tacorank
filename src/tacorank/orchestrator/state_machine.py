@@ -193,15 +193,22 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
                 or spec.parent_experiment_id == "baseline",
                 "unknown parent experiment",
             )
-        if spec.parent_experiment_id in (None, "baseline"):
+        implementation_parent_id = (
+            spec.implementation_parent_experiment_id or spec.parent_experiment_id
+        )
+        if implementation_parent_id in (None, "baseline"):
             baseline = _events_of(events, EventType.BASELINE_VERIFIED)[-1]
             expected_parent_commit = baseline.payload.commit_sha
         else:
-            parent = state.experiments[spec.parent_experiment_id]
+            _require(
+                implementation_parent_id in state.experiments,
+                "unknown implementation parent experiment",
+            )
+            parent = state.experiments[implementation_parent_id]
             expected_parent_commit = parent.latest_commit_sha
             _require(
                 expected_parent_commit is not None,
-                "selected parent experiment has no patch commit",
+                "selected implementation parent experiment has no patch commit",
             )
         _require(
             spec.parent_commit_sha == expected_parent_commit,

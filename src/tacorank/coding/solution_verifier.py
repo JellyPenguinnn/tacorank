@@ -33,6 +33,9 @@ an unusable entrypoint, ignored fidelity or seed inputs, nondeterministic behavi
 placeholder code, or a material contradiction of the approved plan. Use warnings for
 non-blocking uncertainty. Accept when the planned mechanism is materially present and
 the remaining questions require execution rather than another code edit.
+For a configuration-only target backed by a stable scaffold in the supplied target
+interface, verify that approved variant parameters are represented exactly and within
+the interface bounds. Do not require or request a rewrite of the delegated scaffold.
 
 Required JSON shape:
 {

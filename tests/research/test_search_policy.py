@@ -57,6 +57,8 @@ def test_campaign_exhausts_first_family_before_second(planner_context):
     second = SearchPolicy().choose(planner_context)
     assert second.variant_id == "objective_02"
     assert second.family == "objective"
+    assert second.parent.experiment_id == "exp_0000"
+    assert second.implementation_parent.experiment_id == "exp_0001"
 
     attempted_two = make_summary(
         "exp_0002",
@@ -108,6 +110,88 @@ def test_campaign_exposes_all_currently_eligible_methods_to_agent(planner_contex
         "objective_pairwise_bpr",
         "objective_listwise_user_softmax",
     )
+
+
+def test_campaign_continues_after_quarantining_suspicious_slot(planner_context):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="depth_test",
+        family_order=["objective"],
+        family_budgets={"objective": 2},
+        family_method_card_ids={"objective": ["objective_pairwise_bpr"]},
+        family_directives={"objective": "Adapt from evidence."},
+    )
+    suspicious = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        decision="invalid",
+        parent_eligible=False,
+        trust_verdict="suspicious",
+        integrity="compromised",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    suspicious.status = "invalid"
+    suspicious.campaign_id = "depth_test"
+    suspicious.variant_id = "objective_01"
+    planner_context.family_history = [suspicious]
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "propose"
+    assert choice.variant_id == "objective_02"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.implementation_parent.experiment_id == "exp_0000"
+
+
+def test_campaign_enumerates_all_fifty_slots_before_exhaustion(planner_context):
+    planner_context.contract_summary.allowed_families = [
+        "objective",
+        "temporal_history",
+    ]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="objective_temporal_50",
+        family_order=["objective", "temporal_history"],
+        family_budgets={"objective": 25, "temporal_history": 25},
+        family_method_card_ids={
+            "objective": ["objective_pairwise_bpr"],
+            "temporal_history": ["temporal_history_compact"],
+        },
+        family_directives={
+            "objective": "Adapt objective parameters.",
+            "temporal_history": "Adapt temporal parameters.",
+        },
+    )
+    history = []
+    for slot in range(1, 51):
+        planner_context.family_history = history
+        choice = SearchPolicy().choose(planner_context)
+        expected_family = "objective" if slot <= 25 else "temporal_history"
+        expected_sequence = slot if slot <= 25 else slot - 25
+        assert choice.action == "propose"
+        assert choice.family == expected_family
+        assert choice.variant_id == "%s_%02d" % (
+            expected_family,
+            expected_sequence,
+        )
+        summary = make_summary(
+            "exp_%03d" % slot,
+            parent_experiment_id="exp_0000",
+            commit_sha=("%040x" % slot),
+            family=expected_family,
+            decision="reject",
+            parent_eligible=False,
+            method_card_ids=[choice.method_card_id],
+        )
+        summary.status = "rejected"
+        summary.campaign_id = "objective_temporal_50"
+        summary.variant_id = choice.variant_id
+        history.append(summary)
+
+    planner_context.family_history = history
+    exhausted = SearchPolicy().choose(planner_context)
+    assert exhausted.action == "blocked"
+    assert exhausted.reason_code == "CAMPAIGN_EXHAUSTED"
 
 
 def test_clean_evaluator_baseline_does_not_imply_executable_parent_parity(
@@ -359,10 +443,6 @@ def test_playbook_cannot_reintroduce_contract_disallowed_family(planner_context)
     ("overrides", "reason_code"),
     [
         ({"output_accepted": False}, "OUTPUT_CHECK_REJECTED"),
-        (
-            {"trust_verdict": "suspicious", "integrity": "compromised"},
-            "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
-        ),
         ({"prediction_change": 0.0001}, "NO_OP_REQUIRES_RECOVERY"),
         ({"output_accepted": None}, "RESULT_NOT_BRANCHABLE"),
         ({"integrity": None}, "RESULT_NOT_BRANCHABLE"),
@@ -393,6 +473,26 @@ def test_playbook_blocks_unbranchable_results(
 
     assert choice.action == "blocked"
     assert choice.reason_code == reason_code
+
+
+def test_suspicious_candidate_is_quarantined_without_blocking_search(planner_context):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        decision="invalid",
+        parent_eligible=False,
+        trust_verdict="suspicious",
+        integrity="compromised",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    latest.status = "invalid"
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "SUSPICIOUS_CANDIDATE_QUARANTINED"
+    assert choice.parent.experiment_id == "exp_0000"
 
 
 def test_playbook_branches_after_terminal_proxy_prune(planner_context):

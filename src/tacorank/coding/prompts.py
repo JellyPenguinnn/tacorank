@@ -163,6 +163,7 @@ def build_coding_prompt(
         "Begin by viewing the authoritative target files directly; do not list the repository root or survey unrelated directories.",
         "Reuse prior view results instead of rereading the same path and range.",
         "Modify only authoritative_target_files. Do not add ad-hoc smoke, test, helper, or alternate entrypoint files unless each path is explicitly present in authoritative_target_files.",
+        "When solution/experiment_config.py is the sole target, set CONFIG family to the ExperimentSpec family, copy every approved variant_parameters value to its matching CONFIG key, preserve unspecified keys, and do not inspect or rewrite candidate.py or research_scaffold.py.",
         "The interface excerpts and method cards below are the supplied integration context. Inspect one non-target file only when a concrete missing symbol or schema blocks the edit.",
         "The production entrypoint is loaded as solution.candidate:run. Prefer one self-contained candidate.py; use sibling imports only when the approved target files and interface explicitly authorize them.",
         "When the interface supplies setup-verified FM scores, preserve them as the parent and implement the approved mechanism as a bounded residual unless the ExperimentSpec explicitly requires replacement.",

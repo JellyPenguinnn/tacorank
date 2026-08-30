@@ -8,6 +8,7 @@
     "objective": 25,
     "temporal_history": 25
   },
+  "proxy_checkpoint_interval": 3,
   "family_method_card_ids": {
     "objective": [
       "objective_pairwise_bpr",
@@ -18,7 +19,7 @@
     ]
   },
   "family_directives": {
-    "objective": "Investigate ranking-objective formulations in depth. Use the prior campaign results to choose a distinct next pairwise, listwise, or hybrid formulation and its sampling, weighting, capacity, regularization, and optimization hyperparameters. Prefer a targeted refinement of promising evidence or a falsifying alternative to a failed hypothesis; do not repeat a prior design.",
-    "temporal_history": "Investigate strictly past user-history modeling in depth. Use the prior campaign results to choose a distinct next representation, entity affinity, sequence horizon, recency weighting, positive-negative evidence treatment, shrinkage, residual scale, and related hyperparameters. Prefer a targeted refinement of promising evidence or a falsifying alternative to a failed hypothesis; do not repeat a prior design."
+    "objective": "Investigate ranking-objective formulations in depth through the stable trainable scaffold. Select pointwise, bpr, or listwise and adapt only typed configuration parameters from prior confidence intervals and training diagnostics. Prefer a targeted refinement of promising evidence or a falsifying alternative to a failed hypothesis; do not repeat a prior design.",
+    "temporal_history": "Investigate strictly past user-history modeling in depth through the stable trainable scaffold. Select temporal_history and adapt typed history decay, shrinkage, residual scale, capacity, regularization, and optimization parameters from prior confidence intervals and training diagnostics. Prefer a targeted refinement of promising evidence or a falsifying alternative to a failed hypothesis; do not repeat a prior design."
   }
 }

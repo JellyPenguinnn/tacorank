@@ -622,6 +622,9 @@ class ContextBuilder:
                 PlannerExperimentSummary(
                     experiment_id=spec.experiment_id,
                     parent_experiment_id=spec.parent_experiment_id,
+                    implementation_parent_experiment_id=(
+                        spec.implementation_parent_experiment_id
+                    ),
                     commit_sha=node.latest_commit_sha or spec.parent_commit_sha,
                     family=spec.family,
                     hypothesis_summary=spec.hypothesis,

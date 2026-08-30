@@ -73,7 +73,6 @@ def test_validator_accepts_distinct_agent_chosen_campaign_variant(planner_contex
             "formulation": "bpr",
             "negative_count": 4,
             "learning_rate": 0.02,
-            "metric_tradeoff": "GAUC/nDCG",
         },
     )
 

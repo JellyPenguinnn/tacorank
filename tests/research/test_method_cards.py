@@ -23,7 +23,7 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
         "verified_predictions",
     }
     assert card.prohibition_conditions == ("evaluator_or_split_change_required",)
-    assert card.implementation_targets == ("solution/candidate.py",)
+    assert card.implementation_targets == ("solution/experiment_config.py",)
 
     residual = next(
         card

@@ -32,6 +32,48 @@ HIDDEN_PATTERNS = (
 SHARED_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 EVENT_ID_PATTERN = re.compile(r"evt_\d{6,}$")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?$")
+
+_VARIANT_BOUNDS = {
+    "embedding_dim": (2.0, 32.0, True),
+    "learning_rate": (1e-5, 0.2, False),
+    "epochs": (1.0, 8.0, True),
+    "negative_count": (1.0, 16.0, True),
+    "l2": (0.0, 0.1, False),
+    "residual_scale": (0.0, 0.5, False),
+    "max_train_rows": (1000.0, 250_000.0, True),
+    "history_decay_days": (1.0, 180.0, False),
+    "history_shrinkage": (0.0, 1000.0, False),
+}
+
+
+def _variant_parameter_errors(family: str, values: Any) -> list[str]:
+    if not isinstance(values, dict):
+        return ["CAMPAIGN_VARIANT_PARAMETERS_REQUIRED"]
+    formulation = values.get("formulation")
+    allowed_formulations = {
+        "objective": {"pointwise", "bpr", "listwise"},
+        "temporal_history": {"temporal_history"},
+    }.get(family, set())
+    errors = []
+    if formulation not in allowed_formulations:
+        errors.append("VARIANT_FORMULATION_MISMATCH")
+    unknown = set(values) - {"formulation", *_VARIANT_BOUNDS}
+    if unknown:
+        errors.append("UNKNOWN_VARIANT_PARAMETER")
+    for key, value in values.items():
+        if key not in _VARIANT_BOUNDS:
+            continue
+        lower, upper, integer = _VARIANT_BOUNDS[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            errors.append("INVALID_VARIANT_PARAMETER_TYPE")
+            continue
+        if integer and not isinstance(value, int):
+            errors.append("INVALID_VARIANT_PARAMETER_TYPE")
+        elif not lower <= float(value) <= upper:
+            errors.append("VARIANT_PARAMETER_OUT_OF_RANGE")
+    return errors
+
+
 @dataclass(frozen=True)
 class ValidationResult:
     accepted: bool
@@ -124,6 +166,11 @@ class PlanValidator:
             errors.append("INVALID_EXPERIMENT_ID")
         if not SHARED_ID_PATTERN.fullmatch(str(get_value(spec, "parent_experiment_id", ""))):
             errors.append("INVALID_PARENT_EXPERIMENT_ID")
+        effective_implementation_parent_id = get_value(
+            spec, "implementation_parent_experiment_id", None
+        ) or get_value(spec, "parent_experiment_id", None)
+        if not SHARED_ID_PATTERN.fullmatch(str(effective_implementation_parent_id or "")):
+            errors.append("INVALID_IMPLEMENTATION_PARENT_EXPERIMENT_ID")
         if context_id and not SHARED_ID_PATTERN.fullmatch(str(context_id)):
             errors.append("INVALID_CONTEXT_ID")
         if not _valid_commit(get_value(spec, "parent_commit_sha", None)):
@@ -145,6 +192,15 @@ class PlanValidator:
                 spec, "parent_experiment_id", None
             ) != get_value(get_value(choice, "parent"), "experiment_id", None):
                 errors.append("PARENT_POLICY_MISMATCH")
+            expected_implementation_parent = (
+                get_value(choice, "implementation_parent", None)
+                or get_value(choice, "parent", None)
+            )
+            if expected_implementation_parent is not None and (
+                get_value(spec, "implementation_parent_experiment_id", None)
+                or get_value(spec, "parent_experiment_id", None)
+            ) != get_value(expected_implementation_parent, "experiment_id", None):
+                errors.append("IMPLEMENTATION_PARENT_POLICY_MISMATCH")
             if get_value(choice, "family", None) and family != get_value(choice, "family"):
                 errors.append("FAMILY_POLICY_MISMATCH")
             for field, code in (
@@ -171,6 +227,8 @@ class PlanValidator:
                 or not _nonempty(variant_parameters.get("formulation"))
             ):
                 errors.append("CAMPAIGN_VARIANT_PARAMETERS_REQUIRED")
+            else:
+                errors.extend(_variant_parameter_errors(family, variant_parameters))
             campaign_methods = get_value(
                 campaign, "family_method_card_ids", None
             ) or {}
@@ -193,6 +251,14 @@ class PlanValidator:
             for summary in historical_summaries
             if str(get_value(summary, "experiment_id", ""))
         }
+        implementation_parent_id = get_value(
+            spec, "implementation_parent_experiment_id", None
+        ) or parent_id
+        implementation_parent = graph.get(str(implementation_parent_id))
+        if implementation_parent is None and implementation_parent_id:
+            implementation_parent = ExperimentNodeView.from_summary(
+                historical_by_id.get(str(implementation_parent_id))
+            )
         refinement_ids = (
             {
                 str(item)
@@ -252,14 +318,15 @@ class PlanValidator:
                 or not classify_search_eligibility(summary, context).refinement_eligible
             ):
                 errors.append("INELIGIBLE_REFINEMENT_PARENT")
-        if (
-            parent is not None
-            and get_value(spec, "parent_commit_sha", None)
-            and parent.parent_commit_sha
-            and get_value(spec, "parent_commit_sha") != parent.parent_commit_sha
+        if implementation_parent is None:
+            errors.append("UNKNOWN_IMPLEMENTATION_PARENT")
+        elif (
+            get_value(spec, "parent_commit_sha", None)
+            and implementation_parent.parent_commit_sha
+            and get_value(spec, "parent_commit_sha")
+            != implementation_parent.parent_commit_sha
         ):
-            # The summary's commit_sha represents the code state being branched from.
-            errors.append("PARENT_COMMIT_MISMATCH")
+            errors.append("IMPLEMENTATION_PARENT_COMMIT_MISMATCH")
 
         component_ids = [
             str(item)

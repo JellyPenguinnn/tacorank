@@ -80,7 +80,7 @@ def test_protected_decision_attaches_eligible_research_lesson():
         target_stage="feature_engineering",
         falsification_condition="The confirmed full score does not improve.",
     )
-    request = SimpleNamespace(patch_commit_sha="d" * 40)
+    request = SimpleNamespace(patch_commit_sha="d" * 40, seed=11)
     events = [
         event("evt_proposal", "experiment.proposed", spec=spec),
         event("evt_started", "execution.started", request=request),
@@ -158,7 +158,7 @@ def test_full_diagnostics_resolve_proxy_delta_from_the_same_commit():
             Integrity.CLEAN,
         ),
     )
-    request = SimpleNamespace(patch_commit_sha="d" * 40)
+    request = SimpleNamespace(patch_commit_sha="d" * 40, seed=11)
     events = [
         event("evt_started", "execution.started", request=request),
         event(
@@ -189,6 +189,7 @@ def test_full_diagnostics_resolve_proxy_delta_from_the_same_commit():
         experiment_id="exp_001",
         population=Population.PUBLIC_VALIDATION,
         fidelity=Fidelity.FULL,
+        seed=11,
     )
 
     assert bridge._internal_proxy_delta(full_request, "d" * 40) == -0.02

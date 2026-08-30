@@ -56,7 +56,11 @@ def convergence_pressure(events: Sequence[Event], config: RunConfig) -> int:
                 and result.trust.verdict == TrustVerdict.ACCEPTED
             ):
                 continue
-            score = result.metric_set.primary_score
+            score = (
+                result.trust.seed_mean
+                if result.trust.seed_mean is not None
+                else result.metric_set.primary_score
+            )
             if incumbent is None or score > incumbent + config.convergence_epsilon:
                 incumbent = score
                 non_improving = 0
@@ -81,7 +85,9 @@ def stop_decision(
     if runtime_stop.stop:
         return runtime_stop
     pressure = convergence_pressure(events, config)
-    if pressure >= config.convergence_patience:
+    # A frozen depth campaign owns its per-family conclusion budget. Global
+    # patience must not terminate it after the first few noisy configurations.
+    if config.research_campaign is None and pressure >= config.convergence_patience:
         return StopDecision(
             True,
             "converged",

@@ -58,7 +58,7 @@ class NoOpTrustTests(unittest.TestCase):
         )
         self.assertEqual(negative.verdict, Verdict.NEGATIVE)
 
-    def test_confirmed_directional_gain_below_ladder_is_trusted_for_search(self):
+    def test_confirmed_directional_gain_uses_measured_interval(self):
         change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
         trust = assess_trust(
             evidence(
@@ -75,8 +75,9 @@ class NoOpTrustTests(unittest.TestCase):
 
         self.assertEqual(trust.verdict, Verdict.ACCEPTED)
         self.assertEqual(trust.stability, Stability.CONFIRMED)
-        self.assertIn("CONFIRMED_POSITIVE_BELOW_LADDER", trust.flags)
-        self.assertLess(trust.seed_mean - 0.601468756352959, trust.eta_applied)
+        self.assertGreater(trust.parent_delta_ci_lower, 0.0)
+        self.assertEqual(trust.minimum_practical_gain, 0.0001)
+        self.assertGreater(trust.seed_mean - 0.601468756352959, trust.eta_applied)
 
     def test_proxy_uses_symmetric_noise_band_before_pruning(self):
         change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])

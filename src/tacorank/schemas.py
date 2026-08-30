@@ -518,6 +518,7 @@ class ResearchCampaign(StrictModel):
     family_budgets: Dict[NonEmptyStr, int]
     family_method_card_ids: Dict[NonEmptyStr, List[NonEmptyStr]]
     family_directives: Dict[NonEmptyStr, NonEmptyStr]
+    proxy_checkpoint_interval: int = Field(default=3, gt=0)
 
     @field_validator("campaign_id")
     @classmethod
@@ -562,6 +563,7 @@ class ResearchProposal(StrictModel):
     run_id: NonEmptyStr
     experiment_id: NonEmptyStr
     parent_experiment_id: Optional[str] = None
+    implementation_parent_experiment_id: Optional[str] = None
     parent_commit_sha: NonEmptyStr
     context_id: NonEmptyStr
     hypothesis: NonEmptyStr
@@ -590,10 +592,10 @@ class ResearchProposal(StrictModel):
     def validate_ids(cls, value: str, info: Any) -> str:
         return _validate_id(value, info.field_name)
 
-    @field_validator("parent_experiment_id")
+    @field_validator("parent_experiment_id", "implementation_parent_experiment_id")
     @classmethod
-    def validate_optional_id(cls, value: Optional[str]) -> Optional[str]:
-        return None if value is None else _validate_id(value, "parent_experiment_id")
+    def validate_optional_id(cls, value: Optional[str], info: Any) -> Optional[str]:
+        return None if value is None else _validate_id(value, info.field_name)
 
     @field_validator("campaign_id", "variant_id")
     @classmethod
@@ -918,6 +920,15 @@ class TrustAssessment(StrictModel):
     seed_mean: Optional[float] = None
     seed_stderr: Optional[float] = Field(default=None, ge=0.0)
     seed_count: int = Field(default=1, ge=1)
+    parent_delta_mean: Optional[float] = None
+    parent_delta_stderr: Optional[float] = Field(default=None, ge=0.0)
+    parent_delta_ci_lower: Optional[float] = None
+    parent_delta_ci_upper: Optional[float] = None
+    best_delta_mean: Optional[float] = None
+    best_delta_stderr: Optional[float] = Field(default=None, ge=0.0)
+    best_delta_ci_lower: Optional[float] = None
+    best_delta_ci_upper: Optional[float] = None
+    minimum_practical_gain: Optional[float] = Field(default=None, ge=0.0)
 
     @field_validator("flags")
     @classmethod
@@ -943,6 +954,21 @@ class TrustAssessment(StrictModel):
             raise ValueError("seed mean and standard error must be supplied together")
         if any(supplied) and self.seed_count < 3:
             raise ValueError("seed aggregates require at least three seed results")
+        for prefix in ("parent_delta", "best_delta"):
+            interval = (
+                getattr(self, prefix + "_mean"),
+                getattr(self, prefix + "_stderr"),
+                getattr(self, prefix + "_ci_lower"),
+                getattr(self, prefix + "_ci_upper"),
+            )
+            if any(value is not None for value in interval) and not all(
+                value is not None for value in interval
+            ):
+                raise ValueError("%s uncertainty fields must be supplied together" % prefix)
+            if all(value is not None for value in interval):
+                mean, _, lower, upper = interval
+                if lower > upper or not lower <= mean <= upper:
+                    raise ValueError("%s confidence interval is invalid" % prefix)
         return self
 
 
@@ -959,6 +985,17 @@ class EvaluationDiagnostics(StrictModel):
     proxy_full_delta_gap: Optional[float] = Field(default=None, ge=0.0)
     validation_arm_deltas: Dict[str, float] = Field(default_factory=dict)
     validation_arm_gap: Optional[float] = Field(default=None, ge=0.0)
+    paired_parent_delta_stderr: Optional[float] = Field(default=None, ge=0.0)
+    paired_parent_delta_ci_lower: Optional[float] = None
+    paired_parent_delta_ci_upper: Optional[float] = None
+    paired_best_delta_stderr: Optional[float] = Field(default=None, ge=0.0)
+    paired_best_delta_ci_lower: Optional[float] = None
+    paired_best_delta_ci_upper: Optional[float] = None
+    val_b_delta_ci_lower: Optional[float] = None
+    val_b_delta_ci_upper: Optional[float] = None
+    val_a_delta_ci_lower: Optional[float] = None
+    val_a_delta_ci_upper: Optional[float] = None
+    paired_bootstrap_samples: Optional[int] = Field(default=None, ge=20)
     temporal_delta_slope: Optional[float] = None
     gain_concentration_top10pct: Optional[float] = Field(
         default=None, ge=0.0, le=1.0
@@ -1001,6 +1038,29 @@ class EvaluationDiagnostics(StrictModel):
             assert self.validation_arm_gap is not None
             if abs(expected_gap - self.validation_arm_gap) > 1e-12:
                 raise ValueError("validation arm gap does not match arm deltas")
+        for prefix in ("paired_parent_delta", "paired_best_delta"):
+            interval = (
+                getattr(self, prefix + "_stderr"),
+                getattr(self, prefix + "_ci_lower"),
+                getattr(self, prefix + "_ci_upper"),
+            )
+            if any(value is not None for value in interval) and not all(
+                value is not None for value in interval
+            ):
+                raise ValueError("%s interval fields must be supplied together" % prefix)
+            if interval[1] is not None and interval[1] > interval[2]:
+                raise ValueError("%s confidence interval is invalid" % prefix)
+        for arm in ("val_a", "val_b"):
+            interval = (
+                getattr(self, arm + "_delta_ci_lower"),
+                getattr(self, arm + "_delta_ci_upper"),
+            )
+            if any(value is not None for value in interval) and not all(
+                value is not None for value in interval
+            ):
+                raise ValueError("%s confidence interval must be supplied together" % arm)
+            if interval[0] is not None and interval[0] > interval[1]:
+                raise ValueError("%s confidence interval is invalid" % arm)
         for field_name in ("best_slice", "worst_slice"):
             name = getattr(self, field_name)
             if name is not None and name not in self.slice_deltas:
@@ -1417,6 +1477,7 @@ class PlannerExperimentSummary(StrictModel):
 
     experiment_id: NonEmptyStr
     parent_experiment_id: Optional[str] = None
+    implementation_parent_experiment_id: Optional[str] = None
     commit_sha: NonEmptyStr
     family: Optional[str] = None
     hypothesis_summary: str = ""
@@ -1659,6 +1720,7 @@ class EvaluationDecisionContext(StrictModel):
     baseline_score: float
     parent_score: Optional[float] = None
     previous_best_score: Optional[float] = None
+    promote_inconclusive_proxy: bool = True
 
 
 class EventType(str, Enum):

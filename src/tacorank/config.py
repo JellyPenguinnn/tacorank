@@ -27,17 +27,15 @@ class ContractError(RuntimeError):
 
 
 DEFAULT_TARGET_INTERFACE_EXCERPTS = {
-    "solution/candidate.py": (
-        "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
-        "-> None; include this file in target_files; read only "
-        "invocation.input_root and write exactly invocation.output_path as "
-        "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
-        "invocation.seed; return None. fm_baseline_predictions.csv contains "
-        "unconstrained real-valued FM ranking scores, not probabilities. Never "
-        "sigmoid, clip to [0,1], normalize, or rescale the FM parent or the "
-        "parent-plus-residual result. Bound only the residual on the parent's "
-        "original score scale and preserve the exact parent score when no "
-        "supported residual is available."
+    "solution/experiment_config.py": (
+        "Edit only the scalar values in CONFIG. The stable scaffold supports "
+        "formulation=pointwise|bpr|listwise|temporal_history and validates: "
+        "embedding_dim integer 2..32, learning_rate 1e-5..0.2, epochs 1..8, "
+        "negative_count integer 1..16, l2 0..0.1, residual_scale 0..0.5, "
+        "max_train_rows integer 1000..250000, history_decay_days 1..180, "
+        "history_shrinkage 0..1000. Set CONFIG family to the ExperimentSpec "
+        "family and copy every approved variant_parameters value into its "
+        "matching CONFIG key; do not edit executable code."
     )
 }
 
@@ -182,10 +180,6 @@ class RunConfig(StrictModel):
                 raise ValueError("campaign contains a research family not allowed by the run")
             if campaign.experiment_budget > self.max_experiments:
                 raise ValueError("campaign experiment budget exceeds max_experiments")
-            if self.convergence_patience < campaign.experiment_budget:
-                raise ValueError(
-                    "campaign runs require convergence_patience to cover every campaign slot"
-                )
         return self
 
     @field_validator("target_interface_excerpts")

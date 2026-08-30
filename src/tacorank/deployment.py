@@ -15,7 +15,7 @@ import tarfile
 import tempfile
 import urllib.request
 from pathlib import Path, PurePosixPath
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, Iterable, Mapping, Sequence, Tuple
 
 import certifi
@@ -332,35 +332,18 @@ def setup_live_deployment(
         "prediction_change_no_op_threshold": 0.001,
         "max_single_score_fraction": 0.5,
         "target_interface_excerpts": {
-            "solution/candidate.py": (
-                "Required candidate entrypoint: def run(invocation: "
-                "PipelineInvocation) -> None; include this file in target_files; read only "
-                "invocation.input_root and write exactly invocation.output_path as "
-                "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
-                "invocation.seed; return None. train.csv has the exact columns "
-                "date,user_id,video_id,author_id,tab,duration_ms,long_view, where "
-                "date is an integer YYYYMMDD value; "
-                "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
-                "and never exposes long_view. CSV values arrive as text, and numeric "
-                "fields may use integral decimal notation such as duration_ms=209900.0; "
-                "validate numerically rather than assuming integer string syntax. "
-                "fm_baseline_predictions.csv contains "
-                "the setup-verified official FM score aligned one-to-one with "
-                "score.csv; fm_baseline_predictions.sha256 authenticates it. The "
-                "baseline candidate reproduces these bytes exactly. FM scores are "
-                "unconstrained real-valued ranking scores, not probabilities. Never "
-                "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
-                "parent-plus-residual result. Keep this FM score as the strong parent "
-                "and learn one bounded train-only residual on the original score scale "
-                "unless the approved ExperimentSpec explicitly tests replacement. "
-                "Do not reinterpret duration_ms as watch time: it is video duration. "
-                "Training dates strictly precede score dates. Preserve contiguous "
-                "score row_id order, duplicate rows, finite deterministic scores, "
-                "and exclusive output creation. Use all training rows or report a "
-                "deterministic representative sampling fraction in the code. The "
-                "production loader imports solution.candidate:run; keep the "
-                "implementation in candidate.py unless every helper path and import "
-                "pattern are explicitly authorized by target_files."
+            "solution/experiment_config.py": (
+                "Edit only scalar values in CONFIG, set family to the ExperimentSpec "
+                "family, and copy the approved variant_parameters exactly. "
+                "Supported formulation values are "
+                "pointwise, bpr, listwise, and temporal_history. Bounds: "
+                "embedding_dim integer 2..32; learning_rate 1e-5..0.2; epochs "
+                "1..8; negative_count integer 1..16; l2 0..0.1; residual_scale "
+                "0..0.5; max_train_rows integer 1000..250000; "
+                "history_decay_days 1..180; history_shrinkage 0..1000. The "
+                "controller-owned stable scaffold preserves the official FM parent, "
+                "trains the requested residual, and records diagnostics. Do not edit "
+                "candidate.py or research_scaffold.py during configuration trials."
             )
         },
         "coding_step_limit": 64,
@@ -672,8 +655,14 @@ def _candidate_baseline_parity_receipt(
     """Execute the editable parent and prove exact FM bytes at every route."""
 
     source = root / "solution" / "candidate.py"
+    package_name = "_tacorank_candidate_%s" % hashlib.sha256(
+        str(root).encode("utf-8")
+    ).hexdigest()[:16]
+    package = ModuleType(package_name)
+    package.__path__ = [str(source.parent)]
+    sys.modules[package_name] = package
     specification = importlib.util.spec_from_file_location(
-        "tacorank_setup_verified_candidate", source
+        package_name + ".candidate", source
     )
     if specification is None or specification.loader is None:
         raise DeploymentError("candidate baseline entrypoint could not be loaded")
@@ -684,6 +673,9 @@ def _candidate_baseline_parity_receipt(
         specification.loader.exec_module(module)
     finally:
         sys.dont_write_bytecode = previous
+        for module_name in tuple(sys.modules):
+            if module_name == package_name or module_name.startswith(package_name + "."):
+                sys.modules.pop(module_name, None)
     implementation = getattr(module, "run", None)
     if not callable(implementation):
         raise DeploymentError("candidate baseline does not define callable run")
@@ -725,6 +717,13 @@ def _candidate_baseline_parity_receipt(
         "candidate_entrypoint": "solution.candidate:run",
         "candidate_source_path": "solution/candidate.py",
         "candidate_source_sha256": _sha256_file(source),
+        "candidate_support_sha256": {
+            relative: _sha256_file(root / relative)
+            for relative in (
+                "solution/experiment_config.py",
+                "solution/research_scaffold.py",
+            )
+        },
         "routes": routes,
     }
 

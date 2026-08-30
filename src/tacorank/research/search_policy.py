@@ -51,6 +51,7 @@ class PolicyChoice:
     phase: str
     reason_code: str
     reason: str
+    implementation_parent: ExperimentNodeView | None = None
     method_card_id: str | None = None
     allowed_method_card_ids: tuple[str, ...] = ()
     campaign_id: str | None = None
@@ -235,6 +236,7 @@ def _proposal(
     return PolicyChoice(
         action="propose",
         parent=parent,
+        implementation_parent=parent,
         family=family,
         cost_tier=_cost_tier(get_value(card, "cost_tier", None)),
         phase=phase,
@@ -249,6 +251,7 @@ def _blocked(reason_code: str, reason: str, *, phase: str = "playbook_gate") -> 
     return PolicyChoice(
         action="blocked",
         parent=None,
+        implementation_parent=None,
         family=None,
         cost_tier="low",
         phase=phase,
@@ -269,15 +272,7 @@ def _campaign_choice(
     history = as_list(get_value(context, "family_history", None))
     latest = history[-1] if history else None
     if latest is not None:
-        integrity = _normalized(get_value(latest, "integrity", None))
-        verdict = _normalized(get_value(latest, "trust_verdict", None))
         status = _normalized(get_value(latest, "status", None))
-        if integrity == "compromised" or verdict == "suspicious":
-            return _blocked(
-                "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
-                "The latest campaign result is suspicious or integrity-compromised.",
-                phase="campaign_depth",
-            )
         terminal = {"accepted", "rejected", "pruned", "invalid"}
         if status not in terminal:
             return _blocked(
@@ -332,9 +327,23 @@ def _campaign_choice(
             )
         card = eligible_cards[method_ids[0]]
         sequence = len(family_attempted) + 1
+        implementation_parent = parent
+        for prior in reversed(family_attempted):
+            prior_node = ExperimentNodeView.from_summary(prior)
+            if (
+                prior_node is not None
+                and prior_node.parent_commit_sha
+                and _normalized(get_value(prior, "status", None))
+                in {"accepted", "rejected", "pruned"}
+                and _normalized(get_value(prior, "integrity", None)) != "compromised"
+                and _normalized(get_value(prior, "trust_verdict", None)) != "suspicious"
+            ):
+                implementation_parent = prior_node
+                break
         return PolicyChoice(
             action="propose",
             parent=parent,
+            implementation_parent=implementation_parent,
             family=family,
             cost_tier=_cost_tier(get_value(card, "cost_tier", None)),
             phase="campaign_depth",
@@ -622,9 +631,19 @@ def _playbook_choice(
         if rule == "suspicious_or_compromised" and (
             integrity == "compromised" or verdict == "suspicious"
         ):
-            return _blocked(
-                "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
-                "The latest evaluation is suspicious or integrity-compromised.",
+            return _next_independent_choice(
+                context,
+                eligible,
+                allowed,
+                family,
+                reason_code="SUSPICIOUS_CANDIDATE_QUARANTINED",
+                reason=(
+                    "Quarantine the suspicious candidate and continue from the "
+                    "best trusted parent with an independent legal mechanism."
+                ),
+            ) or _blocked(
+                "NO_ELIGIBLE_METHOD",
+                "The suspicious candidate was quarantined and no independent method remains.",
             )
         if rule == "no_op" and (
             verdict == "no_op"

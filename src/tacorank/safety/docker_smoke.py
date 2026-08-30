@@ -18,9 +18,15 @@ from .patch_gate import SMOKE_ISOLATION_CAPABILITY
 _IMAGE = re.compile(r"^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$")
 _ENTRYPOINT = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*$")
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
-_IMPORT_SCRIPT = """import importlib
+_IMPORT_SCRIPT = """import csv
+import hashlib
+import importlib
 import inspect
+import math
+from pathlib import Path
 import sys
+import tempfile
+from types import SimpleNamespace
 
 module_name, separator, symbol = sys.argv[1].partition(":")
 if not separator:
@@ -31,6 +37,66 @@ if not callable(implementation):
 parameters = tuple(inspect.signature(implementation).parameters)
 if parameters != ("invocation",):
     raise SystemExit("entrypoint signature must be run(invocation)")
+
+with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+    root = Path(temporary)
+    input_root = root / "input"
+    input_root.mkdir()
+    score = input_root / "score.csv"
+    score.write_text(
+        "row_id,date,user_id,video_id,author_id,tab,duration_ms\\n"
+        "0,20220403,1,10,100,0,1000.0\\n"
+        "1,20220403,1,11,101,0,2000.0\\n",
+        encoding="utf-8",
+    )
+    train = input_root / "train.csv"
+    train.write_text(
+        "date,user_id,video_id,author_id,tab,duration_ms,long_view\\n"
+        "20220401,1,10,100,0,1000.0,1\\n"
+        "20220402,1,11,101,0,2000.0,0\\n",
+        encoding="utf-8",
+    )
+    parent = input_root / "fm_baseline_predictions.csv"
+    parent.write_text(
+        "row_id,user_id,video_id,score\\n0,1,10,0.25\\n1,1,11,-0.5\\n",
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(parent.read_bytes()).hexdigest()
+    (input_root / "fm_baseline_predictions.sha256").write_text(
+        digest + "\\n", encoding="ascii"
+    )
+    outputs = []
+    for attempt in (1, 2):
+        output_root = root / ("output-%d" % attempt)
+        output_root.mkdir()
+        output = output_root / "predictions.csv"
+        implementation(
+            SimpleNamespace(
+                input_root=input_root,
+                output_path=output,
+                fidelity="smoke",
+                seed=17,
+                mode="candidate",
+                contract_root=root,
+                clean_reproduce=False,
+            )
+        )
+        rows = list(csv.DictReader(output.open(newline="", encoding="utf-8")))
+        if len(rows) != 2 or [int(row["row_id"]) for row in rows] != [0, 1]:
+            raise SystemExit("synthetic output rows are invalid")
+        if not all(math.isfinite(float(row["score"])) for row in rows):
+            raise SystemExit("synthetic output scores are non-finite")
+        if not (output_root / "training-diagnostics.json").is_file():
+            raise SystemExit("training diagnostics are missing")
+        outputs.append(output.read_bytes())
+    if outputs[0] != outputs[1]:
+        raise SystemExit("candidate is nondeterministic for a fixed seed")
+
+scaffold = importlib.import_module("solution.research_scaffold")
+self_test = getattr(scaffold, "self_test", None)
+if not callable(self_test):
+    raise SystemExit("research scaffold self-test is missing")
+self_test()
 """
 
 
@@ -183,7 +249,7 @@ class DockerEntrypointSmokeCheck:
                     return False, "isolated entrypoint import exceeded its output limit"
                 if return_code != 0:
                     return False, _safe_failure_summary(output)
-                return True, "isolated solution.candidate:run import succeeded"
+                return True, "isolated candidate synthetic execution succeeded"
             except OSError:
                 return False, "isolated entrypoint import could not launch Docker"
             finally:
@@ -248,11 +314,11 @@ class DockerEntrypointSmokeCheck:
 def _safe_failure_summary(output: str) -> str:
     compact = " ".join(output.split())
     if not compact:
-        return "isolated candidate entrypoint import failed"
+        return "isolated candidate synthetic execution failed"
     # Candidate output is untrusted and may contain structured payloads. Keep a
     # short printable diagnostic without relaying JSON-like content to prompts.
     compact = compact.replace("{", "(").replace("}", ")")
-    return "isolated candidate entrypoint import failed: " + compact[-1000:]
+    return "isolated candidate synthetic execution failed: " + compact[-1000:]
 
 
 def _bounded_run(

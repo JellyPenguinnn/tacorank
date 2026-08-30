@@ -22,6 +22,7 @@ from tacorank.schemas import (
     PatchCheckResult,
     SubmissionCheckedPayload,
     Violation,
+    ResearchCampaign,
 )
 
 
@@ -173,6 +174,34 @@ def test_outer_loop_uses_memory_and_counts_distinct_terminal_iterations(
     assert state.consecutive_non_improving_full_evaluations == 3
     assert [len(context.family_history) for context in planner.contexts] == [0, 1, 2]
     assert harness.events()[-1].event_type == EventType.RUN_STOPPED
+
+
+def test_depth_campaign_runs_past_global_patience_until_its_budget(
+    harness, baseline_evaluation
+):
+    planner = SequentialPlanner(harness.config.baseline_commit_sha)
+    harness.config.max_experiments = 4
+    harness.config.research_campaign = ResearchCampaign(
+        campaign_id="objective_depth_4",
+        family_order=["objective"],
+        family_budgets={"objective": 4},
+        family_method_card_ids={"objective": ["objective_pairwise_bpr"]},
+        family_directives={"objective": "Adapt objective parameters from evidence."},
+        proxy_checkpoint_interval=3,
+    )
+    harness.planner = planner
+    harness.evaluator = NonImprovingEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_until_stopped())
+
+    assert state.stop_reason_code == "experiment_budget"
+    assert state.experiments_proposed == 4
+    assert len(planner.contexts) == 4
 
 
 def test_blocked_planner_stops_without_spinning(harness, baseline_evaluation):

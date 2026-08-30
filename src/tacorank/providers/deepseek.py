@@ -47,6 +47,12 @@ the next distinct formulation and hyperparameters. Record that complete scientif
 choice in variant_instruction; do not repeat an earlier campaign design.
 Also return variant_parameters as a flat JSON object containing formulation and every
 material configuration choice. Use stable snake_case keys and scalar values only.
+For objective slots, formulation must be pointwise, bpr, or listwise. For temporal
+history slots it must be temporal_history. Optional typed knobs are embedding_dim
+(integer 2..32), learning_rate (1e-5..0.2), epochs (integer 1..8), negative_count
+(integer 1..16), l2 (0..0.1), residual_scale (0..0.5), max_train_rows (integer
+1000..250000), history_decay_days (1..180), and history_shrinkage (0..1000).
+Use only these keys. Adapt them from prior evidence; do not pre-enumerate the campaign.
 
 You are intentionally code-blind. Do not name or infer repository paths, source files,
 modules, classes, functions, entrypoints, commands, patches, implementation interfaces,
@@ -203,6 +209,7 @@ def _research_summary(value: Any) -> Dict[str, Any]:
     fields = (
         "experiment_id",
         "parent_experiment_id",
+        "implementation_parent_experiment_id",
         "family",
         "hypothesis_summary",
         "trust_verdict",
@@ -242,6 +249,31 @@ def _research_summary(value: Any) -> Dict[str, Any]:
     return _code_blind(
         {field: _jsonable(get_value(value, field, None)) for field in fields}
     )
+
+
+def _compact_family_history(values: list[Any]) -> list[Any]:
+    """Keep recent feedback plus the strongest and most informative failures."""
+
+    selected = list(values[-6:])
+    scored = sorted(
+        values,
+        key=lambda item: float(get_value(item, "primary_score", float("-inf")) or float("-inf")),
+        reverse=True,
+    )[:2]
+    failures = [
+        item
+        for item in reversed(values)
+        if str(get_value(item, "status", "")).lower() in {"invalid", "rejected", "pruned"}
+        or str(get_value(item, "trust_verdict", "")).lower() == "suspicious"
+    ][:2]
+    selected_ids = {
+        str(get_value(item, "experiment_id", "")) for item in selected + scored + failures
+    }
+    return [
+        item
+        for item in values
+        if str(get_value(item, "experiment_id", "")) in selected_ids
+    ]
 
 
 def _research_lesson(value: Any) -> Dict[str, Any]:
@@ -443,6 +475,7 @@ class DeepSeekResearchProvider:
                 for item in family_history
                 if str(get_value(item, "family", "")) == selected_family
             ]
+        family_history = _compact_family_history(family_history)
         return {
             "schema_version": get_value(context, "schema_version", "1.0"),
             "context_id": get_value(context, "context_id", None),
@@ -483,7 +516,6 @@ class DeepSeekResearchProvider:
             "remaining_budget": _jsonable(get_value(context, "remaining_budget", None)),
             "convergence": _jsonable(get_value(context, "convergence", None)),
             "source_event_ids": _jsonable(get_value(context, "source_event_ids", [])),
-            "rendered_context": _code_blind(get_value(context, "content", "")),
         }
 
     def _user_prompt(
@@ -493,11 +525,15 @@ class DeepSeekResearchProvider:
     ) -> str:
         choice = request.policy_choice
         parent = get_value(choice, "parent", None)
+        implementation_parent = get_value(choice, "implementation_parent", None) or parent
         policy = {
             "phase": get_value(choice, "phase", None),
             "reason_code": get_value(choice, "reason_code", None),
             "reason": get_value(choice, "reason", None),
             "parent_experiment_id": get_value(parent, "experiment_id", None),
+            "implementation_parent_experiment_id": get_value(
+                implementation_parent, "experiment_id", None
+            ),
             "family": get_value(choice, "family", None),
             "cost_tier": get_value(choice, "cost_tier", None),
             "required_method_card_id": get_value(choice, "method_card_id", None),
@@ -605,6 +641,7 @@ class DeepSeekResearchProvider:
         context = request.context
         choice = request.policy_choice
         parent = get_value(choice, "parent", None)
+        implementation_parent = get_value(choice, "implementation_parent", None) or parent
         source_events = [str(item) for item in as_list(get_value(context, "source_event_ids", []))]
         supplied_evidence = [str(item) for item in as_list(raw.get("evidence_event_ids"))]
         evidence = [item for item in supplied_evidence if item in set(source_events)]
@@ -642,7 +679,12 @@ class DeepSeekResearchProvider:
             "run_id": str(get_value(context, "run_id", "")),
             "experiment_id": _next_experiment_id(context),
             "parent_experiment_id": str(get_value(parent, "experiment_id", "")),
-            "parent_commit_sha": str(get_value(parent, "parent_commit_sha", "")),
+            "implementation_parent_experiment_id": str(
+                get_value(implementation_parent, "experiment_id", "")
+            ),
+            "parent_commit_sha": str(
+                get_value(implementation_parent, "parent_commit_sha", "")
+            ),
             "context_id": str(get_value(context, "context_id", "")),
             "hypothesis": _text(raw.get("hypothesis")),
             "family": str(get_value(choice, "family", "")),
