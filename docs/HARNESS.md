@@ -8,7 +8,7 @@ TacoRank is the integration backbone for the five-person autonomous KuaiRand-Pur
 frozen contract + official baseline
                 |
                 v
-ledger-derived research feedback -> DeepSeek researcher -> ResearchProposal
+ledger-derived research feedback -> bounded keyless OpenAlex evidence -> DeepSeek researcher -> ResearchProposal
                 |                                      |
                 |                                      v
                 |                     controller binds code targets + ladder
@@ -169,7 +169,7 @@ Production exposes no fake runtime flag. Test doubles are constructed directly b
 
 ## DeepSeek and credential boundary
 
-The researcher and pinned Trae worker use `deepseek-v4-flash` with high reasoning through separate bounded adapters. `SearchPolicy` still owns the parent, family, phase, and reviewed method card. DeepSeek receives only research policy, method overviews, experiment feedback, lessons, and budget, then returns a code-blind hypothesis and intervention. It does not receive repository paths, implementation interfaces, commit lineage, pipeline stages, commands, or the execution ladder. After validation, the deterministic controller binds the authorized code targets and frozen smoke/proxy/full ladder before Trae receives the coding context. Invalid provider output is recorded at a durable planner checkpoint and raises a resumable error rather than becoming false convergence.
+The researcher and pinned Trae worker use `deepseek-v4-flash` with high reasoning through separate bounded adapters. `SearchPolicy` still owns the parent, family, phase, and reviewed method card. Once that method is selected, the live planner sends only a static method-derived query to the keyless OpenAlex Works API and snapshots a bounded set of papers; no dataset rows, metrics, run identifiers, or user identifiers leave the controller. DeepSeek receives the research policy, method overviews, experiment feedback, lessons, budget, and untrusted paper snapshot, then must cite an exact retrieved evidence ID in its code-blind hypothesis and intervention. It cannot invent or alter citations. DeepSeek does not receive repository paths, implementation interfaces, commit lineage, pipeline stages, commands, or the execution ladder. After validation, the deterministic controller binds the authorized code targets and frozen smoke/proxy/full ladder before Trae receives the coding context. Candidate coding and execution remain network-disabled. Invalid provider output is recorded at a durable planner checkpoint and raises a resumable error rather than becoming false convergence.
 
 The API key is read only from the configured environment variable. It must never appear in configuration, prompts, Git, logs, trajectories, fixtures, or artifacts.
 

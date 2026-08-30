@@ -267,6 +267,14 @@ def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
         parent_delta=None,
         method_card_ids=["objective_listwise_user_softmax"],
     )
+    loss_aligned_features = make_summary(
+        "exp_0004",
+        parent_experiment_id="exp_0001",
+        family="objective",
+        parent_eligible=False,
+        parent_delta=None,
+        method_card_ids=["objective_loss_aligned_features"],
+    )
     contract = SimpleNamespace(**vars(planner_context.contract_summary))
     contract.allowed_families = ["objective"]
     context = SimpleNamespace(
@@ -274,7 +282,7 @@ def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
         baseline=root,
         current_best=best,
         eligible_frontier=[root, best],
-        family_history=[best, pairwise, listwise],
+        family_history=[best, pairwise, loss_aligned_features, listwise],
         method_cards=planner_context.method_cards,
         playbook=planner_context.playbook,
     )
@@ -779,7 +787,7 @@ def test_playbook_refines_meaningful_pairwise_no_gain_in_family(planner_context)
 
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.family == "objective"
-    assert choice.method_card_id == "objective_listwise_user_softmax"
+    assert choice.method_card_id == "objective_loss_aligned_features"
 
 
 def test_directionally_positive_parent_prevents_premature_search_stop(

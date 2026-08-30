@@ -176,6 +176,15 @@ class RunConfig(StrictModel):
     deepseek_max_output_tokens: int = Field(default=8_192, gt=0)
     deepseek_thinking_enabled: bool = True
     deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
+    # Historical run configs omit these fields and therefore keep the old
+    # offline-only planner behavior. New setup-live deployments explicitly
+    # enable the bounded online literature skill.
+    literature_research_enabled: bool = False
+    literature_provider: Literal["openalex"] = "openalex"
+    literature_base_url: NonEmptyStr = "https://api.openalex.org"
+    literature_timeout_seconds: int = Field(default=20, gt=0, le=120)
+    literature_max_papers: int = Field(default=3, gt=0, le=5)
+    literature_min_citation_count: int = Field(default=5, ge=0)
 
     @field_validator("run_id")
     @classmethod
@@ -275,6 +284,27 @@ class RunConfig(StrictModel):
             or parsed.fragment
         ):
             raise ValueError("deepseek_base_url must be a credential-free HTTPS origin")
+        return value
+
+    @field_validator("literature_base_url")
+    @classmethod
+    def validate_literature_base_url(cls, value: str) -> str:
+        value = value.rstrip("/")
+        parsed = urlparse(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "api.openalex.org"
+            or parsed.port is not None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "literature_base_url must be the credential-free OpenAlex "
+                "HTTPS origin"
+            )
         return value
 
     @field_validator("deepseek_api_key_env")

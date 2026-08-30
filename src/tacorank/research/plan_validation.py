@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
+
+from ..schemas import LiteratureEvidence
 
 from .code_blind import contains_implementation_reference
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
@@ -132,6 +134,15 @@ def _budget_value(budget: Any, *names: str) -> float | None:
     return None
 
 
+def _literature_snapshot(value: Any) -> dict[str, Any] | None:
+    try:
+        return LiteratureEvidence.model_validate(value).model_dump(
+            mode="json", exclude_none=False
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 class PlanValidator:
     """Validate a code-blind research proposal against verified context only."""
 
@@ -141,6 +152,7 @@ class PlanValidator:
         context: Any,
         choice: Any | None = None,
         duplicate_detector: DuplicateDetector | None = None,
+        literature_evidence: Sequence[Any] = (),
     ) -> ValidationResult:
         errors: list[str] = []
         warnings: list[str] = []
@@ -375,6 +387,39 @@ class PlanValidator:
             errors.append("INVALID_EVIDENCE_EVENT_ID")
         if not evidence_events.issubset(source_events):
             errors.append("EVIDENCE_OUTSIDE_CONTEXT")
+
+        available_literature: dict[str, dict[str, Any]] = {}
+        for item in literature_evidence:
+            snapshot = _literature_snapshot(item)
+            if snapshot is None:
+                errors.append("LITERATURE_SKILL_EVIDENCE_INVALID")
+                continue
+            evidence_id = str(snapshot["evidence_id"])
+            if evidence_id in available_literature:
+                errors.append("DUPLICATE_LITERATURE_SKILL_EVIDENCE")
+            available_literature[evidence_id] = snapshot
+
+        proposed_literature = as_list(
+            get_value(spec, "literature_evidence", None)
+        )
+        if available_literature and not proposed_literature:
+            errors.append("LITERATURE_EVIDENCE_REQUIRED")
+        proposed_literature_ids = [
+            str(get_value(item, "evidence_id", ""))
+            for item in proposed_literature
+        ]
+        if len(proposed_literature_ids) != len(set(proposed_literature_ids)):
+            errors.append("DUPLICATE_LITERATURE_EVIDENCE")
+        for item in proposed_literature:
+            snapshot = _literature_snapshot(item)
+            if snapshot is None:
+                errors.append("INVALID_LITERATURE_EVIDENCE")
+                continue
+            source = available_literature.get(str(snapshot["evidence_id"]))
+            if source is None:
+                errors.append("LITERATURE_EVIDENCE_OUTSIDE_SKILL")
+            elif snapshot != source:
+                errors.append("LITERATURE_EVIDENCE_TAMPERED")
 
         text = " ".join(
             str(get_value(spec, field, ""))

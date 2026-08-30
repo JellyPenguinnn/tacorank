@@ -28,7 +28,11 @@ DEFAULT_FAMILY_ORDER = HIGH_VALUE_FAMILIES + (
     "other",
 )
 DEFAULT_METHOD_ORDER = {
-    "objective": ("objective_pairwise_bpr", "objective_listwise_user_softmax"),
+    "objective": (
+        "objective_pairwise_bpr",
+        "objective_loss_aligned_features",
+        "objective_listwise_user_softmax",
+    ),
     "temporal_history": ("temporal_history_compact",),
     "multitask": ("multitask_single_auxiliary",),
     "duration_bias": ("duration_bias_censored_watch_time",),

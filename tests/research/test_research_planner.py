@@ -5,6 +5,7 @@ import pytest
 from tacorank.agents.research_planner import ResearchPlanner
 from tacorank.providers.research_provider import MockResearchProvider
 from tacorank.research.duplicate_detection import compute_duplicate_key
+from tacorank.schemas import LiteratureEvidence, ResourceDelta
 
 from .conftest import make_summary
 
@@ -19,7 +20,7 @@ def output_factory(action, spec, reason_code, reason, supporting_event_ids):
     }
 
 
-def make_spec(context, choice):
+def make_spec(context, choice, literature_evidence=()):
     spec = type("Spec", (), {})()
     for name, value in {
         "schema_version": "1.0",
@@ -46,10 +47,27 @@ def make_spec(context, choice):
         )(),
         "method_card_ids": [choice.method_card_id],
         "evidence_event_ids": ["evt_000001"],
+        "literature_evidence": list(literature_evidence),
     }.items():
         setattr(spec, name, value)
     spec.duplicate_key = compute_duplicate_key(spec)
     return spec
+
+
+def paper_evidence():
+    return LiteratureEvidence(
+        evidence_id="lit_paper_001",
+        paper_id="W1234567890",
+        title="Bayesian Personalized Ranking from Implicit Feedback",
+        abstract="Pairwise ranking optimizes relative preference ordering.",
+        year=2009,
+        authors=["Steffen Rendle"],
+        venue="UAI",
+        citation_count=1000,
+        influential_citation_count=100,
+        url="https://openalex.org/W1234567890",
+        query="Bayesian personalized ranking recommender systems",
+    )
 
 
 def test_planner_returns_one_valid_proposal(planner_context):
@@ -104,6 +122,47 @@ def test_parallel_workers_receive_distinct_method_cards(planner_context):
     assert capacity >= 7
     assert len(outputs) == capacity
     assert len(method_ids) == len(set(method_ids))
+
+
+def test_planner_researches_and_requires_immutable_literature(planner_context):
+    evidence = paper_evidence()
+
+    class Skill:
+        def __init__(self):
+            self.calls = []
+            self.preflight_calls = 0
+            self.resource_delta = ResourceDelta(wall_time_ms=25)
+
+        def preflight(self):
+            self.preflight_calls += 1
+
+        async def research(self, context, choice):
+            self.calls.append((context, choice))
+            return [evidence]
+
+    skill = Skill()
+    provider = MockResearchProvider(
+        lambda request: make_spec(
+            planner_context,
+            request.policy_choice,
+            request.literature_evidence,
+        )
+    )
+    planner = ResearchPlanner(
+        provider,
+        output_factory=output_factory,
+        literature_skill=skill,
+    )
+
+    planner.preflight()
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert skill.preflight_calls == 1
+    assert len(skill.calls) == 1
+    assert provider.requests[0].literature_evidence == (evidence,)
+    assert result["action"] == "propose"
+    assert result["spec"].literature_evidence == [evidence]
+    assert result["resource_delta"].wall_time_ms == 25
 
 
 def test_planner_returns_blocked_when_no_parent(planner_context):

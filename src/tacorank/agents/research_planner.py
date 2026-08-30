@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping
 
 from tacorank.providers.research_provider import ProviderRequest, ResearchProvider
 from tacorank.research.convergence_advisor import ConvergenceAdvisor
+from tacorank.research.literature import LiteratureResearchSkill
 from tacorank.research.plan_validation import PlanValidator, ValidationResult
 from tacorank.research.search_policy import PolicyChoice, SearchPolicy
 
@@ -65,6 +66,7 @@ class ResearchPlanner:
         output_factory: Callable[[str, Any, str, str, list[str]], Any] | None = None,
         input_token_limit: int | None = None,
         output_token_limit: int | None = None,
+        literature_skill: LiteratureResearchSkill | None = None,
     ):
         self.provider = provider
         self.policy = policy or SearchPolicy()
@@ -73,9 +75,36 @@ class ResearchPlanner:
         self.output_factory = output_factory or _default_output_factory
         self.input_token_limit = input_token_limit
         self.output_token_limit = output_token_limit
+        self.literature_skill = literature_skill
+
+    def preflight(self) -> None:
+        """Verify both the model provider and optional online research skill."""
+
+        provider_preflight = getattr(self.provider, "preflight", None)
+        if provider_preflight is not None:
+            provider_preflight()
+        if self.literature_skill is not None:
+            self.literature_skill.preflight()
 
     def _attach_provider_usage(self, output: Any) -> Any:
         resource_delta = getattr(self.provider, "resource_delta", None)
+        literature_delta = (
+            getattr(self.literature_skill, "resource_delta", None)
+            if self.literature_skill is not None
+            else None
+        )
+        if literature_delta is not None:
+            if resource_delta is None:
+                resource_delta = literature_delta
+            elif hasattr(resource_delta, "model_copy"):
+                resource_delta = resource_delta.model_copy(
+                    update={
+                        "wall_time_ms": int(
+                            getattr(resource_delta, "wall_time_ms", 0)
+                        )
+                        + int(getattr(literature_delta, "wall_time_ms", 0))
+                    }
+                )
         if resource_delta is None:
             return output
         if hasattr(output, "model_copy"):
@@ -145,11 +174,28 @@ class ResearchPlanner:
                 supporting,
             )
 
+        literature_evidence = ()
+        if self.literature_skill is not None:
+            logger.info(
+                "literature_research_started context_id=%s method_card_id=%s",
+                _get(context, "context_id", None),
+                choice.method_card_id,
+            )
+            literature_evidence = tuple(
+                await self.literature_skill.research(context, choice)
+            )
+            logger.info(
+                "literature_research_completed context_id=%s evidence_ids=%s",
+                _get(context, "context_id", None),
+                ",".join(item.evidence_id for item in literature_evidence),
+            )
+
         request = ProviderRequest(
             context=context,
             policy_choice=choice,
             input_token_limit=self.input_token_limit,
             output_token_limit=self.output_token_limit,
+            literature_evidence=literature_evidence,
         )
         logger.info(
             "research_provider_selected context_id=%s parent_id=%s family=%s "
@@ -162,7 +208,12 @@ class ResearchPlanner:
             choice.reason_code,
         )
         raw_spec = await self.provider.generate(request)
-        result = self.validator.validate(raw_spec, context, choice=choice)
+        result = self.validator.validate(
+            raw_spec,
+            context,
+            choice=choice,
+            literature_evidence=literature_evidence,
+        )
         if not result.accepted:
             logger.warning(
                 "research_plan_validation_failed context_id=%s errors=%s",
@@ -177,7 +228,12 @@ class ResearchPlanner:
                     ",".join(result.errors),
                 )
                 raw_spec = await repair(request, result.errors)
-                result = self.validator.validate(raw_spec, context, choice=choice)
+                result = self.validator.validate(
+                    raw_spec,
+                    context,
+                    choice=choice,
+                    literature_evidence=literature_evidence,
+                )
         if not result.accepted:
             logger.warning(
                 "research_plan_blocked_after_repair context_id=%s errors=%s",

@@ -12,6 +12,7 @@ class ProviderRequest:
     policy_choice: Any
     input_token_limit: int | None = None
     output_token_limit: int | None = None
+    literature_evidence: tuple[Any, ...] = ()
 
 
 class ResearchProvider(Protocol):
