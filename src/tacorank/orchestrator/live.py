@@ -62,6 +62,7 @@ from ..run_layout import experiment_artifact_prefix, run_artifact_root
 from ..safety import (
     DataAccessPolicy,
     DataViewPolicy,
+    DockerEntrypointSmokeCheck,
     ExecutionSealExpectation,
     InterfaceRequirement,
     OutputColumn,
@@ -297,7 +298,36 @@ class LedgerCandidateIdentityResolver:
     def for_initial(self, context: Any, spec: Any) -> CandidateIdentity:
         if context.experiment_id != spec.experiment_id:
             raise ContractError("coder context and experiment spec identities differ")
-        return CandidateIdentity(1, self._proposal_event_id(spec.experiment_id))
+        events = self.event_store.read_events(repair_tail=True)
+        if any(
+            event.payload.type == "patch.created"
+            and event.payload.candidate.experiment_id == spec.experiment_id
+            for event in events
+        ):
+            raise ContractError("initial coding identity cannot follow a sealed patch")
+        events_by_id = {event.event_id: event for event in events}
+        coding_retries = 0
+        for event in events:
+            if event.payload.type != "recovery.decided":
+                continue
+            decision = event.payload.decision
+            action = getattr(decision.action, "value", decision.action)
+            if (
+                decision.experiment_id != spec.experiment_id
+                or action != "retry_same_commit"
+            ):
+                continue
+            failure = events_by_id.get(decision.failure_event_id)
+            if (
+                failure is not None
+                and failure.payload.type == "adapter.failed"
+                and failure.payload.result.failure_stage == "coding"
+            ):
+                coding_retries += 1
+        return CandidateIdentity(
+            1 + coding_retries,
+            self._proposal_event_id(spec.experiment_id),
+        )
 
     def for_repair(self, context: Any, decision: Any) -> CandidateIdentity:
         if context.experiment_id != decision.experiment_id:
@@ -326,6 +356,7 @@ class WorktreePatchGate:
         allowed_import_roots: Optional[Sequence[str]],
         allowed_capability_imports: Sequence[str],
         allowed_dependency_changes: Sequence[str],
+        smoke_check: Any = None,
     ) -> None:
         self.worktrees = worktrees
         self.repository_root = repository_root
@@ -341,6 +372,7 @@ class WorktreePatchGate:
             "allowed_import_roots": allowed_import_roots,
             "allowed_capability_imports": tuple(allowed_capability_imports),
             "allowed_dependency_changes": tuple(allowed_dependency_changes),
+            "smoke_check": smoke_check,
             "interface_requirements": (
                 InterfaceRequirement(
                     "solution/candidate.py", "run", parameters=("invocation",)
@@ -353,21 +385,22 @@ class WorktreePatchGate:
         # The cumulative-diff root is the approved ExperimentSpec parent.  It
         # is supplied by the wrapper because PatchCandidate deliberately does
         # not duplicate controller-owned proposal fields.
-        experiment_root = self._experiment_root(candidate.experiment_id)
+        spec = self._experiment_spec(candidate.experiment_id)
         return await PatchGate(repository_root=workspace, **self.options).check(
             candidate,
-            experiment_root_commit_sha=experiment_root,
+            experiment_root_commit_sha=spec.parent_commit_sha,
+            authorized_changed_files=spec.target_files,
         )
 
-    def _experiment_root(self, experiment_id: str) -> str:
+    def _experiment_spec(self, experiment_id: str) -> Any:
         matches = [
-            event.payload.spec.parent_commit_sha
+            event.payload.spec
             for event in self.event_store.read_events(repair_tail=True)
             if event.payload.type == "experiment.proposed"
             and event.payload.spec.experiment_id == experiment_id
         ]
         if len(matches) != 1:
-            raise ContractError("Gate A cannot resolve the experiment root commit")
+            raise ContractError("Gate A cannot resolve the approved ExperimentSpec")
         return matches[0]
 
 
@@ -448,6 +481,7 @@ class LedgerOutputGate:
         event_store: EventStore,
         populations: Mapping[str, _PopulationData],
         artifact_roots: Sequence[str],
+        max_single_score_fraction: float,
     ) -> None:
         self.repository_root = repository_root
         self.event_store = event_store
@@ -456,7 +490,10 @@ class LedgerOutputGate:
             key: OutputGate(
                 repository_root=repository_root,
                 artifact_roots=artifact_roots,
-                contract=_output_contract(population.rows),
+                contract=_output_contract(
+                    population.rows,
+                    max_single_score_fraction=max_single_score_fraction,
+                ),
             )
             for key, population in populations.items()
         }
@@ -1057,13 +1094,26 @@ def build_live_adapters(
         hidden_path_tokens=tuple(live.hidden_path_tokens),
         future_column_patterns=tuple(live.future_column_patterns),
     )
+    trae_config = _trae_config_from_mapping(live.trae)
     coding_worker = TraeCodingWorker(
         worktrees=worktrees,
         artifact_repository_root=root,
-        config=_trae_config_from_mapping(live.trae),
+        config=trae_config,
         identity_resolver=LedgerCandidateIdentityResolver(event_store),
     )
     coding_worker.preflight()
+    gate_a_smoke = DockerEntrypointSmokeCheck(
+        docker_executable=live.docker_executable,
+        docker_host=live.docker_host,
+        image=live.docker_image,
+        container_python_executable=live.container_python_executable,
+        entrypoint=live.candidate_entrypoint,
+        timeout_seconds=min(120, config.timeout_profiles.get("standard", 600)),
+        memory_limit_mb=min(2048, trae_config.docker_memory_limit_mb),
+        pids_limit=min(64, trae_config.docker_pids_limit),
+        cpu_limit=min(1.0, live.docker_cpu_count),
+        tmpfs_limit_mb=min(128, live.docker_tmpfs_size_mb),
+    )
     patch_gate = WorktreePatchGate(
         worktrees=worktrees,
         repository_root=root,
@@ -1077,6 +1127,7 @@ def build_live_adapters(
         allowed_import_roots=live.allowed_import_roots,
         allowed_capability_imports=live.allowed_capability_imports,
         allowed_dependency_changes=live.allowed_dependency_changes,
+        smoke_check=gate_a_smoke,
     )
     pipeline = PipelineCommandInputs(
         contract_root=live.contract_root,
@@ -1164,6 +1215,7 @@ def build_live_adapters(
             event_store=event_store,
             populations=populations,
             artifact_roots=config.artifact_roots,
+            max_single_score_fraction=config.max_single_score_fraction,
         ),
         evaluator=evaluator,
         baseline=baseline,
@@ -1340,7 +1392,11 @@ def _protected_population_manifests(
     return manifests
 
 
-def _output_contract(rows: Sequence[Mapping[str, Any]]) -> OutputContract:
+def _output_contract(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    max_single_score_fraction: float = 0.5,
+) -> OutputContract:
     return OutputContract(
         columns=(
             OutputColumn("row_id", "integer"),
@@ -1353,6 +1409,7 @@ def _output_contract(rows: Sequence[Mapping[str, Any]]) -> OutputContract:
         identity_columns=("user_id", "video_id"),
         row_id_column="row_id",
         forbidden_columns=("label", "target"),
+        maximum_single_score_fraction=max_single_score_fraction,
     )
 
 

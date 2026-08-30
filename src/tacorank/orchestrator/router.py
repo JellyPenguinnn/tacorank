@@ -665,6 +665,9 @@ class Harness:
                         if event.payload.context.role == "recovery"
                         else "coding"
                     )
+            elif event.event_type == EventType.EXPERIMENT_PROPOSED:
+                if event.payload.spec.experiment_id == experiment_id:
+                    return "coding"
         return "recovery"
 
     async def _handle_unexpected_adapter_failure(self, error: Exception) -> object:
@@ -808,6 +811,7 @@ class Harness:
             attempt=1,
             causation_event_id=proposal_event.event_id,
         )
+        patch_causation_event_id = coder_context_event.event_id
         try:
             patch = await self.coding_worker.create_patch(coder_context, spec)
         except Exception as error:
@@ -818,29 +822,41 @@ class Harness:
                 error=error,
                 causation_event_id=coder_context_event.event_id,
             )
-            action, _recovery = await self._recover(
+            action, recovery = await self._recover(
                 failure_event, failure_event.payload.result, spec.experiment_id
             )
             if action == RecoveryAction.RETRY_SAME_COMMIT:
-                # No candidate or repository side effect exists yet. The
-                # policy permits one narrowly bounded retry for transient
-                # launch/provider failures; a second failure reaches the
-                # outer fail-closed handler and is abandoned.
-                patch = await self.coding_worker.create_patch(coder_context, spec)
+                # The coding adapter restored its disposable worktree while
+                # retaining immutable failure evidence. Waihong's policy permits
+                # exactly one retry of the same frozen assignment.
+                _, _, recovery_event = recovery
+                try:
+                    patch = await self.coding_worker.create_patch(coder_context, spec)
+                except Exception as retry_error:
+                    retry_failure = self._record_adapter_failure(
+                        experiment_id=spec.experiment_id,
+                        attempt=2,
+                        stage="coding",
+                        error=retry_error,
+                        causation_event_id=recovery_event.event_id,
+                    )
+                    await self._recover(
+                        retry_failure,
+                        retry_failure.payload.result,
+                        spec.experiment_id,
+                    )
+                    return self.state()
                 patch = patch.__class__.model_validate(
                     {
                         **patch.model_dump(mode="json"),
                         "experiment_spec_event_id": proposal_event.event_id,
                     }
                 )
+                patch_causation_event_id = recovery_event.event_id
             else:
-                self.stop(
-                    StopDecision(
-                        True,
-                        "CODING_WORKER_FAILURE",
-                        "The coding worker failed before producing an initial patch.",
-                    )
-                )
+                # Recovery owns the outcome. ABANDON terminates only this
+                # experiment and returns the run to planning; a deliberate
+                # integrity violation has already stopped the run in _recover.
                 return self.state()
         patch = patch.__class__.model_validate(
             {
@@ -853,7 +869,7 @@ class Harness:
             stage="patch_created",
             experiment_id=spec.experiment_id,
             attempt=patch.attempt,
-            causation_event_id=coder_context_event.event_id,
+            causation_event_id=patch_causation_event_id,
             resource_delta=patch.resource_delta,
         )
         if self._stop_if_runtime_budget_exhausted():

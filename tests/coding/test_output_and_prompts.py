@@ -10,6 +10,7 @@ from tacorank.coding.prompts import (
     PromptContractError,
     build_coding_prompt,
     build_repair_prompt,
+    build_solution_revision_prompt,
 )
 from tacorank.coding.redaction import REDACTED, SecretRedactor
 
@@ -148,6 +149,16 @@ def _coding_inputs(secret: str = "") -> tuple[SimpleNamespace, dict[str, object]
         allowed_command_ids=("candidate_smoke",),
         selected_method_cards=(),
         active_lessons=({"summary": f"Never print {secret}"},) if secret else (),
+        coding_invariants=(
+            "FM scores are unconstrained ranking scores; never clip them.",
+        ),
+        prior_result_summaries=(
+            {
+                "experiment_id": "exp0",
+                "parent_delta": -0.04,
+                "diagnostic_metrics": {"spearman_vs_fm_baseline": 0.67},
+            },
+        ),
         step_limit=4,
         token_limit=50,
         wall_time_limit_seconds=10,
@@ -169,6 +180,9 @@ def test_coding_prompt_is_exact_bounded_and_credential_free() -> None:
     assert "do not list the repository root" in prompt
     assert "Reuse prior view results" in prompt
     assert "controller-owned post-patch checks" in prompt
+    assert "unconstrained real-valued ranking scores" in prompt
+    assert '"parent_delta": -0.04' in prompt
+    assert '"spearman_vs_fm_baseline": 0.67' in prompt
     assert "then call task_done" in prompt
 
     changed_spec = dict(spec, hypothesis="different")
@@ -312,6 +326,50 @@ def test_repair_prompt_records_an_unbounded_cumulative_token_limit() -> None:
 
     assert '"max_provider_tokens": null' in prompt
     assert "does not impose a cumulative trajectory token limit" in prompt
+
+
+def test_solution_revision_prompt_is_grounded_and_bounded() -> None:
+    context, spec = _coding_inputs()
+    verification = {
+        "accepted": False,
+        "summary": "The approved residual is missing.",
+        "findings": [
+            {
+                "code": "MECHANISM_MISSING",
+                "severity": "error",
+                "path": "solution/model.py",
+                "message": "The entrypoint returns the parent score unchanged.",
+            }
+        ],
+        "required_changes": ["Implement the approved bounded residual."],
+    }
+
+    prompt = build_solution_revision_prompt(
+        context,
+        spec,
+        verification,
+        review_attempt=1,
+        max_review_attempts=5,
+        step_limit=32,
+        wall_time_limit_seconds=600,
+    )
+
+    assert '"max_review_attempts": 5' in prompt
+    assert '"authoritative_target_files": [\n    "solution/model.py"\n  ]' in prompt
+    assert "Implement the approved bounded residual." in prompt
+    assert "Do not add smoke, test, helper, or alternate entrypoint files" in prompt
+    assert "call task_done immediately" in prompt
+
+    with pytest.raises(PromptContractError, match="requires a rejected verification"):
+        build_solution_revision_prompt(
+            context,
+            spec,
+            {**verification, "accepted": True},
+            review_attempt=1,
+            max_review_attempts=5,
+            step_limit=32,
+            wall_time_limit_seconds=600,
+        )
 
 
 def test_gate_a_repair_has_explicitly_absent_receipt() -> None:

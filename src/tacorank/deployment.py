@@ -108,15 +108,21 @@ def setup_trae_deployment(
                 "fields may use integral decimal notation such as duration_ms=209900.0; "
                 "validate numerically rather than assuming integer string syntax. "
                 "fm_baseline_predictions.csv is the "
-                "setup-verified official FM score for every score.csv row. Preserve "
-                "it as the strong parent and add only a bounded train-only residual "
+                "setup-verified official FM score for every score.csv row. These are "
+                "unconstrained real-valued ranking scores, not probabilities. Never "
+                "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
+                "parent-plus-residual result. Preserve it as the strong parent and "
+                "add only a bounded train-only residual on the original score scale "
                 "unless the approved hypothesis explicitly replaces the parent. "
                 "Training dates strictly precede score dates. Preserve contiguous "
                 "score row_id order, duplicate rows, finite deterministic scores, "
-                "and exclusive output creation."
+                "and exclusive output creation. The production loader imports "
+                "solution.candidate:run. Keep the implementation in candidate.py "
+                "unless every helper path and its import pattern are explicitly "
+                "authorized by the ExperimentSpec target_files."
             )
         },
-        "coding_step_limit": 40,
+        "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
         "data_boundary_sha256": TRAE_ONLY_DATA_BOUNDARY_SHA256,
@@ -288,16 +294,16 @@ def setup_live_deployment(
             list(research_campaign.family_order)
             if research_campaign is not None
             else [
-            "objective",
-            "temporal_history",
-            "multitask",
-            "duration_bias",
-            "features",
-            "model",
-            "sampling",
-            "ensemble",
-            "evaluation",
-            "other",
+                "objective",
+                "temporal_history",
+                "multitask",
+                "duration_bias",
+                "features",
+                "model",
+                "sampling",
+                "ensemble",
+                "evaluation",
+                "other",
             ]
         ),
         "allowed_research_data": [
@@ -324,6 +330,7 @@ def setup_live_deployment(
             else None
         ),
         "prediction_change_no_op_threshold": 0.001,
+        "max_single_score_fraction": 0.5,
         "target_interface_excerpts": {
             "solution/candidate.py": (
                 "Required candidate entrypoint: def run(invocation: "
@@ -340,17 +347,23 @@ def setup_live_deployment(
                 "fm_baseline_predictions.csv contains "
                 "the setup-verified official FM score aligned one-to-one with "
                 "score.csv; fm_baseline_predictions.sha256 authenticates it. The "
-                "baseline candidate reproduces these bytes exactly. Keep this FM "
-                "score as the strong parent and learn one bounded train-only residual "
+                "baseline candidate reproduces these bytes exactly. FM scores are "
+                "unconstrained real-valued ranking scores, not probabilities. Never "
+                "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
+                "parent-plus-residual result. Keep this FM score as the strong parent "
+                "and learn one bounded train-only residual on the original score scale "
                 "unless the approved ExperimentSpec explicitly tests replacement. "
                 "Do not reinterpret duration_ms as watch time: it is video duration. "
                 "Training dates strictly precede score dates. Preserve contiguous "
                 "score row_id order, duplicate rows, finite deterministic scores, "
                 "and exclusive output creation. Use all training rows or report a "
-                "deterministic representative sampling fraction in the code."
+                "deterministic representative sampling fraction in the code. The "
+                "production loader imports solution.candidate:run; keep the "
+                "implementation in candidate.py unless every helper path and import "
+                "pattern are explicitly authorized by target_files."
             )
         },
-        "coding_step_limit": 40,
+        "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
         "research_provider": "deepseek",
@@ -439,13 +452,20 @@ def _trae_payload(
         "reasoning_effort": "high",
         "config_file": str(trae_yaml),
         "config_sha256": _sha256_file(trae_yaml),
-        "max_steps_cap": 40,
+        "max_steps_cap": 64,
         "max_token_cap": None,
         "max_wall_time_seconds_cap": 1800,
-        "repair_step_limit": 20,
+        "repair_step_limit": 48,
         "repair_token_limit": None,
         "repair_wall_time_limit_seconds": 1200,
         "repair_allowed_command_ids": ["candidate_smoke"],
+        "solution_verification_max_attempts": 5,
+        "solution_verification_timeout_seconds": 120,
+        "solution_verification_max_output_tokens": 4096,
+        "solution_verification_max_source_bytes": 524288,
+        "solution_revision_step_limit": 32,
+        "solution_revision_wall_time_limit_seconds": 600,
+        "solution_verifier_credential_environment_name": "DEEPSEEK_API_KEY",
         "approved_environment_names": ["DEEPSEEK_API_KEY"],
         "credential_environment_names": ["DEEPSEEK_API_KEY"],
         "credential_environment_aliases": [
@@ -793,7 +813,7 @@ def _trae_yaml() -> str:
   trae_agent:
     enable_lakeview: false
     model: tacorank_coder
-    max_steps: 40
+    max_steps: 64
     tools:
       - str_replace_based_edit_tool
       - task_done

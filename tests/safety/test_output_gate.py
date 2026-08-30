@@ -47,7 +47,7 @@ def seal_expectation(
     )
 
 
-def make_contract() -> OutputContract:
+def make_contract(*, maximum_single_score_fraction: float = 1.0) -> OutputContract:
     return OutputContract(
         columns=(
             OutputColumn("row_id", "integer"),
@@ -63,6 +63,7 @@ def make_contract() -> OutputContract:
         ),
         identity_columns=("user_id", "item_id"),
         forbidden_columns=("protected_target",),
+        maximum_single_score_fraction=maximum_single_score_fraction,
     )
 
 
@@ -142,6 +143,47 @@ def test_gate_b_accepts_exact_official_order_and_duplicate_rows(tmp_path: Path) 
         "minimum": 0.1,
         "maximum": 0.3,
         "mean": pytest.approx(0.2),
+    }
+
+
+def test_gate_b_rejects_single_score_mass_collapse(tmp_path: Path) -> None:
+    concentrated = (
+        "row_id,user_id,item_id,score\n"
+        "0,u1,i1,0.0\n"
+        "1,u1,i1,0.0\n"
+        "2,u2,i2,0.3\n"
+    )
+    target = tmp_path / "artifacts/run_1/exp_1/attempt_1/outputs/predictions.csv"
+    target.parent.mkdir(parents=True)
+    encoded = concentrated.encode("utf-8")
+    target.write_bytes(encoded)
+    artifact_ref = artifact(
+        "artifacts/run_1/exp_1/attempt_1/outputs/predictions.csv",
+        encoded,
+        "predictions",
+    )
+    run_result = Record(
+        run_id="run_1",
+        experiment_id="exp_1",
+        attempt=1,
+        patch_commit_sha=COMMIT_SHA,
+        prediction_artifact=artifact_ref,
+    )
+    gate = OutputGate(
+        repository_root=tmp_path,
+        contract=make_contract(maximum_single_score_fraction=0.5),
+        factories=FACTORIES,
+        execution_seal_verifier=accepting_execution_seal,
+    )
+
+    result = asyncio.run(
+        gate.check(run_result, expected_execution=seal_expectation())
+    )
+
+    assert not result.accepted
+    assert result.checks["score_concentration"] == "fail"
+    assert ViolationCode.OUTPUT_DEGENERATE_SCORES.value in {
+        violation.code for violation in result.violations
     }
 
 

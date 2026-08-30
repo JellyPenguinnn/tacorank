@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, is_dataclass
-from enum import Enum
 import json
 import logging
 import re
 import ssl
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -16,12 +16,11 @@ from urllib.request import Request, urlopen
 import certifi
 from pydantic import BaseModel
 
-from ..research.code_references import redact_code_references
+from ..research.code_blind import redact_implementation_references
 from ..research.duplicate_detection import compute_duplicate_key
 from ..research.graph_view import as_list, get_value
 from ..schemas import ResourceDelta, TokenMeasurement
 from .research_provider import ProviderError, ProviderRequest
-
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +58,10 @@ Treat diagnostic_metrics as label-free experimental feedback: use them to reason
 collapsed residuals, missing personalization, or excessive divergence from the
 setup-verified FM parent. Never call a frozen evaluator result "baseline parity"
 unless baseline_parity is explicitly present in contract.research_capabilities.
+Treat the setup-verified FM score as the strong research parent. Prefer one bounded
+additive residual on that original ranking-score scale; do not propose clipping,
+sigmoid conversion, normalization, or replacement of the FM parent unless the
+authoritative policy block explicitly selects a replacement-capable method.
 
 Treat family_history as short-term iteration feedback. It deliberately includes
 negative proxy, no-op, inconclusive, redundant, and suspicious outcomes; weight each
@@ -144,13 +147,7 @@ def _variant_parameters(value: Any) -> Dict[str, Any]:
 
 
 def _code_blind(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_code_references(value)
-    if isinstance(value, Mapping):
-        return {str(key): _code_blind(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_code_blind(item) for item in value]
-    return value
+    return redact_implementation_references(value)
 
 
 def _nonnegative_int(value: Any, default: int) -> int:
@@ -308,7 +305,22 @@ def _research_candidate(value: Any) -> Dict[str, Any]:
     )
 
 
-def _default_transport(
+def _repair_instruction(validation_errors: tuple[str, ...]) -> str:
+    instructions = [
+        "Correct every validation error and return one complete replacement "
+        "JSON object."
+    ]
+    if "CODE_SPECIFIC_PLAN_FORBIDDEN" in validation_errors:
+        instructions.append(
+            "Remove repository paths, source-file names or extensions, entrypoints, "
+            "function or class names, line references, commands, and editing steps. "
+            "Restate the proposal only as a scientific hypothesis, intervention, "
+            "ranking mechanism, success criterion, and falsification condition."
+        )
+    return " ".join(instructions)
+
+
+def default_chat_transport(
     url: str,
     headers: Mapping[str, str],
     payload: Mapping[str, Any],
@@ -372,7 +384,7 @@ class DeepSeekResearchProvider:
         self.max_output_tokens = max_output_tokens
         self.thinking_enabled = thinking_enabled
         self.reasoning_effort = reasoning_effort
-        self.transport = transport or _default_transport
+        self.transport = transport or default_chat_transport
         self._last_candidate: Optional[Dict[str, Any]] = None
         self._input_tokens = 0
         self._output_tokens = 0
@@ -511,7 +523,7 @@ class DeepSeekResearchProvider:
             payload["repair"] = {
                 "validation_errors": list(validation_errors),
                 "previous_candidate": _research_candidate(self._last_candidate),
-                "instruction": "Correct every error and return one complete replacement JSON object.",
+                "instruction": _repair_instruction(validation_errors),
             }
         return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 

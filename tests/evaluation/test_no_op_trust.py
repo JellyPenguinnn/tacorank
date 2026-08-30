@@ -45,7 +45,7 @@ class NoOpTrustTests(unittest.TestCase):
             evidence(
                 change,
                 parent_delta=0.0005,
-                seed_scores=(0.6003, 0.6005, 0.6004),
+                seed_scores=(0.5998, 0.6004, 0.6001),
             )
         )
         self.assertEqual(within.verdict, Verdict.INCONCLUSIVE)
@@ -56,6 +56,50 @@ class NoOpTrustTests(unittest.TestCase):
                 seed_scores=(0.5900, 0.5905, 0.5898),
             )
         )
+        self.assertEqual(negative.verdict, Verdict.NEGATIVE)
+
+    def test_confirmed_directional_gain_below_ladder_is_trusted_for_search(self):
+        change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
+        trust = assess_trust(
+            evidence(
+                change,
+                parent_delta=0.00083,
+                parent_primary=0.601468756352959,
+                seed_scores=(
+                    0.6022655471814293,
+                    0.6022722994862122,
+                    0.6022983340637944,
+                ),
+            )
+        )
+
+        self.assertEqual(trust.verdict, Verdict.ACCEPTED)
+        self.assertEqual(trust.stability, Stability.CONFIRMED)
+        self.assertIn("CONFIRMED_POSITIVE_BELOW_LADDER", trust.flags)
+        self.assertLess(trust.seed_mean - 0.601468756352959, trust.eta_applied)
+
+    def test_proxy_uses_symmetric_noise_band_before_pruning(self):
+        change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
+        proxy = {
+            "population": Population.INTERNAL_PROXY,
+            "fidelity": Fidelity.PROXY,
+            "seed_scores": (0.60,),
+        }
+
+        positive = assess_trust(evidence(change, parent_delta=0.002, **proxy))
+        near_positive = assess_trust(
+            evidence(change, parent_delta=0.0001, **proxy)
+        )
+        near_negative = assess_trust(
+            evidence(change, parent_delta=-0.0001, **proxy)
+        )
+        negative = assess_trust(evidence(change, parent_delta=-0.002, **proxy))
+
+        self.assertEqual(positive.verdict, Verdict.ACCEPTED)
+        self.assertEqual(near_positive.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("WITHIN_NOISE", near_positive.flags)
+        self.assertEqual(near_negative.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("WITHIN_NOISE", near_negative.flags)
         self.assertEqual(negative.verdict, Verdict.NEGATIVE)
 
     def test_cross_population_and_metric_conflicts_are_visible(self):

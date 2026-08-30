@@ -76,7 +76,8 @@ proposed -> patch_ready -> ready_to_run -> running -> output_ready
                                      accepted / rejected / pruned
 ```
 
-- Gate A binds the exact patch commit and diff to the contract, data identity, allowed files/imports/dependencies, and verification receipt.
+- Before a commit reaches Gate A, a strict DeepSeek reviewer compares the cumulative diff and complete target-file source against the exact ExperimentSpec, target interface, selected method cards, and active lessons. A rejection returns only grounded corrections to Trae; this solver/verifier cycle is capped at five reviews within the coding action's wall budget. Every pass records its diff hash, redacted trajectory/process log, verifier result, and provider usage.
+- Gate A binds the exact patch commit and diff to the contract, data identity, ExperimentSpec target-file allowlist, allowed imports/dependencies, isolated entrypoint-import result, and verification receipt.
 - The runner resolves reviewed symbolic commands; it never executes an LLM-supplied shell string.
 - Docker execution is CPU-only, network-disabled, receipt-sealed, resource-bounded, and observed by Person 4.
 - Gate B verifies the prediction schema, ordered row identity, finite/diverse scores, producing commit, data manifest, command, and execution seal before evaluation.
@@ -84,9 +85,16 @@ proposed -> patch_ready -> ready_to_run -> running -> output_ready
 
 `setup-live` gives every candidate route the exact official FM prediction plus its digest and proves the checked-in candidate reproduces it byte-for-byte. This makes the executable parent equal to the scored baseline. Candidate experiments normally preserve that parent and add one bounded train-only residual. Evaluation adds label-free rankability, personalization, residual-scale, and FM-correlation diagnostics to the canonical result and planner context; those diagnostics never replace protected metrics.
 
+FM predictions are unconstrained real-valued ranking scores, not probabilities.
+Coder contexts therefore make score-scale preservation, the selected method card,
+and compact cited prior-result constraints mandatory; only optional lessons may be
+removed to meet the context budget. Gate B also rejects outputs in which one exact
+score value occupies more than the hash-bound run limit, preventing clipping-driven
+zero/one collapse before protected evaluation.
+
 Execution, Gate A, Gate B, and evaluation no-op failures enter the bounded recovery route. Recovery may retry the same commit once, apply an approved runtime adjustment, ask Trae for at most two repair patches, roll back, or abandon. Every replacement patch needs a new Gate A receipt. Repeated fingerprints stop repair cycling, and deliberate credential, hidden-label, target-label, or network boundary violations are recorded and terminate the run.
 
-The pinned DeepSeek Responses client catches malformed or truncated function arguments before Trae executes them and asks for one smaller valid JSON call inside the existing step budget. An unsuccessful coding trajectory retains a redacted trajectory and process log when available, provider token usage, and elapsed wall time in `adapter.failed`. Any failure that remains after the in-loop correction is routed through Waihong's bounded self-recovery policy; only classified transient coding failures receive its one same-commit retry, and all other abandon or stop outcomes remain policy-owned. Generated experiment reports expose these failure and recovery records without changing ledger authority.
+The pinned DeepSeek Responses client catches malformed or truncated function arguments before Trae executes them and asks for one smaller valid JSON call inside the existing step budget. The implementation verifier likewise retries malformed or truncated JSON once in a compact form before failing closed. An unsuccessful coding trajectory retains a redacted trajectory and process log when available, provider token usage, and elapsed wall time in `adapter.failed`. Any failure that remains after the internal solver/verifier loop is routed through Waihong's unchanged bounded self-recovery policy; only classified transient coding failures receive its one same-commit retry, and all other abandon or stop outcomes remain policy-owned. Generated experiment reports expose these failure and recovery records without changing ledger authority.
 
 Resource failures are typed and fail closed. OOM and hard memory-limit signals may use an allowlisted runtime adjustment; disk-full, `ENOSPC`, output-quota, and storage-floor signals abandon the experiment without retrying or asking the coding worker to make an unrelated patch. The controller records the stable reason code and an operational lesson, so an operator can reclaim space or choose a fresh runtime before resuming. Evidence and prior run directories are never deleted automatically.
 

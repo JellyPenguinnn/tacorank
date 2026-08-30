@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
-from .code_references import find_code_reference
+from .code_blind import find_implementation_reference
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
 from .graph_view import (
     ExperimentNodeView,
@@ -19,7 +19,6 @@ from .graph_view import (
 )
 from .method_eligibility import evaluate_method_card, method_card_map
 from .search_eligibility import classify_search_eligibility
-
 
 HIDDEN_PATTERNS = (
     "hidden test",
@@ -379,7 +378,7 @@ class PlanValidator:
         if any(pattern in text for pattern in HIDDEN_PATTERNS):
             errors.append("HIDDEN_TEST_REFERENCE")
         for field, value in narrative.items():
-            reference = find_code_reference(value)
+            reference = find_implementation_reference(value)
             if reference is None:
                 continue
             errors.append("CODE_SPECIFIC_PLAN_FORBIDDEN")

@@ -9,6 +9,7 @@ from .command_policy import (
     inspect_source_capabilities,
 )
 from .data_access_policy import DataAccessPolicy, DataViewPolicy
+from .docker_smoke import DockerEntrypointSmokeCheck
 from .output_gate import (
     ExecutionSealExpectation,
     FakeOutputGate,
@@ -61,6 +62,7 @@ __all__ = [
     "CommandPolicy",
     "DataAccessPolicy",
     "DataViewPolicy",
+    "DockerEntrypointSmokeCheck",
     "DiffParseError",
     "ExecutionSealExpectation",
     "FakeOutputGate",

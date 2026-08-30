@@ -62,6 +62,20 @@ def decide(
                 False,
                 Fidelity.FULL,
             )
+        if (
+            trust.verdict == Verdict.INCONCLUSIVE
+            and trust.integrity == Integrity.CLEAN
+            and "WITHIN_NOISE" in trust.flags
+        ):
+            return _decision(
+                result,
+                context,
+                Decision.PROMOTE,
+                "PROXY_WITHIN_NOISE",
+                False,
+                False,
+                Fidelity.FULL,
+            )
         reason = (
             "PROXY_FAILED"
             if trust.verdict == Verdict.NEGATIVE
@@ -117,9 +131,16 @@ def decide(
         best_eligible = (
             candidate_primary - current_best > (trust.eta_applied or 0.0)
         )
-        reason = "TRUSTED_IMPROVEMENT" if best_eligible else "TRUSTED_NO_IMPROVEMENT"
-        action = Decision.ACCEPT if best_eligible else Decision.REJECT
-        return _decision(result, context, action, reason, True, best_eligible, None)
+        reason = "TRUSTED_IMPROVEMENT" if best_eligible else "TRUSTED_PARENT_ONLY"
+        return _decision(
+            result,
+            context,
+            Decision.ACCEPT,
+            reason,
+            True,
+            best_eligible,
+            None,
+        )
 
     reason_by_verdict = {
         Verdict.INCONCLUSIVE: (

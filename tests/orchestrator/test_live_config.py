@@ -6,6 +6,7 @@ import pytest
 from tacorank.config import ContractError
 from tacorank.evaluation.adapter import ordered_row_identity_sha256
 from tacorank.orchestrator.live import (
+    LedgerCandidateIdentityResolver,
     _PopulationData,
     _load_population,
     _load_training_profiles,
@@ -98,6 +99,62 @@ def test_trae_config_normalizes_json_path_and_tuple_values(tmp_path: Path) -> No
     assert config.credential_environment_aliases == (
         ("DEEPSEEK_API_KEY", "OPENAI_API_KEY"),
     )
+
+
+def test_ledger_candidate_identity_allocates_a_distinct_same_commit_retry() -> None:
+    proposal = SimpleNamespace(
+        event_id="proposal-1",
+        payload=SimpleNamespace(
+            type="experiment.proposed",
+            spec=SimpleNamespace(experiment_id="exp_001"),
+        ),
+    )
+    events = [proposal]
+    store = SimpleNamespace(read_events=lambda repair_tail: list(events))
+    resolver = LedgerCandidateIdentityResolver(store)
+    context = SimpleNamespace(experiment_id="exp_001")
+    spec = SimpleNamespace(experiment_id="exp_001")
+
+    assert resolver.for_initial(context, spec).attempt == 1
+
+    failure = SimpleNamespace(
+        event_id="failure-1",
+        payload=SimpleNamespace(
+            type="adapter.failed",
+            result=SimpleNamespace(
+                experiment_id="exp_001",
+                failure_stage="coding",
+            ),
+        ),
+    )
+    recovery = SimpleNamespace(
+        event_id="recovery-1",
+        payload=SimpleNamespace(
+            type="recovery.decided",
+            decision=SimpleNamespace(
+                experiment_id="exp_001",
+                failure_event_id="failure-1",
+                action="retry_same_commit",
+            ),
+        ),
+    )
+    events.extend((failure, recovery))
+
+    retry_identity = resolver.for_initial(context, spec)
+    assert retry_identity.attempt == 2
+    assert retry_identity.experiment_spec_event_id == "proposal-1"
+
+    events.append(
+        SimpleNamespace(
+            event_id="patch-1",
+            payload=SimpleNamespace(
+                type="patch.created",
+                candidate=SimpleNamespace(experiment_id="exp_001"),
+            ),
+        )
+    )
+    with pytest.raises(ContractError, match="sealed patch"):
+        resolver.for_initial(context, spec)
 
 
 def test_protected_population_manifests_bind_proxy_and_full_row_identity() -> None:

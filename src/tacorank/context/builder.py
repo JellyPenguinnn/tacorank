@@ -17,10 +17,16 @@ from ..memory.retrieval import (
 )
 from ..recovery.classifier import classify_failure
 from ..recovery.fingerprints import fingerprint_result
+from ..research.code_blind import redact_implementation_references
+from ..research.eda import PlannerEdaToolbox
+from ..research.playbook import load_improvement_playbook
+from ..research.portfolio import MethodCard, load_method_cards
+from ..research.search_eligibility import classify_search_eligibility
 from ..run_layout import run_relative_directory
 from ..schemas import (
     ArtifactKind,
     CoderContext,
+    CoderPriorResultSummary,
     ContextDocument,
     CostTier,
     Event,
@@ -29,22 +35,17 @@ from ..schemas import (
     ExperimentSpec,
     Fidelity,
     PlannerBudgetSummary,
-    PlannerContractSummary,
     PlannerContext,
+    PlannerContractSummary,
     PlannerConvergenceSummary,
     PlannerDataProfile,
     PlannerExperimentSummary,
     PlannerLessonSummary,
     PlannerMethodCardSummary,
     PlannerPlaybookSummary,
-    ResearchProposal,
     RecoveryContext,
+    ResearchProposal,
 )
-from ..research.code_references import redact_code_references
-from ..research.eda import PlannerEdaToolbox
-from ..research.playbook import load_improvement_playbook
-from ..research.portfolio import MethodCard, load_method_cards
-from ..research.search_eligibility import classify_search_eligibility
 from .redaction import redact
 from .templates import compact_json, render_context
 from .token_estimator import estimate_tokens
@@ -114,13 +115,7 @@ def _path_is_within(path: str, root: str) -> bool:
 
 
 def _code_blind(value: object) -> object:
-    if isinstance(value, str):
-        return redact_code_references(value)
-    if isinstance(value, dict):
-        return {key: _code_blind(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_code_blind(item) for item in value]
-    return value
+    return redact_implementation_references(value)
 
 
 class ContextBuildError(RuntimeError):
@@ -128,6 +123,20 @@ class ContextBuildError(RuntimeError):
 
 
 ContextT = TypeVar("ContextT", bound=ContextDocument)
+
+
+CODER_SCORE_INVARIANTS = (
+    "The setup-verified FM parent scores are unconstrained real-valued ranking "
+    "scores, not probabilities.",
+    "Never apply sigmoid, probability calibration, clipping, min/max clamping, "
+    "normalization, or rescaling to the FM parent or to parent-plus-residual scores.",
+    "For additive experiments, bound only the learned residual and add it on the "
+    "parent's original scale; preserve the exact parent score when no supported "
+    "residual is available.",
+    "Treat prior negative result summaries as implementation constraints: do not "
+    "repeat transformations that collapsed score diversity, parent correlation, "
+    "or within-user rankability.",
+)
 
 
 class ContextBuilder:
@@ -828,6 +837,64 @@ class ContextBuilder:
             ),
         }
 
+    def _coder_prior_result_summaries(
+        self,
+        events: Sequence[Event],
+        spec: ExperimentSpec,
+    ) -> List[CoderPriorResultSummary]:
+        """Return compact prior results that the approved spec explicitly cites."""
+
+        evidence_ids = set(spec.evidence_event_ids)
+        if not evidence_ids:
+            return []
+        _, _, _, history = self._planner_experiments(events)
+        diagnostic_keys = {
+            "gain_concentration_top10pct",
+            "item_personalized_fraction",
+            "mean_abs_parent_residual",
+            "parent_residual_std",
+            "score_std",
+            "score_unique_fraction",
+            "spearman_vs_fm_baseline",
+            "user_rankable_fraction",
+        }
+        summaries: List[CoderPriorResultSummary] = []
+        for summary in history:
+            source_event_ids = [
+                event_id
+                for event_id in summary.supporting_event_ids
+                if event_id in evidence_ids
+            ]
+            if not source_event_ids:
+                continue
+            summaries.append(
+                CoderPriorResultSummary(
+                    experiment_id=summary.experiment_id,
+                    family=summary.family,
+                    highest_completed_fidelity=summary.highest_completed_fidelity,
+                    population=summary.population,
+                    decision=summary.decision,
+                    decision_reason_code=summary.decision_reason_code,
+                    primary_score=summary.primary_score,
+                    metric_deltas=dict(summary.metric_deltas),
+                    parent_delta=summary.parent_delta,
+                    prediction_change=summary.prediction_change,
+                    prediction_spearman_vs_parent=(
+                        summary.prediction_spearman_vs_parent
+                    ),
+                    diagnostic_metrics={
+                        name: value
+                        for name, value in summary.diagnostic_metrics.items()
+                        if name in diagnostic_keys
+                    },
+                    trust_verdict=summary.trust_verdict,
+                    trust_flags=list(summary.trust_flags),
+                    failure_hypotheses=list(summary.failure_hypotheses),
+                    source_event_ids=source_event_ids,
+                )
+            )
+        return summaries[-5:]
+
     def build_planner(
         self,
         events: Sequence[Event],
@@ -984,9 +1051,35 @@ class ContextBuilder:
         events: Sequence[Event],
         spec: ExperimentSpec,
         *,
-        max_tokens: int = 2_500,
+        max_tokens: Optional[int] = None,
     ) -> CoderContext:
         visible = visible_development_events(events)
+        effective_max_tokens = (
+            max_tokens if max_tokens is not None else self.config.context_token_limit
+        )
+        selected_method_cards: List[Dict[str, object]] = []
+        wanted = set(spec.method_card_ids)
+        for path in sorted((self.config.repository_root / "research/methods").glob("*.md")):
+            if path.stem not in wanted:
+                continue
+            relative = path.relative_to(self.config.repository_root).as_posix()
+            selected_method_cards.append(
+                {
+                    "method_id": path.stem,
+                    "path": relative,
+                    "content": path.read_text(encoding="utf-8"),
+                }
+            )
+        resolved_method_ids = {
+            str(card["method_id"]) for card in selected_method_cards
+        }
+        missing_method_ids = sorted(wanted - resolved_method_ids)
+        if missing_method_ids:
+            raise ContextBuildError(
+                "coder method guidance is unavailable: %s"
+                % ", ".join(missing_method_ids)
+            )
+        prior_result_summaries = self._coder_prior_result_summaries(visible, spec)
         mandatory = [
             (
                 "Coding assignment",
@@ -1012,44 +1105,42 @@ class ContextBuilder:
                     }
                 ),
             ),
+            (
+                "Score-scale and implementation invariants",
+                compact_json({"requirements": list(CODER_SCORE_INVARIANTS)}),
+            ),
+            (
+                "Selected method guidance",
+                compact_json(selected_method_cards),
+            ),
+            (
+                "Approved prior-result constraints",
+                compact_json(
+                    [
+                        summary.model_dump(mode="json", exclude_none=True)
+                        for summary in prior_result_summaries
+                    ]
+                ),
+            ),
         ]
         optional: List[Tuple[str, str, str]] = []
-        selected_method_cards: List[Dict[str, object]] = []
-        wanted = set(spec.method_card_ids)
-        for path in sorted((self.config.repository_root / "research/methods").glob("*.md")):
-            if path.stem in wanted:
-                relative = path.relative_to(self.config.repository_root).as_posix()
-                body = path.read_text(encoding="utf-8")
-                selected_method_cards.append(
-                    {"method_id": path.stem, "path": relative, "content": body}
-                )
-                optional.append((relative, "Selected method card", body))
         lesson_events = active_lessons(
             visible, tags=[spec.family, spec.target_stage], limit=5
         )
         for event in lesson_events:
-            optional.append((event.event_id, "Applicable lesson", self._event_card(event)))
-        evidence_ids = set(spec.evidence_event_ids)
-        for event in visible:
-            if event.event_id in evidence_ids and event.event_type in {
-                EventType.ADAPTER_FAILED,
-                EventType.EVALUATION_COMPLETED,
-                EventType.EXPERIMENT_DECIDED,
-                EventType.OUTPUT_CHECKED,
-            }:
-                optional.append(
-                    (
-                        event.event_id,
-                        "Approved prior-result evidence",
-                        self._event_card(event),
-                    )
+            optional.append(
+                (
+                    event.event_id,
+                    "Applicable lesson",
+                    self._planner_lesson_feedback(event),
                 )
+            )
         context_id = self._identity(
             "coder",
             visible,
             spec.experiment_id,
             {
-                "max_tokens": max_tokens,
+                "max_tokens": effective_max_tokens,
                 "mandatory": mandatory,
                 "optional": optional,
             },
@@ -1059,8 +1150,16 @@ class ContextBuilder:
             role="coder",
             mandatory=mandatory,
             optional=optional,
-            max_tokens=max_tokens,
+            max_tokens=effective_max_tokens,
         )
+        mandatory_sources = [
+            str(card["path"]) for card in selected_method_cards
+        ] + [
+            event_id
+            for summary in prior_result_summaries
+            for event_id in summary.source_event_ids
+        ]
+        included = list(dict.fromkeys(mandatory_sources + included))
         return self._persist(
             CoderContext,
             context_id=context_id,
@@ -1078,9 +1177,7 @@ class ContextBuilder:
                 "editable_roots": self.config.editable_roots,
                 "protected_paths": self._protected_paths(),
                 "allowed_command_ids": self.config.command_ids,
-                "selected_method_cards": [
-                    card for card in selected_method_cards if card["path"] in included
-                ],
+                "selected_method_cards": selected_method_cards,
                 "active_lessons": [
                     {
                         "event_id": event.event_id,
@@ -1091,6 +1188,8 @@ class ContextBuilder:
                     for event in lesson_events
                     if event.event_id in included
                 ],
+                "coding_invariants": list(CODER_SCORE_INVARIANTS),
+                "prior_result_summaries": prior_result_summaries,
                 "step_limit": self.config.coding_step_limit,
                 "token_limit": self.config.coding_token_limit,
                 "wall_time_limit_seconds": (

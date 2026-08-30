@@ -1,4 +1,4 @@
-"""Deterministic, playbook-driven AIDE search policy."""
+"""Deterministic, playbook-driven, score-guided depth-first search policy."""
 
 from __future__ import annotations
 
@@ -194,7 +194,7 @@ def _method_for_family(
     }
     if preferred is None:
         # This card requires an explicit secondary component chosen by the
-        # soft-portfolio route. Generic breadth/depth proposals have no such
+        # soft-portfolio route. Generic depth-first proposals have no such
         # component contract and must not select it.
         eligible.pop("ensemble_diverse_residual_candidate", None)
     attempted = {
@@ -297,7 +297,9 @@ def _campaign_choice(
         }
         for family in allowed
     }
-    parent = _best_parent(eligible)
+    parent = _depth_first_frontier(
+        GraphView.from_context(context), eligible, 1
+    )[0]
 
     for family_value in as_list(get_value(campaign, "family_order", None)):
         family = str(family_value)
@@ -360,6 +362,31 @@ def _best_parent(eligible: Sequence[ExperimentNodeView]) -> ExperimentNodeView:
         eligible,
         key=lambda node: (-_score(node), node.child_count, node.experiment_id),
     )[0]
+
+
+def _depth_first_frontier(
+    graph: GraphView,
+    eligible: Sequence[ExperimentNodeView],
+    limit: int,
+) -> tuple[ExperimentNodeView, ...]:
+    """Rank trusted branches by score, then depth, for deterministic backtracking."""
+
+    # The first sort supplies the stable tie-break for equal score and depth:
+    # the newest experiment ID stays at the front, matching stack-like DFS.
+    newest_first = sorted(
+        eligible,
+        key=lambda node: node.experiment_id,
+        reverse=True,
+    )
+    ranked = sorted(
+        newest_first,
+        key=lambda node: (
+            _score(node),
+            len(graph.ancestors_of(node.experiment_id)),
+        ),
+        reverse=True,
+    )
+    return tuple(ranked[:limit])
 
 
 def _latest_parent(
@@ -881,63 +908,40 @@ class SearchPolicy:
         if routed is not None:
             return routed
 
-        tried = set(history)
-        baseline = next((node for node in eligible if node.is_root), None)
-        breadth_parent = baseline or min(eligible, key=lambda node: node.experiment_id)
-        breadth: list[PolicyChoice] = []
-        for family in allowed:
-            if family in tried:
-                continue
-            card = _method_for_family(
-                context,
-                family,
-                parent_experiment_id=breadth_parent.experiment_id,
-            )
-            if card is None:
-                continue
-            breadth.append(
-                _proposal(
-                    parent=breadth_parent,
-                    family=family,
-                    card=card,
-                    phase="breadth",
-                    reason_code="BREADTH_FAMILY_PROBE",
-                    reason="Probe untried method %s in family %s from %s."
-                    % (get_value(card, "method_id", ""), family, breadth_parent.experiment_id),
-                )
-            )
-        if breadth:
-            return self._rank(breadth, context)
-
-        frontier = sorted(
-            eligible,
-            key=lambda node: (-_score(node), node.child_count, node.experiment_id),
-        )[: self.frontier_limit]
-        parent = frontier[0]
+        frontier = _depth_first_frontier(graph, eligible, self.frontier_limit)
         recent = set(history[-2:])
-        depth: list[PolicyChoice] = []
-        for family in allowed:
-            card = _method_for_family(
-                context,
-                family,
-                parent_experiment_id=parent.experiment_id,
-            )
-            if card is None:
-                continue
-            depth.append(
-                _proposal(
-                    parent=parent,
-                    family=family,
-                    card=card,
-                    phase="depth",
-                    reason_code="EVIDENCE_GUIDED_DEPTH",
-                    reason="Select %s using trusted score and legal method %s."
-                    % (parent.experiment_id, get_value(card, "method_id", "")),
+        for parent in frontier:
+            depth: list[PolicyChoice] = []
+            for family in allowed:
+                card = _method_for_family(
+                    context,
+                    family,
+                    parent_experiment_id=parent.experiment_id,
+                )
+                if card is None:
+                    continue
+                depth.append(
+                    _proposal(
+                        parent=parent,
+                        family=family,
+                        card=card,
+                        phase="depth",
+                        reason_code="SCORE_GUIDED_DEPTH_FIRST",
+                        reason=(
+                            "Continue depth-first from trusted branch %s using legal "
+                            "method %s; backtrack only after this branch is exhausted."
+                            % (parent.experiment_id, get_value(card, "method_id", ""))
+                        ),
+                    )
+                )
+            depth.sort(
+                key=lambda choice: (
+                    choice.family in recent,
+                    allowed.index(choice.family),
                 )
             )
-        depth.sort(key=lambda choice: (choice.family in recent, allowed.index(choice.family)))
-        if depth:
-            return self._rank(depth, context)
+            if depth:
+                return self._rank(depth, context)
         return _blocked(
             "NO_ELIGIBLE_METHOD",
             "No candidate method satisfies status, data, prerequisite, prohibition and family gates.",

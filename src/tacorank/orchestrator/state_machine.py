@@ -84,6 +84,20 @@ def _latest_recoverable_failure(events: List[Event], experiment_id: str) -> Opti
     return None
 
 
+def _retrying_initial_coder(events: List[Event], experiment_id: str) -> bool:
+    latest_recovery = _last_for_experiment(
+        events, EventType.RECOVERY_DECIDED, experiment_id
+    )
+    latest_failure = _latest_recoverable_failure(events, experiment_id)
+    return bool(
+        latest_recovery is not None
+        and latest_recovery.payload.decision.action
+        == RecoveryAction.RETRY_SAME_COMMIT
+        and latest_failure is not None
+        and getattr(latest_failure.payload.result, "failure_stage", None) == "coding"
+    )
+
+
 def _evaluation_request(events: List[Event], result) -> object:
     output = _last_for_experiment(events, EventType.OUTPUT_CHECKED, result.experiment_id)
     _require(output is not None and output.payload.result.accepted, "evaluation requires accepted output")
@@ -201,24 +215,10 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         candidate = payload.candidate
         _require(candidate.experiment_id in state.experiments, "patch has unknown experiment")
         node = state.experiments[candidate.experiment_id]
-        retrying_initial_coder = False
-        if node.status == ExperimentStatus.READY_TO_RUN:
-            latest_recovery = _last_for_experiment(
-                events, EventType.RECOVERY_DECIDED, candidate.experiment_id
-            )
-            latest_failure = _latest_recoverable_failure(
-                events, candidate.experiment_id
-            )
-            retrying_initial_coder = bool(
-                latest_recovery is not None
-                and latest_recovery.payload.decision.action
-                == RecoveryAction.RETRY_SAME_COMMIT
-                and latest_failure is not None
-                and getattr(
-                    latest_failure.payload.result, "failure_stage", None
-                )
-                == "coding"
-            )
+        retrying_initial_coder = (
+            node.status == ExperimentStatus.READY_TO_RUN
+            and _retrying_initial_coder(events, candidate.experiment_id)
+        )
         _require(
             node.status in (
                 ExperimentStatus.PROPOSED,
@@ -345,6 +345,7 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             in (
                 ExperimentStatus.PROPOSED,
                 ExperimentStatus.PATCH_READY,
+                ExperimentStatus.READY_TO_RUN,
                 ExperimentStatus.RUNNING,
                 ExperimentStatus.OUTPUT_READY,
                 ExperimentStatus.OUTPUT_VERIFIED,
@@ -361,8 +362,13 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             "evaluation": (ExperimentStatus.OUTPUT_VERIFIED, ExperimentStatus.EVALUATED),
             "recovery": (ExperimentStatus.RECOVERING,),
         }
+        allowed_states = expected_states[result.failure_stage]
+        if result.failure_stage == "coding" and _retrying_initial_coder(
+            events, result.experiment_id
+        ):
+            allowed_states = (*allowed_states, ExperimentStatus.READY_TO_RUN)
         _require(
-            node.status in expected_states[result.failure_stage],
+            node.status in allowed_states,
             "adapter failure stage does not match experiment state",
         )
     elif event_type == EventType.RECOVERY_DECIDED:

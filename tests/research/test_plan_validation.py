@@ -329,6 +329,24 @@ def test_validator_rejects_explicit_extensionless_source_path(planner_context):
     )
 
 
+def test_validator_allows_slash_joined_research_terms(planner_context):
+    spec = make_spec(
+        planner_context,
+        hypothesis=(
+            "Positive/negative preference evidence may improve user/item ranking."
+        ),
+        change_summary="Compare train/validation ranking behavior.",
+        expected_mechanism=(
+            "Improve within-user ordering without an accuracy/diversity tradeoff."
+        ),
+        falsification_condition="No improvement and/or unstable ordering.",
+    )
+
+    result = PlanValidator().validate(spec, planner_context)
+
+    assert result.accepted, result.errors
+
+
 def test_validator_rejects_unresolved_contract(planner_context):
     planner_context.contract_summary.resolved = False
 

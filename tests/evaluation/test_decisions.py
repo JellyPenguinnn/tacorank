@@ -24,6 +24,8 @@ def result(
     fidelity=Fidelity.FULL,
     current_primary=0.61,
     seed_mean=0.61,
+    integrity=Integrity.CLEAN,
+    flags=(),
 ):
     metric_set = MetricSet(
         {"GAUC": current_primary, "nDCG@5": current_primary},
@@ -33,7 +35,8 @@ def result(
     trust = TrustAssessment(
         verdict,
         stability,
-        Integrity.CLEAN,
+        integrity,
+        flags=flags,
         eta_applied=0.0016,
         seed_mean=seed_mean,
         seed_stderr=0.0002,
@@ -62,6 +65,53 @@ class DecisionTests(unittest.TestCase):
         self.assertFalse(decision.parent_eligible)
         self.assertFalse(decision.best_eligible)
 
+    def test_proxy_within_noise_gets_one_full_fidelity_check(self):
+        decision = decide(
+            result(
+                Verdict.INCONCLUSIVE,
+                Stability.NOT_APPLICABLE,
+                fidelity=Fidelity.PROXY,
+                flags=("WITHIN_NOISE",),
+            ),
+            CTX,
+        )
+
+        self.assertEqual(decision.decision, Decision.PROMOTE)
+        self.assertEqual(decision.reason_code, "PROXY_WITHIN_NOISE")
+        self.assertEqual(decision.next_fidelity, Fidelity.FULL)
+        self.assertFalse(decision.parent_eligible)
+        self.assertFalse(decision.best_eligible)
+
+    def test_other_inconclusive_proxy_does_not_bypass_integrity_gate(self):
+        decision = decide(
+            result(
+                Verdict.INCONCLUSIVE,
+                Stability.NOT_APPLICABLE,
+                fidelity=Fidelity.PROXY,
+                integrity=Integrity.INCONCLUSIVE,
+                flags=("PREDICTION_ALIGNMENT_SUSPECT",),
+            ),
+            CTX,
+        )
+
+        self.assertEqual(decision.decision, Decision.INVALID)
+        self.assertEqual(decision.reason_code, "INTEGRITY_UNVERIFIED")
+        self.assertIsNone(decision.next_fidelity)
+
+    def test_clear_proxy_regression_is_still_pruned(self):
+        decision = decide(
+            result(
+                Verdict.NEGATIVE,
+                Stability.NOT_APPLICABLE,
+                fidelity=Fidelity.PROXY,
+            ),
+            CTX,
+        )
+
+        self.assertEqual(decision.decision, Decision.PRUNE)
+        self.assertEqual(decision.reason_code, "PROXY_FAILED")
+        self.assertIsNone(decision.next_fidelity)
+
     def test_single_seed_requests_confirmation(self):
         decision = decide(result(Verdict.ACCEPTED, Stability.SINGLE_SEED), CTX)
         self.assertEqual(decision.reason_code, "CONFIRMATION_REQUIRED")
@@ -71,7 +121,8 @@ class DecisionTests(unittest.TestCase):
         decision = decide(result(Verdict.ACCEPTED, Stability.CONFIRMED, best_delta=0.0005), CTX)
         self.assertTrue(decision.parent_eligible)
         self.assertFalse(decision.best_eligible)
-        self.assertEqual(decision.decision, Decision.REJECT)
+        self.assertEqual(decision.decision, Decision.ACCEPT)
+        self.assertEqual(decision.reason_code, "TRUSTED_PARENT_ONLY")
 
     def test_confirmed_decision_compares_aggregate_seed_mean_to_best(self):
         confirmed = result(

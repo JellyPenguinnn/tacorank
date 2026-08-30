@@ -7,9 +7,9 @@ from urllib.error import HTTPError
 
 import pytest
 
-from tacorank.providers import deepseek as deepseek_module
 from tacorank.agents.research_planner import ResearchPlanner
 from tacorank.cli import _planner_for
+from tacorank.providers import deepseek as deepseek_module
 from tacorank.providers.deepseek import DeepSeekResearchProvider
 from tacorank.providers.research_provider import ProviderError, ProviderRequest
 from tacorank.research.duplicate_detection import compute_duplicate_key
@@ -170,6 +170,9 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert "parent_commit_sha" not in serialized_prompt
     assert "target_files" not in payload["messages"][0]["content"]
     assert "pipeline stages" in payload["messages"][0]["content"]
+    system_prompt = " ".join(payload["messages"][0]["content"].split())
+    assert "bounded additive residual" in system_prompt
+    assert "do not propose clipping" in system_prompt
     assert "secret-key" not in json.dumps(payload)
     assert timeout == 120
     assert provider.resource_delta.llm_input_tokens == 101
@@ -362,7 +365,14 @@ def test_research_planner_repairs_code_specific_narrative(planner_context):
                 )
             )
         ),
-        response(candidate()),
+        response(
+            candidate(
+                change_summary=(
+                    "Compare positive/negative preference ordering for user/item "
+                    "ranking."
+                )
+            )
+        ),
     ]
     requests = []
 
@@ -387,6 +397,7 @@ def test_research_planner_repairs_code_specific_narrative(planner_context):
     ]
     assert "solution/candidate.py" not in json.dumps(repair_prompt)
     assert "pairwise/listwise" in json.dumps(repair_prompt)
+    assert "Remove repository paths" in repair_prompt["repair"]["instruction"]
 
 
 def test_research_planner_persists_code_reference_diagnostic(planner_context):

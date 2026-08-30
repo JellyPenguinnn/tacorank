@@ -4,6 +4,7 @@ import asyncio
 
 from tacorank.memory.replay import replay
 from tacorank.coding.trae_adapter import CodingWorkerError
+from tacorank.context.builder import ContextBuildError
 from tacorank.orchestrator.fakes import FakeCodingWorker, FakeExecutionRunner
 from tacorank.orchestrator.state import ExperimentStatus
 from tacorank.recovery.policy import RecoveryManager
@@ -53,6 +54,55 @@ class TransientInitialCodingWorker(FakeCodingWorker):
                 output_tail="authorization=sk-test-secret\nlaunch failed",
             )
         return await super().create_patch(context, spec)
+
+
+class RepeatedTransientInitialCodingWorker(FakeCodingWorker):
+    def __init__(self, artifacts):
+        super().__init__(artifacts)
+        self.calls = 0
+
+    async def create_patch(self, context, spec):
+        self.calls += 1
+        raise CodingWorkerError(
+            "TRAE_PROVIDER_UNAVAILABLE",
+            "coding provider is temporarily unavailable",
+        )
+
+
+class PermanentInitialCodingWorker(FakeCodingWorker):
+    def __init__(self, artifacts):
+        super().__init__(artifacts)
+        self.calls = 0
+
+    async def create_patch(self, context, spec):
+        self.calls += 1
+        raise CodingWorkerError(
+            "SOLUTION_VERIFICATION_FAILED",
+            "candidate did not implement the approved plan after bounded reviews",
+        )
+
+
+def test_coder_context_failure_is_recorded_at_the_coding_boundary(
+    harness, baseline_evaluation, monkeypatch
+):
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    def fail_coder_context(*args, **kwargs):
+        del args, kwargs
+        raise ContextBuildError("mandatory coder context exceeds configured budget")
+
+    monkeypatch.setattr(harness.context_builder, "build_coder", fail_coder_context)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    failure = next(
+        event
+        for event in harness.events()
+        if event.event_type == EventType.ADAPTER_FAILED
+    )
+    assert failure.payload.result.failure_stage == "coding"
+    assert state.stop_reason_code == "ADAPTER_FAILURE_ABANDON"
 
 
 class FailOnceRunner(FakeExecutionRunner):
@@ -237,12 +287,72 @@ def test_transient_initial_coding_failure_retries_and_persists_redacted_tail(
     )
     assert "sk-test-secret" not in content
     assert "[REDACTED]" in content
-    decision = next(
-        event.payload.decision
+    recovery_event = next(
+        event
         for event in events
         if event.event_type == EventType.RECOVERY_DECIDED
     )
+    decision = recovery_event.payload.decision
     assert decision.action == RecoveryAction.RETRY_SAME_COMMIT
+    patch_event = next(
+        event for event in events if event.event_type == EventType.PATCH_CREATED
+    )
+    assert patch_event.causation_event_id == recovery_event.event_id
+
+
+def test_second_transient_initial_coding_failure_is_recorded_then_abandoned(
+    harness, baseline_evaluation
+) -> None:
+    worker = RepeatedTransientInitialCodingWorker(
+        harness.event_store.artifact_store
+    )
+    harness.coding_worker = worker
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert worker.calls == 2
+    failures = [
+        event
+        for event in harness.events()
+        if event.event_type == EventType.ADAPTER_FAILED
+    ]
+    decisions = [
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    ]
+    assert len(failures) == 2
+    assert [decision.action for decision in decisions] == [
+        RecoveryAction.RETRY_SAME_COMMIT,
+        RecoveryAction.ABANDON,
+    ]
+    assert state.experiments["exp_001"].status == ExperimentStatus.INVALID
+    assert state.phase == "planning"
+    assert state.status.value == "running"
+
+
+def test_permanent_initial_coding_failure_abandons_only_the_experiment(
+    harness, baseline_evaluation
+) -> None:
+    worker = PermanentInitialCodingWorker(harness.event_store.artifact_store)
+    harness.coding_worker = worker
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert worker.calls == 1
+    decision = next(
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.RECOVERY_DECIDED
+    )
+    assert decision.action == RecoveryAction.ABANDON
+    assert state.experiments["exp_001"].status == ExperimentStatus.INVALID
+    assert state.phase == "planning"
+    assert state.status.value == "running"
 
 
 def test_real_recovery_allows_only_one_same_commit_retry_across_fingerprints(

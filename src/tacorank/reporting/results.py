@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timedelta
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
-from typing import Dict, Mapping, Sequence
+from typing import Dict, Mapping, Optional, Sequence
 
 from tacorank.evaluation.comparisons import normalized_headroom
 from tacorank.evaluation.types import EvaluationResult
@@ -18,7 +19,14 @@ from ..memory.projections import project
 from ..memory.retrieval import experiment_events
 from ..orchestrator.state import ExperimentStatus
 from ..run_layout import RunLayout
-from ..schemas import Event, LessonStatus
+from ..schemas import (
+    Event,
+    ExperimentDecisionKind,
+    LessonStatus,
+    RecoveryAction,
+    RunOutcome,
+    TrustVerdict,
+)
 from .resources import ResourceSummary
 
 
@@ -115,8 +123,227 @@ def _atomic_write_json(path: Path, payload: object) -> None:
     )
 
 
+def _timestamp(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _phase_after_event(event: Event, previous: str) -> str:
+    """Return the controller phase after one durable event."""
+
+    payload = event.payload
+    event_type = payload.type
+    if event_type == "run.started":
+        return "contract_verification"
+    if event_type == "contract.verified":
+        return "baseline"
+    if event_type == "baseline.verified":
+        return "planning"
+    if event_type == "context.created":
+        return "%s_context" % payload.context.role
+    if event_type == "experiment.proposed":
+        return "coding"
+    if event_type == "patch.created":
+        return "patch_gate"
+    if event_type == "patch.checked":
+        return "execution" if payload.result.accepted else "recovery"
+    if event_type == "execution.started":
+        return "running"
+    if event_type == "execution.finished":
+        return (
+            "output_gate"
+            if payload.result.outcome == RunOutcome.SUCCESS
+            else "recovery"
+        )
+    if event_type == "adapter.failed":
+        return "recovery"
+    if event_type == "recovery.decided":
+        if payload.decision.action in (
+            RecoveryAction.ABANDON,
+            RecoveryAction.ROLLBACK,
+        ):
+            return "planning"
+        if payload.decision.action in (
+            RecoveryAction.RETRY_SAME_COMMIT,
+            RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING,
+        ):
+            return "execution"
+        return "recovery"
+    if event_type == "output.checked":
+        return "evaluation" if payload.result.accepted else "recovery"
+    if event_type == "evaluation.completed":
+        return (
+            "recovery"
+            if payload.result.trust.verdict == TrustVerdict.NO_OP
+            else "decision"
+        )
+    if event_type == "experiment.decided":
+        return (
+            "execution"
+            if payload.decision.decision == ExperimentDecisionKind.PROMOTE
+            else "planning"
+        )
+    if event_type == "run.stopped":
+        return "stopped"
+    if event_type == "final.selected":
+        return "submission"
+    if event_type == "submission.checked":
+        return "finalized" if payload.accepted else "failed"
+    return previous
+
+
+def _configured_stage_timeout(
+    events: Sequence[Event], phase: str, experiment_id: Optional[str]
+) -> Optional[int]:
+    if phase == "coder_context":
+        for event in reversed(events):
+            if event.payload.type != "context.created":
+                continue
+            context = event.payload.context
+            if context.role == "coder" and context.experiment_id == experiment_id:
+                return context.wall_time_limit_seconds
+    if phase == "running":
+        for event in reversed(events):
+            if event.payload.type != "execution.started":
+                continue
+            if event.payload.request.experiment_id == experiment_id:
+                return event.payload.request.timeout_seconds
+    return None
+
+
+def runtime_status(events: Sequence[Event]) -> dict:
+    """Project live-monitoring anchors without consulting wall-clock time."""
+
+    state = project(events)
+    phase = "not_started"
+    stage_started_at = None
+    for event in events:
+        next_phase = _phase_after_event(event, phase)
+        if next_phase != phase:
+            stage_started_at = event.timestamp
+        phase = next_phase
+    if phase != state.phase:
+        raise ValueError("runtime phase projection disagrees with run state")
+    timeout_seconds = _configured_stage_timeout(
+        events, state.phase, state.active_experiment_id
+    )
+    deadline = (
+        stage_started_at + timedelta(seconds=timeout_seconds)
+        if stage_started_at is not None and timeout_seconds is not None
+        else None
+    )
+    last_event = events[-1] if events else None
+    elapsed_at_head = (
+        max(0.0, (last_event.timestamp - stage_started_at).total_seconds())
+        if last_event is not None and stage_started_at is not None
+        else 0.0
+    )
+    return {
+        "experiment_id": state.active_experiment_id,
+        "phase": state.phase,
+        "attempt": state.active_attempt,
+        "fidelity": (
+            state.active_fidelity.value if state.active_fidelity is not None else None
+        ),
+        "stage_started_at": (
+            _timestamp(stage_started_at) if stage_started_at is not None else None
+        ),
+        "stage_elapsed_seconds_at_ledger_head": elapsed_at_head,
+        "configured_timeout_seconds": timeout_seconds,
+        "estimated_deadline": _timestamp(deadline) if deadline is not None else None,
+        "last_event_id": last_event.event_id if last_event is not None else None,
+        "last_event_type": (
+            last_event.event_type.value if last_event is not None else None
+        ),
+        "last_event_at": (
+            _timestamp(last_event.timestamp) if last_event is not None else None
+        ),
+    }
+
+
+def _duration_seconds(start: Event, finish: Event) -> float:
+    return max(0.0, (finish.timestamp - start.timestamp).total_seconds())
+
+
+def experiment_timing(events: Sequence[Event], experiment_id: str) -> dict:
+    """Return exact ledger-bound lifecycle durations for one experiment."""
+
+    selected = experiment_events(events, experiment_id)
+    proposal = next(
+        (event for event in selected if event.payload.type == "experiment.proposed"),
+        None,
+    )
+    terminal = None
+    for event in selected:
+        if event.payload.type == "experiment.decided" and (
+            event.payload.decision.decision != ExperimentDecisionKind.PROMOTE
+        ):
+            terminal = event
+            break
+        if event.payload.type == "recovery.decided" and (
+            event.payload.decision.action
+            in (RecoveryAction.ABANDON, RecoveryAction.ROLLBACK)
+        ):
+            terminal = event
+            break
+
+    coding_seconds = 0.0
+    coding_start = None
+    execution_seconds = 0.0
+    execution_start = None
+    event_by_id = {event.event_id: event for event in selected}
+    recovery_seconds = 0.0
+    for event in selected:
+        payload = event.payload
+        if payload.type == "context.created" and payload.context.role == "coder":
+            coding_start = event
+        elif payload.type == "recovery.decided" and (
+            payload.decision.action == RecoveryAction.TRAE_REPAIR
+        ):
+            coding_start = event
+        elif payload.type == "patch.created" and coding_start is not None:
+            coding_seconds += _duration_seconds(coding_start, event)
+            coding_start = None
+        elif payload.type == "adapter.failed" and (
+            payload.result.failure_stage == "coding" and coding_start is not None
+        ):
+            coding_seconds += _duration_seconds(coding_start, event)
+            coding_start = None
+
+        if payload.type == "execution.started":
+            execution_start = event
+        elif payload.type == "execution.finished" and execution_start is not None:
+            execution_seconds += _duration_seconds(execution_start, event)
+            execution_start = None
+        elif payload.type == "adapter.failed" and (
+            payload.result.failure_stage == "execution"
+            and execution_start is not None
+        ):
+            execution_seconds += _duration_seconds(execution_start, event)
+            execution_start = None
+
+        if payload.type == "recovery.decided":
+            failure = event_by_id.get(payload.decision.failure_event_id)
+            if failure is not None:
+                recovery_seconds += _duration_seconds(failure, event)
+
+    return {
+        "proposed_at": _timestamp(proposal.timestamp) if proposal else None,
+        "terminal_at": _timestamp(terminal.timestamp) if terminal else None,
+        "terminal_event_id": terminal.event_id if terminal else None,
+        "loop_time_seconds": (
+            _duration_seconds(proposal, terminal)
+            if proposal is not None and terminal is not None
+            else None
+        ),
+        "trae_coding_time_seconds": coding_seconds,
+        "execution_time_seconds": execution_seconds,
+        "recovery_time_seconds": recovery_seconds,
+    }
+
+
 def _state_payload(events: Sequence[Event]) -> dict:
     state = project(events)
+    runtime = runtime_status(events)
     active_jobs = []
     node = state.current_experiment
     terminal = {
@@ -145,6 +372,11 @@ def _state_payload(events: Sequence[Event]) -> dict:
                 ),
                 "worker": None,
                 "identity_source": "derived_sequential",
+                "stage_started_at": runtime["stage_started_at"],
+                "configured_timeout_seconds": runtime[
+                    "configured_timeout_seconds"
+                ],
+                "estimated_deadline": runtime["estimated_deadline"],
             }
         )
     totals = state.resource_totals
@@ -156,6 +388,7 @@ def _state_payload(events: Sequence[Event]) -> dict:
             "event_id": state.last_event_id,
             "event_hash": state.last_event_hash,
         },
+        "current": runtime,
         "global": {
             "status": state.status.value,
             "phase": state.phase,
@@ -172,6 +405,10 @@ def _state_payload(events: Sequence[Event]) -> dict:
             "final_experiment_id": state.final_experiment_id,
         },
         "active_jobs": active_jobs,
+        "experiment_timings": {
+            experiment_id: experiment_timing(events, experiment_id)
+            for experiment_id in sorted(state.experiments)
+        },
         "resources": {
             "provider_tokens": totals.provider_tokens,
             "estimated_tokens": totals.estimated_tokens,
@@ -320,12 +557,13 @@ def render_summary(events: Sequence[Event]) -> str:
         "",
         "# TacoRank run summary",
         "",
-        "| Experiment | Family | Campaign variant | Status | Fidelity | Primary | Commit |",
-        "| --- | --- | --- | --- | --- | ---: | --- |",
+        "| Experiment | Family | Campaign variant | Status | Fidelity | Primary | Loop time | Trae coding | Execution | Recovery | Commit |",
+        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for node in sorted(state.experiments.values(), key=lambda item: item.experiment_id):
+        timing = experiment_timing(events, node.experiment_id)
         lines.append(
-            "| %s | %s | %s | %s | %s | %s | %s |"
+            "| %s | %s | %s | %s | %s | %s | %s | %.3fs | %.3fs | %.3fs | %s |"
             % (
                 node.experiment_id,
                 node.family,
@@ -342,6 +580,14 @@ def render_summary(events: Sequence[Event]) -> str:
                     if node.metric_set is not None
                     else "—"
                 ),
+                (
+                    "%.3fs" % timing["loop_time_seconds"]
+                    if timing["loop_time_seconds"] is not None
+                    else "—"
+                ),
+                timing["trae_coding_time_seconds"],
+                timing["execution_time_seconds"],
+                timing["recovery_time_seconds"],
                 node.latest_commit_sha or "—",
             )
         )
@@ -519,6 +765,7 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                 "adapter_failures": [],
                 "recovery_decisions": [],
                 "estimated_cost": None,
+                "timing": None,
                 "best_eligible": state.best_experiment_id == payload.experiment_id,
                 "event_ids": [
                     event.event_id
@@ -613,6 +860,7 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                 "adapter_failures": adapter_failures,
                 "recovery_decisions": recovery_decisions,
                 "estimated_cost": spec.estimated_cost.model_dump(mode="json"),
+                "timing": experiment_timing(events, experiment_id),
                 "best_eligible": node.best_eligible,
                 "event_ids": [
                     event.event_id
@@ -720,6 +968,19 @@ def _render_experiment(node: dict, events: Sequence[Event]) -> str:
                 "",
                 "```json",
                 json.dumps(node["variant_parameters"], sort_keys=True),
+                "```",
+            )
+        )
+    if node.get("timing") is not None:
+        lines.extend(
+            (
+                "",
+                "## Timing",
+                "",
+                "```json",
+                json.dumps(
+                    node["timing"], ensure_ascii=False, sort_keys=True, indent=2
+                ),
                 "```",
             )
         )

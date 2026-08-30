@@ -7,7 +7,20 @@ from .output_parser import (
     parse_trajectory_bytes,
     parse_trajectory_file,
 )
-from .prompts import PromptContractError, build_coding_prompt, build_repair_prompt
+from .prompts import (
+    PromptContractError,
+    build_coding_prompt,
+    build_repair_prompt,
+    build_solution_revision_prompt,
+)
+from .solution_verifier import (
+    AcceptingSolutionVerifier,
+    DeepSeekSolutionVerifier,
+    SolutionFinding,
+    SolutionVerificationResult,
+    SolutionVerifier,
+    SolutionVerifierError,
+)
 from .redaction import RedactionError, SecretRedactor
 from .trae_adapter import (
     CandidateIdentity,
@@ -44,6 +57,13 @@ __all__ = [
     "TrajectoryParseError",
     "build_coding_prompt",
     "build_repair_prompt",
+    "build_solution_revision_prompt",
+    "AcceptingSolutionVerifier",
+    "DeepSeekSolutionVerifier",
+    "SolutionFinding",
+    "SolutionVerificationResult",
+    "SolutionVerifier",
+    "SolutionVerifierError",
     "hash_trae_runtime_package",
     "parse_trajectory_bytes",
     "parse_trajectory_file",
