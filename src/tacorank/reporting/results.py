@@ -350,6 +350,7 @@ def _state_payload(events: Sequence[Event]) -> dict:
         ExperimentStatus.ACCEPTED,
         ExperimentStatus.REJECTED,
         ExperimentStatus.PRUNED,
+        ExperimentStatus.RETAINED,
         ExperimentStatus.INVALID,
     }
     if (

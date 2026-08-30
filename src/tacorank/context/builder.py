@@ -34,6 +34,7 @@ from ..schemas import (
     ExperimentDecisionKind,
     ExperimentSpec,
     Fidelity,
+    TrialType,
     PlannerBudgetSummary,
     PlannerContext,
     PlannerContractSummary,
@@ -135,6 +136,14 @@ def _planner_parent_metric_deltas(
 
 def _path_is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def _sha256_file(path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _code_blind(value: object) -> object:
@@ -396,30 +405,29 @@ class ContextBuilder:
             proposal = ResearchProposal.model_validate(
                 proposal.model_dump(
                     mode="python",
-                    exclude={"target_stage", "target_files", "fidelity_plan"},
+                    exclude={
+                        "target_stage",
+                        "target_files",
+                        "fidelity_plan",
+                        "trial_type",
+                        "implementation_id",
+                        "implementation_sha256",
+                        "active_parameter_names",
+                    },
                 )
             )
 
+        root = self.config.repository_root.resolve(strict=True)
         interfaces = self._target_interface_excerpts()
-        targets = list(interfaces)
         protected = self._protected_paths()
         editable = [root.rstrip("/") for root in self.config.editable_roots]
-        for target in targets:
-            if not any(_path_is_within(target, root) for root in editable):
-                raise ContextBuildError(
-                    "implementation target is outside editable roots: %s" % target
-                )
-            if any(_path_is_within(target, root) for root in protected):
-                raise ContextBuildError(
-                    "implementation target is protected: %s" % target
-                )
-
         cards = {
             card.method_id: card
             for card in load_method_cards(
                 self.config.repository_root / "research/methods"
             ).cards
         }
+        selected_cards = []
         for method_id in proposal.method_card_ids:
             card = cards.get(method_id)
             if card is None:
@@ -427,11 +435,84 @@ class ContextBuilder:
                     "implementation binding cannot resolve method card: %s"
                     % method_id
                 )
-            unauthorized = sorted(set(card.implementation_targets) - set(targets))
-            if unauthorized:
+            selected_cards.append(card)
+
+        verified = proposal.campaign_id is not None and bool(selected_cards) and all(
+            card.capability_status == "verified" for card in selected_cards
+        )
+        if verified:
+            configuration_targets = {
+                card.configuration_target for card in selected_cards
+            }
+            implementation_ids = {card.implementation_id for card in selected_cards}
+            implementation_targets = {
+                target
+                for card in selected_cards
+                for target in card.implementation_targets
+            }
+            if None in configuration_targets or len(configuration_targets) != 1:
                 raise ContextBuildError(
-                    "method implementation target is not an authorized interface: %s"
-                    % unauthorized[0]
+                    "verified methods require one shared configuration target"
+                )
+            if None in implementation_ids or len(implementation_ids) != 1:
+                raise ContextBuildError(
+                    "configuration trials require one verified implementation"
+                )
+            if len(implementation_targets) != 1:
+                raise ContextBuildError(
+                    "verified methods require one hash-bound implementation target"
+                )
+            targets = [str(next(iter(configuration_targets)))]
+            implementation_target = root / next(iter(implementation_targets))
+            implementation_sha256 = _sha256_file(implementation_target)
+            implementation_id = str(next(iter(implementation_ids)))
+            active_parameters = sorted(
+                {
+                    parameter
+                    for card in selected_cards
+                    for parameter in card.active_parameters
+                }
+            )
+            if set(proposal.variant_parameters) != set(active_parameters):
+                raise ContextBuildError(
+                    "configuration proposal does not declare every active parameter"
+                )
+            trial_type = TrialType.CONFIGURATION
+        else:
+            targets = sorted(
+                {
+                    target
+                    for card in selected_cards
+                    for target in card.implementation_targets
+                }
+            )
+            if not targets and not selected_cards:
+                # Legacy/custom implementation proposals without method cards
+                # retain the controller's narrow default target. Reviewed
+                # research methods must declare their implementation surface.
+                targets = [next(iter(interfaces))]
+            elif not targets:
+                raise ContextBuildError(
+                    "unverified method has no implementation target"
+                )
+            implementation_sha256 = None
+            implementation_id = None
+            active_parameters = []
+            trial_type = TrialType.IMPLEMENTATION
+
+        unauthorized = sorted(set(targets) - set(interfaces))
+        if unauthorized:
+            raise ContextBuildError(
+                "method target is not an authorized interface: %s" % unauthorized[0]
+            )
+        for target in targets:
+            if not any(_path_is_within(target, editable_root) for editable_root in editable):
+                raise ContextBuildError(
+                    "implementation target is outside editable roots: %s" % target
+                )
+            if any(_path_is_within(target, protected_root) for protected_root in protected):
+                raise ContextBuildError(
+                    "implementation target is protected: %s" % target
                 )
 
         return ExperimentSpec(
@@ -442,6 +523,10 @@ class ContextBuilder:
             target_files=targets,
             # Execution sequencing is frozen controller policy, not research output.
             fidelity_plan=[Fidelity.SMOKE, Fidelity.PROXY, Fidelity.FULL],
+            trial_type=trial_type,
+            implementation_id=implementation_id,
+            implementation_sha256=implementation_sha256,
+            active_parameter_names=active_parameters,
         )
 
     @staticmethod
@@ -718,6 +803,15 @@ class ContextBuilder:
                     variant_id=spec.variant_id,
                     variant_instruction=spec.variant_instruction,
                     variant_parameters=dict(spec.variant_parameters),
+                    trial_type=spec.trial_type,
+                    implementation_id=spec.implementation_id,
+                    execution_conformant=bool(
+                        evaluation
+                        and evaluation.diagnostic_metrics.get(
+                            "implementation_conformant"
+                        )
+                        == 1.0
+                    ),
                     method_card_ids=list(spec.method_card_ids),
                     component_experiment_ids=list(spec.component_experiment_ids),
                     supporting_event_ids=support,
@@ -767,6 +861,8 @@ class ContextBuilder:
                     expected_effect=card.expected_effect,
                     falsifier=card.falsifier,
                     prohibition_conditions=list(card.prohibition_conditions),
+                    capability_status=card.capability_status,
+                    active_parameters=list(card.active_parameters),
                     # Implementation targets are intentionally withheld from
                     # Person 1 and resolved only by bind_implementation().
                     implementation_targets=[],

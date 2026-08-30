@@ -33,10 +33,22 @@ DEFAULT_TARGET_INTERFACE_EXCERPTS = {
         "embedding_dim integer 2..32, learning_rate 1e-5..0.2, epochs 1..8, "
         "negative_count integer 1..16, l2 0..0.1, residual_scale 0..0.5, "
         "max_train_rows integer 1000..250000, history_decay_days 1..180, "
-        "history_shrinkage 0..1000. Set CONFIG family to the ExperimentSpec "
+        "history_shrinkage 0..1000, and listwise_strategy=full_observed. Set "
+        "CONFIG family to the ExperimentSpec "
         "family and copy every approved variant_parameters value into its "
         "matching CONFIG key; do not edit executable code."
-    )
+    ),
+    "solution/research_scaffold.py": (
+        "Implementation trials may add or repair one reviewed research capability. "
+        "Preserve the candidate entrypoint, frozen FM parent, deterministic seeds, "
+        "finite outputs, and training-diagnostics execution receipt. Configuration "
+        "trials must not edit this file."
+    ),
+    "solution/candidate.py": (
+        "Implementation trials may change the reviewed solution.candidate:run "
+        "entrypoint only when the selected unverified method card authorizes it. "
+        "Preserve the candidate output and data-boundary contracts."
+    ),
 }
 
 

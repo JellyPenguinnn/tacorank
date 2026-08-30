@@ -18,8 +18,35 @@ import zlib
 FEATURES = ("user_id", "video_id", "author_id", "tab", "duration_ms")
 FORMULATIONS = {"passthrough", "pointwise", "bpr", "listwise", "temporal_history"}
 HASH_DIMENSION = 1 << 16
+IMPLEMENTATION_IDS = {
+    "passthrough": "baseline_passthrough_v1",
+    "pointwise": "objective_pointwise_v1",
+    "bpr": "objective_bpr_v2",
+    "listwise": "objective_listwise_full_v2",
+    "temporal_history": "temporal_history_compact_v1",
+}
+ACTIVE_PARAMETERS = {
+    "passthrough": ("formulation",),
+    "pointwise": (
+        "formulation", "embedding_dim", "learning_rate", "epochs", "l2",
+        "residual_scale", "max_train_rows",
+    ),
+    "bpr": (
+        "formulation", "embedding_dim", "learning_rate", "epochs",
+        "negative_count", "l2", "residual_scale", "max_train_rows",
+    ),
+    "listwise": (
+        "formulation", "embedding_dim", "learning_rate", "epochs", "l2",
+        "residual_scale", "max_train_rows", "listwise_strategy",
+    ),
+    "temporal_history": (
+        "formulation", "residual_scale", "max_train_rows",
+        "history_decay_days", "history_shrinkage",
+    ),
+}
 PredictionRow = Tuple[int, str, str, float]
 TrainingRow = Tuple[Tuple[str, ...], str, int, float]
+ListwiseGroup = Tuple[Tuple[int, ...], Tuple[float, ...]]
 
 
 def run_experiment(invocation: Any, raw_config: Mapping[str, Any]) -> None:
@@ -29,10 +56,11 @@ def run_experiment(invocation: Any, raw_config: Mapping[str, Any]) -> None:
     if formulation == "passthrough":
         _validate_alignment(score_path, parent_path)
         _exclusive_copy(parent_path, invocation.output_path)
-        _write_diagnostics(
-            invocation.output_path,
-            _empty_diagnostics(formulation, getattr(invocation, "seed", 0)),
+        diagnostics = _empty_diagnostics(
+            formulation, getattr(invocation, "seed", 0)
         )
+        _attach_execution_receipt(diagnostics, config)
+        _write_diagnostics(invocation.output_path, diagnostics)
         return
 
     train = _load_training(
@@ -50,6 +78,7 @@ def run_experiment(invocation: Any, raw_config: Mapping[str, Any]) -> None:
         train_rows=len(train),
         **prediction_stats,
     )
+    _attach_execution_receipt(diagnostics, config)
     _write_diagnostics(invocation.output_path, diagnostics)
 
 
@@ -65,12 +94,14 @@ def validate_config(raw: Mapping[str, Any]) -> Dict[str, Any]:
         "history_decay_days": (1.0, 180.0, float),
         "history_shrinkage": (0.0, 1000.0, float),
     }
-    unknown = set(raw) - {"family", "formulation", *bounds}
+    unknown = set(raw) - {"family", "formulation", "listwise_strategy", *bounds}
     if unknown:
         raise ValueError("unknown experiment configuration: %s" % sorted(unknown))
     config = dict(raw)
     if str(config.get("formulation", "")) not in FORMULATIONS:
         raise ValueError("unsupported formulation")
+    if config.get("listwise_strategy") != "full_observed":
+        raise ValueError("listwise_strategy must be full_observed")
     for key, (lower, upper, kind) in bounds.items():
         value = config.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -136,6 +167,7 @@ def _fit(
             "loss_end": 0.0,
             "pairwise_accuracy": 0.0,
             "gradient_norm": 0.0,
+            "training_semantics": _training_semantics(train, config),
         }
 
     rng = random.Random(seed)
@@ -177,7 +209,7 @@ def _fit(
                 )
                 updates += 1
         elif config["formulation"] == "bpr":
-            pairs = _pairwise_rows(train, rng)
+            pairs = _pairwise_rows(train, rng, int(config["negative_count"]))
             correct = 0
             for positive, negative in pairs:
                 difference = _fm_score(
@@ -200,11 +232,10 @@ def _fit(
                 updates += 1
             ranking_accuracy = correct / len(pairs)
         else:
-            groups = _listwise_rows(
-                train, rng, int(config["negative_count"])
-            )
+            groups = _listwise_rows(train)
             correct = 0
-            for group in groups:
+            comparisons = 0
+            for group, targets in groups:
                 scores = [
                     _fm_score(weights, factors, indices[row_index], rank)
                     for row_index in group
@@ -213,9 +244,25 @@ def _fit(
                 exponentials = [math.exp(score - maximum) for score in scores]
                 denominator = sum(exponentials)
                 probabilities = [value / denominator for value in exponentials]
-                coefficients = [probabilities[0] - 1.0, *probabilities[1:]]
-                loss_total += math.log(denominator) - (scores[0] - maximum)
-                correct += int(scores[0] > max(scores[1:]))
+                coefficients = [
+                    probability - target
+                    for probability, target in zip(probabilities, targets)
+                ]
+                loss_total += math.log(denominator) + maximum - sum(
+                    target * score for target, score in zip(targets, scores)
+                )
+                positive_scores = [
+                    score for score, target in zip(scores, targets) if target > 0.0
+                ]
+                negative_scores = [
+                    score for score, target in zip(scores, targets) if target == 0.0
+                ]
+                correct += sum(
+                    positive > negative
+                    for positive in positive_scores
+                    for negative in negative_scores
+                )
+                comparisons += len(positive_scores) * len(negative_scores)
                 norm_total += _apply_group_update(
                     weights,
                     factors,
@@ -226,12 +273,13 @@ def _fit(
                     l2,
                 )
                 updates += 1
-            ranking_accuracy = correct / len(groups)
+            ranking_accuracy = correct / comparisons
         if updates == 0:
             raise ValueError("objective produced no trainable updates")
         losses.append(loss_total / updates)
         gradient_norms.append(norm_total / updates)
 
+    semantics = _training_semantics(train, config)
     return {
         "kind": "fm",
         "weights": weights,
@@ -244,11 +292,12 @@ def _fit(
         "loss_end": losses[-1],
         "pairwise_accuracy": ranking_accuracy,
         "gradient_norm": gradient_norms[-1],
+        "training_semantics": semantics,
     }
 
 
 def _pairwise_rows(
-    train: Sequence[TrainingRow], rng: random.Random
+    train: Sequence[TrainingRow], rng: random.Random, negative_count: int
 ) -> List[Tuple[int, int]]:
     grouped = _group_label_rows(train)
     pairs = []
@@ -256,28 +305,83 @@ def _pairwise_rows(
         positive, negative = grouped[user]
         if not positive or not negative:
             continue
-        pairs.extend((row, rng.choice(negative)) for row in positive)
+        pairs.extend(
+            (row, rng.choice(negative))
+            for row in positive
+            for _ in range(negative_count)
+        )
     if not pairs:
         raise ValueError("BPR requires within-user positive-negative pairs")
     return pairs
 
 
 def _listwise_rows(
-    train: Sequence[TrainingRow], rng: random.Random, negative_count: int
-) -> List[Tuple[int, ...]]:
+    train: Sequence[TrainingRow],
+) -> List[ListwiseGroup]:
     grouped = _group_label_rows(train)
     groups = []
     for user in sorted(grouped):
         positive, negative = grouped[user]
         if not positive or not negative:
             continue
-        for row in positive:
-            groups.append(
-                (row, *(rng.choice(negative) for _ in range(negative_count)))
-            )
+        rows = tuple(positive + negative)
+        positive_mass = 1.0 / len(positive)
+        targets = tuple(
+            positive_mass if index < len(positive) else 0.0
+            for index in range(len(rows))
+        )
+        groups.append((rows, targets))
     if not groups:
         raise ValueError("listwise objective requires informative within-user lists")
     return groups
+
+
+def _training_semantics(
+    train: Sequence[TrainingRow], config: Mapping[str, Any]
+) -> Dict[str, Any]:
+    formulation = str(config["formulation"])
+    grouped = _group_label_rows(train)
+    informative = [
+        (positive, negative)
+        for positive, negative in grouped.values()
+        if positive and negative
+    ]
+    positive_count = sum(len(positive) for positive, _ in informative)
+    semantics: Dict[str, Any] = {
+        "informative_user_count": len(informative),
+        "positive_count": positive_count,
+    }
+    if formulation == "bpr":
+        negative_count = int(config["negative_count"])
+        semantics.update(
+            negative_count=negative_count,
+            pair_count=positive_count * negative_count,
+            negatives_per_positive=float(negative_count),
+        )
+    elif formulation == "listwise":
+        sizes = [len(positive) + len(negative) for positive, negative in informative]
+        semantics.update(
+            listwise_strategy=str(config["listwise_strategy"]),
+            list_count=len(sizes),
+            list_row_count=sum(sizes),
+            mean_list_size=(sum(sizes) / len(sizes)) if sizes else 0.0,
+            max_list_size=max(sizes, default=0),
+            normalized_positive_target_mass=1.0 if sizes else 0.0,
+        )
+    return semantics
+
+
+def _attach_execution_receipt(
+    diagnostics: Dict[str, Any], config: Mapping[str, Any]
+) -> None:
+    formulation = str(config["formulation"])
+    diagnostics.update(
+        implementation_id=IMPLEMENTATION_IDS[formulation],
+        implementation_sha256=_sha256_file(Path(__file__).resolve(strict=True)),
+        effective_parameters={
+            name: config[name] for name in ACTIVE_PARAMETERS[formulation]
+        },
+    )
 
 
 def _group_label_rows(
@@ -458,12 +562,19 @@ def self_test() -> None:
         (("user_id=2", "video_id=3", "author_id=3", "tab=1", "duration_ms=3"), "2", 1, 1.0),
         (("user_id=2", "video_id=4", "author_id=4", "tab=1", "duration_ms=4"), "2", 2, 0.0),
     ]
-    pairs = _pairwise_rows(rows, random.Random(7))
+    pairs = _pairwise_rows(rows, random.Random(7), 3)
+    if len(pairs) != 6:
+        raise ValueError("BPR negative_count self-test failed")
     if any(rows[positive][1] != rows[negative][1] for positive, negative in pairs):
         raise ValueError("negative sampling crossed user boundaries")
-    groups = _listwise_rows(rows, random.Random(7), 2)
-    if any(len({rows[index][1] for index in group}) != 1 for group in groups):
+    groups = _listwise_rows(rows)
+    if any(
+        len({rows[index][1] for index in group}) != 1
+        for group, _ in groups
+    ):
         raise ValueError("listwise sampling crossed user boundaries")
+    if any(abs(sum(targets) - 1.0) > 1e-12 for _, targets in groups):
+        raise ValueError("listwise target normalization self-test failed")
     rank = 2
     weights = array("d", [0.0]) * HASH_DIMENSION
     factors = array("d", [0.01]) * (HASH_DIMENSION * rank)

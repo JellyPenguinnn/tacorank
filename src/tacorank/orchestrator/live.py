@@ -53,6 +53,7 @@ from ..execution import (
     SealedExecutionVerifier,
     default_command_registry,
 )
+from ..execution.conformance import verify_execution_receipt
 from ..git import WorktreeManager
 from ..memory.event_store import EventStore
 from ..memory.projections import project
@@ -903,6 +904,14 @@ class ProtectedEvaluationBridge:
         document = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(document, dict):
             raise ContractError("training diagnostics must be a JSON object")
+        experiment_id = getattr(finished.payload.result, "experiment_id", None)
+        conformance = (
+            verify_execution_receipt(
+                self._experiment_spec(experiment_id), document
+            )
+            if experiment_id is not None
+            else {}
+        )
         allowed = {
             "train_rows",
             "interaction_coverage",
@@ -922,6 +931,7 @@ class ProtectedEvaluationBridge:
             if not math.isfinite(parsed):
                 raise ContractError("training diagnostics must be finite")
             values[key] = parsed
+        values.update(conformance)
         return values
 
     def _resolve_seed_result(self, event_id: str) -> DomainEvaluationResult:

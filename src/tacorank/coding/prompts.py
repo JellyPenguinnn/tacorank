@@ -115,6 +115,17 @@ def build_coding_prompt(
     token_limit = _optional_positive_int(context, "token_limit")
     wall_limit = _positive_int(context, "wall_time_limit_seconds")
     target_files = _validated_paths(spec_document.get("target_files"), "target_files")
+    trial_type = str(spec_document.get("trial_type", "implementation"))
+    if trial_type not in {"implementation", "configuration"}:
+        raise PromptContractError("spec trial_type is invalid")
+    trial_instruction = (
+        "This is a verified configuration trial. Change only the declared active "
+        "parameter values; the hash-bound implementation must remain unchanged."
+        if trial_type == "configuration"
+        else "This is an implementation trial. Implement or repair the selected "
+        "capability in the authorized implementation targets and preserve its "
+        "machine-checkable execution receipt."
+    )
     coding_invariants = _json_value(getattr(context, "coding_invariants", ()))
     prior_result_summaries = _json_value(
         getattr(context, "prior_result_summaries", ())
@@ -160,6 +171,7 @@ def build_coding_prompt(
         "",
         "## Tool-use discipline",
         _json_block({"authoritative_target_files": target_files}),
+        trial_instruction,
         "Begin by viewing the authoritative target files directly; do not list the repository root or survey unrelated directories.",
         "Reuse prior view results instead of rereading the same path and range.",
         "Modify only authoritative_target_files. Do not add ad-hoc smoke, test, helper, or alternate entrypoint files unless each path is explicitly present in authoritative_target_files.",

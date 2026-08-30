@@ -68,16 +68,6 @@ def decide(
             and trust.integrity == Integrity.CLEAN
             and "WITHIN_NOISE" in trust.flags
         ):
-            if not context.promote_inconclusive_proxy:
-                return _decision(
-                    result,
-                    context,
-                    Decision.PRUNE,
-                    "PROXY_SCREENED_WITHIN_NOISE",
-                    False,
-                    False,
-                    None,
-                )
             return _decision(
                 result,
                 context,
@@ -110,7 +100,7 @@ def decide(
             return _decision(
                 result,
                 context,
-                Decision.REJECT,
+                Decision.RETAIN,
                 "CONFIRMATION_BUDGET_EXHAUSTED",
                 False,
                 False,
@@ -171,11 +161,10 @@ def decide(
         Verdict.SUSPICIOUS: "INTEGRITY_UNVERIFIED",
     }
     reason = reason_by_verdict.get(trust.verdict, "INTEGRITY_UNVERIFIED")
-    action = (
-        Decision.INVALID
-        if trust.verdict == Verdict.SUSPICIOUS
-        else Decision.REJECT
-    )
+    action = {
+        Verdict.SUSPICIOUS: Decision.INVALID,
+        Verdict.INCONCLUSIVE: Decision.RETAIN,
+    }.get(trust.verdict, Decision.REJECT)
     return _decision(result, context, action, reason, False, False, None)
 
 

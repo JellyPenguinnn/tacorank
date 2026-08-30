@@ -273,7 +273,7 @@ def _campaign_choice(
     latest = history[-1] if history else None
     if latest is not None:
         status = _normalized(get_value(latest, "status", None))
-        terminal = {"accepted", "rejected", "pruned", "invalid"}
+        terminal = {"accepted", "rejected", "pruned", "retained", "invalid"}
         if status not in terminal:
             return _blocked(
                 "CAMPAIGN_RESULT_NOT_TERMINAL",
@@ -323,7 +323,7 @@ def _campaign_choice(
                 and _normalized(get_value(summary, "trust_verdict", None))
                 in {"accepted", "negative", "inconclusive", "redundant"}
                 and _normalized(get_value(summary, "status", None))
-                in {"accepted", "rejected", "pruned"}
+                in {"accepted", "rejected", "pruned", "retained"}
             ):
                 continue
             full_count += 1
@@ -361,7 +361,7 @@ def _campaign_choice(
                 prior_node is not None
                 and prior_node.parent_commit_sha
                 and _normalized(get_value(prior, "status", None))
-                in {"accepted", "rejected", "pruned"}
+                in {"accepted", "rejected", "pruned", "retained"}
                 and _normalized(get_value(prior, "integrity", None)) != "compromised"
                 and _normalized(get_value(prior, "trust_verdict", None)) != "suspicious"
             ):

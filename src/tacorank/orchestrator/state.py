@@ -33,6 +33,7 @@ class ExperimentStatus(str, Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     PRUNED = "pruned"
+    RETAINED = "retained"
     INVALID = "invalid"
 
 

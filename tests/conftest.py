@@ -67,6 +67,10 @@ def repository(tmp_path: Path) -> Path:
     (tmp_path / "solution/experiment_config.py").write_text(
         "CONFIG = {'formulation': 'passthrough'}\n", encoding="utf-8"
     )
+    shutil.copy2(
+        Path(__file__).parents[1] / "solution/research_scaffold.py",
+        tmp_path / "solution/research_scaffold.py",
+    )
     (tmp_path / "artifacts").mkdir()
     (tmp_path / "runs").mkdir()
     return tmp_path
@@ -86,7 +90,7 @@ def config(repository: Path) -> RunConfig:
         research_provider="deepseek",
         max_experiments=3,
         seed_schedule=[11, 22, 33, 44],
-        context_token_limit=2000,
+        context_token_limit=3000,
         research_capabilities=[
             "baseline_parity",
             "objective_data_frame_verified",

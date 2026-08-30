@@ -340,11 +340,25 @@ def setup_live_deployment(
                 "embedding_dim integer 2..32; learning_rate 1e-5..0.2; epochs "
                 "1..8; negative_count integer 1..16; l2 0..0.1; residual_scale "
                 "0..0.5; max_train_rows integer 1000..250000; "
-                "history_decay_days 1..180; history_shrinkage 0..1000. The "
+                "history_decay_days 1..180; history_shrinkage 0..1000; "
+                "listwise_strategy must be full_observed. The "
                 "controller-owned stable scaffold preserves the official FM parent, "
                 "trains the requested residual, and records diagnostics. Do not edit "
                 "candidate.py or research_scaffold.py during configuration trials."
-            )
+            ),
+            "solution/research_scaffold.py": (
+                "Implementation trials may add or repair one reviewed capability. "
+                "Preserve the frozen FM parent, deterministic seeds, finite outputs, "
+                "and emit a machine-checkable training-diagnostics receipt containing "
+                "implementation_id, implementation_sha256, effective_parameters, and "
+                "training_semantics. Configuration trials must not edit this file."
+            ),
+            "solution/candidate.py": (
+                "Implementation trials may change solution.candidate:run only when "
+                "the selected unverified method card authorizes it. Preserve the "
+                "reviewed data boundary, output schema, deterministic seed behavior, "
+                "and frozen FM parent score contract."
+            ),
         },
         "coding_step_limit": 64,
         "coding_token_limit": None,

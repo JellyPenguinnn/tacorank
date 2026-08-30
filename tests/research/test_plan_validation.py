@@ -103,16 +103,43 @@ def test_validator_accepts_distinct_agent_chosen_campaign_variant(planner_contex
             "Use a pairwise/listwise hybrid with four deterministic "
             "positive/negative comparisons and learning rate 0.02."
         ),
-        variant_parameters={
-            "formulation": "bpr",
-            "negative_count": 4,
-            "learning_rate": 0.02,
-        },
+            variant_parameters={
+                "formulation": "bpr",
+                "embedding_dim": 16,
+                "negative_count": 4,
+                "learning_rate": 0.02,
+                "epochs": 3,
+                "l2": 0.001,
+                "residual_scale": 0.1,
+                "max_train_rows": 100000,
+            },
     )
 
     result = PlanValidator().validate(spec, planner_context, choice=choice)
 
     assert result.accepted, result.errors
+
+
+def test_validator_rejects_omitted_active_campaign_parameter(planner_context):
+    planner_context.research_campaign = {
+        "campaign_id": "adaptive_depth",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 25},
+        "family_method_card_ids": {"objective": ["objective_pairwise_bpr"]},
+        "family_directives": {"objective": "Adapt from prior evidence."},
+    }
+    spec = make_spec(
+        planner_context,
+        campaign_id="adaptive_depth",
+        variant_id="objective_01",
+        variant_instruction="Use deterministic BPR with four negatives.",
+        variant_parameters={"formulation": "bpr", "negative_count": 4},
+    )
+
+    result = PlanValidator().validate(spec, planner_context)
+
+    assert not result.accepted
+    assert "VARIANT_ACTIVE_PARAMETER_MISMATCH" in result.errors
 
 
 def test_validator_allows_policy_authorized_soft_refinement(planner_context):

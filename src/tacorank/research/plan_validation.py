@@ -44,6 +44,9 @@ _VARIANT_BOUNDS = {
     "history_decay_days": (1.0, 180.0, False),
     "history_shrinkage": (0.0, 1000.0, False),
 }
+_VARIANT_LITERALS = {
+    "listwise_strategy": {"full_observed"},
+}
 
 
 def _variant_parameter_errors(family: str, values: Any) -> list[str]:
@@ -57,10 +60,14 @@ def _variant_parameter_errors(family: str, values: Any) -> list[str]:
     errors = []
     if formulation not in allowed_formulations:
         errors.append("VARIANT_FORMULATION_MISMATCH")
-    unknown = set(values) - {"formulation", *_VARIANT_BOUNDS}
+    unknown = set(values) - {"formulation", *_VARIANT_BOUNDS, *_VARIANT_LITERALS}
     if unknown:
         errors.append("UNKNOWN_VARIANT_PARAMETER")
     for key, value in values.items():
+        if key in _VARIANT_LITERALS:
+            if value not in _VARIANT_LITERALS[key]:
+                errors.append("VARIANT_PARAMETER_OUT_OF_RANGE")
+            continue
         if key not in _VARIANT_BOUNDS:
             continue
         lower, upper, integer = _VARIANT_BOUNDS[key]
@@ -416,6 +423,28 @@ class PlanValidator:
                 continue
             eligibility = evaluate_method_card(card, context, family=family)
             errors.extend(eligibility.reasons)
+            active_parameters = {
+                str(item)
+                for item in as_list(get_value(card, "active_parameters", None))
+            }
+            if campaign is not None and active_parameters:
+                supplied_parameters = set(
+                    (get_value(spec, "variant_parameters", None) or {}).keys()
+                )
+                if supplied_parameters != active_parameters:
+                    errors.append("VARIANT_ACTIVE_PARAMETER_MISMATCH")
+                expected_formulation = {
+                    "objective_pairwise_bpr": "bpr",
+                    "objective_listwise_user_softmax": "listwise",
+                    "temporal_history_compact": "temporal_history",
+                }.get(method_id)
+                if expected_formulation is not None and (
+                    (get_value(spec, "variant_parameters", None) or {}).get(
+                        "formulation"
+                    )
+                    != expected_formulation
+                ):
+                    errors.append("VARIANT_METHOD_FORMULATION_MISMATCH")
         source_events = set(map(str, as_list(get_value(context, "source_event_ids", None))))
         if any(not EVENT_ID_PATTERN.fullmatch(event_id) for event_id in source_events):
             errors.append("INVALID_CONTEXT_EVENT_ID")

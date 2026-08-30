@@ -8,7 +8,6 @@
     "objective": 25,
     "temporal_history": 25
   },
-  "proxy_checkpoint_interval": 3,
   "minimum_family_full_evaluations": 5,
   "family_convergence_patience": 4,
   "family_method_card_ids": {
@@ -21,7 +20,7 @@
     ]
   },
   "family_directives": {
-    "objective": "Investigate ranking-objective formulations in depth through the stable trainable scaffold. Select pointwise, bpr, or listwise and adapt only typed configuration parameters from prior confidence intervals and training diagnostics. Prefer a targeted refinement of promising evidence or a falsifying alternative to a failed hypothesis; do not repeat a prior design.",
-    "temporal_history": "Investigate strictly past user-history modeling in depth through the stable trainable scaffold. Select temporal_history and adapt typed history decay, shrinkage, residual scale, capacity, regularization, and optimization parameters from prior confidence intervals and training diagnostics. Prefer a targeted refinement of promising evidence or a falsifying alternative to a failed hypothesis; do not repeat a prior design."
+    "objective": "Investigate only the verified BPR and full-observed-listwise capabilities. Declare every active typed parameter, adapt values from prior confidence intervals and execution-conformance diagnostics, and do not claim an implementation distinction that is absent from the capability contract.",
+    "temporal_history": "Investigate the verified strictly past temporal-history capability. Adapt only its declared active decay, shrinkage, residual-scale, and training-row parameters; do not vary inactive capacity or optimizer knobs."
   }
 }

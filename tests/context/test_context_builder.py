@@ -99,6 +99,7 @@ def test_planner_history_preserves_complete_evaluation_evidence(
     assert context.ensemble_candidate_ids == []
     assert proposed.target_stage == proposed.family
     assert proposed.target_files == ["solution/experiment_config.py"]
+    assert proposed.trial_type.value == "implementation"
     assert [fidelity.value for fidelity in proposed.fidelity_plan] == [
         "smoke",
         "proxy",
@@ -235,12 +236,64 @@ def test_controller_binds_codeblind_proposal_to_coder_contract(
     spec = harness.context_builder.bind_implementation(ResearchProposal(**values))
 
     assert spec.target_stage == "objective"
-    assert spec.target_files == ["solution/experiment_config.py"]
+    assert spec.target_files == ["solution/research_scaffold.py"]
+    assert spec.trial_type.value == "implementation"
     assert [fidelity.value for fidelity in spec.fidelity_plan] == [
         "smoke",
         "proxy",
         "full",
     ]
+
+
+def test_controller_hash_binds_verified_configuration_capability(
+    harness, baseline_evaluation
+):
+    harness.bootstrap(baseline_evaluation)
+    context = harness.context_builder.build_planner(harness.events())
+    parameters = {
+        "formulation": "bpr",
+        "embedding_dim": 16,
+        "learning_rate": 0.01,
+        "epochs": 3,
+        "negative_count": 4,
+        "l2": 0.001,
+        "residual_scale": 0.1,
+        "max_train_rows": 100000,
+    }
+    values = {
+        "run_id": context.run_id,
+        "experiment_id": "exp_001",
+        "parent_experiment_id": "baseline",
+        "parent_commit_sha": harness.config.baseline_commit_sha,
+        "context_id": context.context_id,
+        "hypothesis": "Pairwise ranking may improve within-user ordering.",
+        "family": "objective",
+        "change_summary": "Configure verified pairwise preference learning.",
+        "expected_mechanism": "Improve relative positive-negative ordering.",
+        "success_criteria": "Trusted primary score improves beyond uncertainty.",
+        "falsification_condition": "No stable gain over the parent.",
+        "estimated_cost": CostEstimate(
+            llm_tokens_upper_bound=500,
+            wall_time_seconds_upper_bound=60,
+            gpu_seconds_upper_bound=0,
+            cost_tier="medium",
+        ),
+        "campaign_id": "campaign_1",
+        "variant_id": "objective_01",
+        "variant_instruction": "Use the complete typed BPR configuration.",
+        "variant_parameters": parameters,
+        "method_card_ids": ["objective_pairwise_bpr"],
+        "evidence_event_ids": list(context.source_event_ids),
+    }
+    values["duplicate_key"] = compute_duplicate_key(values)
+
+    spec = harness.context_builder.bind_implementation(ResearchProposal(**values))
+
+    assert spec.target_files == ["solution/experiment_config.py"]
+    assert spec.trial_type.value == "configuration"
+    assert spec.implementation_id == "objective_bpr_v2"
+    assert len(spec.implementation_sha256 or "") == 64
+    assert set(spec.active_parameter_names) == set(parameters)
 
 
 def test_secret_redaction():

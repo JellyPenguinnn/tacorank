@@ -3,13 +3,19 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import random
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from solution.experiment_config import CONFIG
-from solution.research_scaffold import run_experiment, self_test
+from solution.research_scaffold import (
+    _listwise_rows,
+    _pairwise_rows,
+    run_experiment,
+    self_test,
+)
 
 
 def _input_root(tmp_path: Path) -> Path:
@@ -92,3 +98,29 @@ def test_trainable_formulations_are_finite_and_deterministic(
 
 def test_scaffold_gradient_and_negative_sampling_checks() -> None:
     self_test()
+
+
+def test_bpr_negative_count_changes_the_executed_pair_count() -> None:
+    rows = [
+        (("user_id=1",), "1", 1, 1.0),
+        (("user_id=1",), "1", 2, 1.0),
+        (("user_id=1",), "1", 3, 0.0),
+        (("user_id=1",), "1", 4, 0.0),
+    ]
+
+    assert len(_pairwise_rows(rows, random.Random(7), 1)) == 2
+    assert len(_pairwise_rows(rows, random.Random(7), 4)) == 8
+
+
+def test_listwise_uses_one_complete_normalized_list_per_user() -> None:
+    rows = [
+        (("user_id=1",), "1", 1, 1.0),
+        (("user_id=1",), "1", 2, 1.0),
+        (("user_id=1",), "1", 3, 0.0),
+        (("user_id=1",), "1", 4, 0.0),
+        (("user_id=1",), "1", 5, 0.0),
+    ]
+
+    groups = _listwise_rows(rows)
+
+    assert groups == [((0, 1, 2, 3, 4), (0.5, 0.5, 0.0, 0.0, 0.0))]

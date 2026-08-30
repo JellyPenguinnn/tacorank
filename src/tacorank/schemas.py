@@ -181,6 +181,11 @@ class PlannerAction(str, Enum):
     BLOCKED = "blocked"
 
 
+class TrialType(str, Enum):
+    IMPLEMENTATION = "implementation"
+    CONFIGURATION = "configuration"
+
+
 class RunOutcome(str, Enum):
     SUCCESS = "success"
     CODE_ERROR = "code_error"
@@ -241,6 +246,7 @@ class ExperimentDecisionKind(str, Enum):
     ACCEPT = "accept"
     REJECT = "reject"
     PRUNE = "prune"
+    RETAIN = "retain"
     INVALID = "invalid"
 
 
@@ -665,6 +671,10 @@ class ExperimentSpec(ResearchProposal):
     target_stage: NonEmptyStr
     target_files: List[str]
     fidelity_plan: List[Fidelity]
+    trial_type: TrialType = TrialType.IMPLEMENTATION
+    implementation_id: Optional[NonEmptyStr] = None
+    implementation_sha256: Optional[str] = None
+    active_parameter_names: List[NonEmptyStr] = Field(default_factory=list)
 
     @field_validator("target_files")
     @classmethod
@@ -686,6 +696,32 @@ class ExperimentSpec(ResearchProposal):
             if order[current] <= order[previous]:
                 raise ValueError("fidelity_plan must be strictly increasing without duplicates")
         return values
+
+    @field_validator("implementation_sha256")
+    @classmethod
+    def validate_implementation_sha256(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not SHA256_RE.fullmatch(value):
+            raise ValueError("implementation_sha256 must be lowercase sha256")
+        return value
+
+    @field_validator("active_parameter_names")
+    @classmethod
+    def validate_active_parameter_names(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("active_parameter_names must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_trial_assignment(self) -> "ExperimentSpec":
+        if self.trial_type == TrialType.CONFIGURATION and (
+            self.implementation_id is None
+            or self.implementation_sha256 is None
+            or not self.active_parameter_names
+        ):
+            raise ValueError(
+                "configuration trials require a verified implementation assignment"
+            )
+        return self
 
 
 class PlannerOutput(StrictModel):
@@ -1439,6 +1475,8 @@ class PlannerMethodCardSummary(StrictModel):
     expected_effect: NonEmptyStr
     falsifier: NonEmptyStr
     prohibition_conditions: List[NonEmptyStr] = Field(default_factory=list)
+    capability_status: NonEmptyStr = "unverified"
+    active_parameters: List[NonEmptyStr] = Field(default_factory=list)
     implementation_targets: List[str] = Field(default_factory=list)
     source_path: NonEmptyStr
 
@@ -1449,6 +1487,13 @@ class PlannerMethodCardSummary(StrictModel):
         if len(normalized) != len(set(normalized)):
             raise ValueError("implementation_targets must be unique")
         return normalized
+
+    @field_validator("active_parameters")
+    @classmethod
+    def validate_active_parameters(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("active_parameters must be unique")
+        return values
 
 
 class PlannerPlaybookSummary(StrictModel):
@@ -1549,6 +1594,9 @@ class PlannerExperimentSummary(StrictModel):
     variant_parameters: Dict[
         NonEmptyStr, Union[bool, int, float, NonEmptyStr]
     ] = Field(default_factory=dict)
+    trial_type: Optional[TrialType] = None
+    implementation_id: Optional[NonEmptyStr] = None
+    execution_conformant: bool = False
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)

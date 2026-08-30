@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import replace
-import re
 from typing import Deque, Optional, Sequence, Tuple
 
 from ..config import RunConfig, VerifiedContract
@@ -1309,7 +1308,9 @@ class Harness:
                 baseline_score=baseline[self.config.primary_metric_name],
                 parent_score=parent[self.config.primary_metric_name],
                 previous_best_score=best[self.config.primary_metric_name],
-                promote_inconclusive_proxy=self._promote_inconclusive_proxy(spec),
+                # Clean uncertain proxy results are evidence-bearing candidates.
+                # Promotion is based on trust, never the experiment sequence number.
+                promote_inconclusive_proxy=True,
             )
             try:
                 decision = await self.evaluator.decide(evaluation, decision_context)
@@ -1417,24 +1418,6 @@ class Harness:
             return self.state()
 
         return self.state()
-
-    def _promote_inconclusive_proxy(self, spec: ExperimentSpec) -> bool:
-        """Run full fidelity for every Nth uncertain campaign candidate.
-
-        Clearly positive proxy candidates always promote in the decision layer.
-        This flag preserves a periodic full-fidelity checkpoint while screening
-        the other statistically unresolved configurations at proxy fidelity.
-        """
-
-        campaign = self.config.research_campaign
-        if campaign is None or spec.campaign_id != campaign.campaign_id:
-            return True
-        if spec.variant_id is None:
-            return True
-        match = re.search(r"_(\d+)$", spec.variant_id)
-        if match is None:
-            return True
-        return int(match.group(1)) % campaign.proxy_checkpoint_interval == 0
 
     async def run_until_stopped(self) -> object:
         """Run sequential research iterations until a frozen stop rule matches.

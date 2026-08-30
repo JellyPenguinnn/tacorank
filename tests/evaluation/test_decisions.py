@@ -112,6 +112,20 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(decision.reason_code, "PROXY_FAILED")
         self.assertIsNone(decision.next_fidelity)
 
+    def test_proxy_screening_never_depends_on_sequence_slot(self):
+        decision = decide(
+            result(
+                Verdict.INCONCLUSIVE,
+                Stability.NOT_APPLICABLE,
+                fidelity=Fidelity.PROXY,
+                flags=("WITHIN_NOISE",),
+            ),
+            replace(CTX, promote_inconclusive_proxy=False),
+        )
+
+        self.assertEqual(decision.decision, Decision.PROMOTE)
+        self.assertEqual(decision.reason_code, "PROXY_WITHIN_NOISE")
+
     def test_single_seed_requests_confirmation(self):
         decision = decide(result(Verdict.ACCEPTED, Stability.SINGLE_SEED), CTX)
         self.assertEqual(decision.reason_code, "CONFIRMATION_REQUIRED")
@@ -139,6 +153,19 @@ class DecisionTests(unittest.TestCase):
     def test_no_op_requires_recovery_before_decision(self):
         with self.assertRaises(NoOpRecoveryRequired):
             decide(result(Verdict.NO_OP, Stability.NOT_APPLICABLE), CTX)
+
+    def test_confirmed_within_noise_result_is_retained_not_rejected(self):
+        decision = decide(
+            result(
+                Verdict.INCONCLUSIVE,
+                Stability.CONFIRMED,
+                flags=("WITHIN_NOISE",),
+            ),
+            CTX,
+        )
+
+        self.assertEqual(decision.decision, Decision.RETAIN)
+        self.assertEqual(decision.reason_code, "WITHIN_NOISE")
 
     def test_unbiased_audit_never_updates_experiment_state(self):
         audit = replace(

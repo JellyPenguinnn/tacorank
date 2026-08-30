@@ -12,4 +12,5 @@ CONFIG = {
     "max_train_rows": 100000,
     "history_decay_days": 14.0,
     "history_shrinkage": 20.0,
+    "listwise_strategy": "full_observed",
 }

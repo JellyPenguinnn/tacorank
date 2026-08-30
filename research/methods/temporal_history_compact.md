@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"temporal_history_compact","family":"temporal_history","status":"candidate","tags":["sequence","history","temporal"],"cost_tier":"medium","prerequisites":["baseline_parity","strict_temporal_cutoff"],"allowed_data":["train_interactions","date","user_id","video_id","author_id","long_view","verified_predictions"],"prohibition_conditions":["unreliable_event_ordering"],"implementation_targets":["solution/experiment_config.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"temporal_history_compact","family":"temporal_history","status":"candidate","tags":["sequence","history","temporal"],"cost_tier":"medium","prerequisites":["baseline_parity","strict_temporal_cutoff"],"allowed_data":["train_interactions","date","user_id","video_id","author_id","long_view","verified_predictions"],"prohibition_conditions":["unreliable_event_ordering"],"capability_status":"verified","implementation_id":"temporal_history_compact_v1","implementation_targets":["solution/research_scaffold.py"],"configuration_target":"solution/experiment_config.py","active_parameters":["formulation","residual_scale","max_train_rows","history_decay_days","history_shrinkage"],"sources":[]}
 ```
 
 ## Mechanism

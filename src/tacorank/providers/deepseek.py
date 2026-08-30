@@ -52,7 +52,10 @@ history slots it must be temporal_history. Optional typed knobs are embedding_di
 (integer 2..32), learning_rate (1e-5..0.2), epochs (integer 1..8), negative_count
 (integer 1..16), l2 (0..0.1), residual_scale (0..0.5), max_train_rows (integer
 1000..250000), history_decay_days (1..180), and history_shrinkage (0..1000).
-Use only these keys. Adapt them from prior evidence; do not pre-enumerate the campaign.
+Listwise may additionally use listwise_strategy="full_observed". The selected method
+card's active_parameters are authoritative: return exactly those keys, including
+formulation, with no omitted, inherited, inactive, or extra parameter. Adapt numeric
+values from prior evidence; do not pre-enumerate the campaign.
 
 You are intentionally code-blind. Do not name or infer repository paths, source files,
 modules, classes, functions, entrypoints, commands, patches, implementation interfaces,
@@ -72,6 +75,9 @@ authoritative policy block explicitly selects a replacement-capable method.
 Treat family_history as short-term iteration feedback. It deliberately includes
 negative proxy, no-op, inconclusive, redundant, and suspicious outcomes; weight each
 item by its fidelity, population, decision, stability, integrity, and trust flags.
+Treat a claimed variant_parameters intervention as executed research evidence only
+when execution_conformant=true and implementation_id is present. Otherwise classify
+the attempt as an implementation failure, not evidence for or against the hypothesis.
 Treat active_lessons as separately curated long-term memory. Do not promote an item
 from family_history into a durable belief merely because it appears in the context.
 
@@ -270,7 +276,9 @@ def _compact_family_history(values: list[Any]) -> list[Any]:
     failures = [
         item
         for item in reversed(values)
-        if str(get_value(item, "status", "")).lower() in {"invalid", "rejected", "pruned"}
+        if str(get_value(item, "status", "")).lower() in {
+            "invalid", "rejected", "pruned", "retained"
+        }
         or str(get_value(item, "trust_verdict", "")).lower() == "suspicious"
     ][:2]
     selected_ids = {

@@ -144,6 +144,42 @@ def test_campaign_continues_after_quarantining_suspicious_slot(planner_context):
     assert choice.implementation_parent.experiment_id == "exp_0000"
 
 
+def test_campaign_refines_retained_implementation_from_trusted_score_parent(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="depth_test",
+        family_order=["objective"],
+        family_budgets={"objective": 2},
+        family_method_card_ids={"objective": ["objective_pairwise_bpr"]},
+        family_directives={"objective": "Adapt from evidence."},
+    )
+    retained = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="objective",
+        decision="retain",
+        parent_eligible=False,
+        trust_verdict="inconclusive",
+        integrity="clean",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    retained.status = "retained"
+    retained.campaign_id = "depth_test"
+    retained.variant_id = "objective_01"
+    planner_context.family_history = [retained]
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "propose"
+    assert choice.variant_id == "objective_02"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.implementation_parent.experiment_id == "exp_0001"
+    assert choice.implementation_parent.parent_commit_sha == "b" * 40
+
+
 def test_campaign_enumerates_all_fifty_slots_before_exhaustion(planner_context):
     planner_context.contract_summary.allowed_families = [
         "objective",

@@ -183,6 +183,7 @@ def project(events: Iterable[Event]) -> RunState:
                 ExperimentDecisionKind.ACCEPT: ExperimentStatus.ACCEPTED,
                 ExperimentDecisionKind.REJECT: ExperimentStatus.REJECTED,
                 ExperimentDecisionKind.PRUNE: ExperimentStatus.PRUNED,
+                ExperimentDecisionKind.RETAIN: ExperimentStatus.RETAINED,
                 ExperimentDecisionKind.INVALID: ExperimentStatus.INVALID,
                 ExperimentDecisionKind.PROMOTE: ExperimentStatus.READY_TO_RUN,
             }
