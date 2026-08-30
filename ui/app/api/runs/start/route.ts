@@ -68,45 +68,83 @@ export async function POST(request: Request) {
         stop_requested_at: null,
       };
       await writeLaunchRecord(launchRecord);
-      const log = openSync(logPath, 'a');
       let child: ChildProcess;
-      try {
-        const command = windows ? 'powershell.exe' : script;
-        const args = windows
-          ? [
-              '-NoLogo',
-              '-NoProfile',
-              '-NonInteractive',
-              '-ExecutionPolicy',
-              'Bypass',
-              '-File',
-              script,
-              '-RunId',
-              runId,
-              '-DownloadData',
-            ]
-          : [];
-        child = spawn(command, args, {
+      const childEnvironment = {
+        ...process.env,
+        DEEPSEEK_API_KEY: apiKey,
+        PYTHONDONTWRITEBYTECODE: '1',
+        TACORANK_RUN_ID: runId,
+      };
+      if (windows) {
+        // A detached Windows child cannot reliably inherit Node's file handle:
+        // PowerShell exits before the script starts and leaves an empty log.
+        // Let PowerShell own redirection, while keeping all generated paths out
+        // of the fixed command string so they cannot become shell syntax.
+        await fs.writeFile(logPath, '', { encoding: 'utf8', flag: 'a', mode: 0o600 });
+        const powershellCommand = [
+          '$code=0',
+          'try {',
+          '& $env:TACORANK_LAUNCH_SCRIPT -RunId $env:TACORANK_RUN_ID -DownloadData *>&1 | Out-File -LiteralPath $env:TACORANK_LAUNCH_LOG -Append -Encoding utf8',
+          '$code = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }',
+          '} catch {',
+          '($_ | Out-String) | Out-File -LiteralPath $env:TACORANK_LAUNCH_LOG -Append -Encoding utf8',
+          '$code=1',
+          '}',
+          'exit $code',
+        ].join('; ');
+        const encodedCommand = Buffer.from(powershellCommand, 'utf16le').toString('base64');
+        // PowerShell 5 can exit before evaluating an encoded command when a
+        // detached Node child has all three standard handles set to NUL.
+        // cmd.exe supplies valid handles and waits for PowerShell, while the
+        // encoded, fixed command avoids quoting any user-controlled value.
+        child = spawn('cmd.exe', [
+          '/d',
+          '/s',
+          '/c',
+          `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedCommand}`,
+        ], {
           cwd: root,
           detached: true,
           windowsHide: true,
           env: {
-            ...process.env,
-            DEEPSEEK_API_KEY: apiKey,
-            PYTHONDONTWRITEBYTECODE: '1',
-            TACORANK_RUN_ID: runId,
+            ...childEnvironment,
+            TACORANK_LAUNCH_SCRIPT: script,
+            TACORANK_LAUNCH_LOG: logPath,
           },
           shell: false,
-          stdio: ['ignore', log, log],
+          stdio: 'ignore',
         });
+      } else {
+        const log = openSync(logPath, 'a');
+        try {
+          child = spawn(script, [], {
+            cwd: root,
+            detached: true,
+            windowsHide: true,
+            env: childEnvironment,
+            shell: false,
+            stdio: ['ignore', log, log],
+          });
+        } finally {
+          closeSync(log);
+        }
+      }
+      try {
         await new Promise<void>((resolve, reject) => {
           child.once('spawn', resolve);
           child.once('error', reject);
         });
         await writeLaunchRecord({ ...launchRecord, pid: child.pid ?? null });
         child.unref();
-      } finally {
-        closeSync(log);
+      } catch (error) {
+        if (child.pid) {
+          try {
+            process.kill(child.pid);
+          } catch {
+            // The failed child already exited.
+          }
+        }
+        throw error;
       }
       return NextResponse.json({ status: 'started', launch_id: launchId, run_id: runId, pid: child.pid });
     } catch (error) {
