@@ -300,6 +300,9 @@ def test_coder_context_contains_the_real_worker_contract(harness, baseline_evalu
     assert "unconstrained real-valued ranking" in " ".join(
         context.coding_invariants
     )
+    invariants = " ".join(context.coding_invariants)
+    assert "selected Git parent's executable behavior" in invariants
+    assert "not probabilities or non-baseline parent outputs" in invariants
 
 
 def test_coder_context_makes_cited_prior_results_non_optional(

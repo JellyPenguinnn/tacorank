@@ -524,12 +524,28 @@ def _playbook_choice(
                 "OUTPUT_CHECK_REJECTED",
                 "The latest output failed structural or contract validation and must recover.",
             )
-        if rule == "suspicious_or_compromised" and (
-            integrity == "compromised" or verdict == "suspicious"
-        ):
+        if rule == "suspicious_or_compromised" and integrity == "compromised":
             return _blocked(
                 "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
-                "The latest evaluation is suspicious or integrity-compromised.",
+                "The latest evaluation is integrity-compromised and requires "
+                "operator quarantine.",
+            )
+        if rule == "suspicious_or_compromised" and verdict == "suspicious":
+            return _next_independent_choice(
+                context,
+                eligible,
+                allowed,
+                family,
+                reason_code="SUSPICIOUS_RESULT_QUARANTINED",
+                reason=(
+                    "Quarantine the suspicious result as non-reward evidence and "
+                    "continue from a verified eligible parent with an independent "
+                    "method."
+                ),
+            ) or _blocked(
+                "NO_ELIGIBLE_METHOD",
+                "The suspicious result was quarantined and no independent eligible "
+                "method remains.",
             )
         if rule == "no_op" and (
             verdict == "no_op"

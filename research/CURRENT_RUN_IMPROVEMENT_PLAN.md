@@ -90,7 +90,7 @@ Apply these rules from top to bottom. The first matching rule wins.
 | Priority | Evidence condition | Required response | Research branch? |
 | --- | --- | --- | --- |
 | 0 | `output.checked.accepted = false` | Fix or abandon the output/contract failure through recovery. | No |
-| 1 | Trust integrity is `compromised`, or verdict is `suspicious` because of concrete evaluator, alignment, contract, forbidden-input, or output evidence | Quarantine the result; investigate data, evaluator, or leakage. A proxy/full direction change alone is advisory, not an integrity failure. | No |
+| 1 | Trust integrity is `compromised`, or verdict is `suspicious` because of concrete evaluator, alignment, contract, forbidden-input, or output evidence | Quarantine the result so it cannot become reward, parent, refinement, or ensemble evidence. Stop for compromised integrity; otherwise continue from a verified eligible parent with an independent legal method. A proxy/full direction change alone is advisory, not an integrity failure. | From another verified parent only |
 | 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Verify that the patch affected logits, gradients, and intended rows. | No |
 | 3 | Stability is `unstable` | Confirm seeds or simplify/regularize the same mechanism. | No new family |
 | 4 | Fidelity is `smoke` or `proxy` | Promote a clear proxy improvement, or one clean result within the symmetric proxy noise band, to one bounded full-fidelity check. Prune only a regression beyond that band. | No parent promotion |
@@ -110,7 +110,9 @@ A proxy/full direction change is recorded as
 `PROXY_FULL_DIRECTION_CONFLICT`. Because proxy and full use different samples,
 that flag is advisory and seed confirmation continues. Hash, contract,
 alignment, forbidden-input, and output-integrity failures remain quarantine
-conditions.
+conditions. Quarantining an inconclusive suspicious experiment does not exhaust
+the portfolio: the next proposal must backtrack to a verified eligible parent
+and use an independent legal method. Compromised integrity remains fail-closed.
 
 ### Hard prune, soft prune, and portfolio retention
 

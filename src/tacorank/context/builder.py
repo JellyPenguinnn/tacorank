@@ -140,16 +140,12 @@ ContextT = TypeVar("ContextT", bound=ContextDocument)
 
 
 CODER_SCORE_INVARIANTS = (
-    "The setup-verified FM parent scores are unconstrained real-valued ranking "
-    "scores, not probabilities.",
-    "Never apply sigmoid, probability calibration, clipping, min/max clamping, "
-    "normalization, or rescaling to the FM parent or to parent-plus-residual scores.",
-    "For additive experiments, bound only the learned residual and add it on the "
-    "parent's original scale; preserve the exact parent score when no supported "
-    "residual is available.",
-    "Treat prior negative result summaries as implementation constraints: do not "
-    "repeat transformations that collapsed score diversity, parent correlation, "
-    "or within-user rankability.",
+    "Preserve the selected Git parent's executable behavior; setup-verified FM "
+    "scores are original unconstrained real-valued ranking inputs, not "
+    "probabilities or non-baseline parent outputs.",
+    "Never transform the FM parent or parent-plus-residual scores.",
+    "Bound only additive residuals; preserve the exact parent when unsupported.",
+    "Use negative-result summaries to prevent score collapse or lost rankability.",
 )
 
 

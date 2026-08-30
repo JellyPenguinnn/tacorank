@@ -62,6 +62,11 @@ events selected by the deterministic retrieval policy. Hidden-final evaluations 
 neither layer, and `lessons/*.md` remains a generated human-readable projection rather
 than a planner input or source of truth.
 
+Suspicious non-compromised experiments are quarantined as non-reward evidence
+and cannot become parents, refinements, or ensemble members. The search policy
+continues from a verified eligible frontier parent when an independent legal
+method remains. Compromised integrity still fails closed.
+
 ## Experiment lifecycle and gates
 
 ```text

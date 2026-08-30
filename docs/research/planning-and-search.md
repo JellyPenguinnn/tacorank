@@ -46,7 +46,11 @@ from the protected best.
 Proxy/full direction disagreement is advisory rather than an integrity
 failure. The controller records `PROXY_FULL_DIRECTION_CONFLICT` and completes
 seed confirmation. Only concrete evaluator, contract, alignment,
-forbidden-input, or output evidence causes integrity quarantine.
+forbidden-input, or output evidence causes integrity quarantine. A suspicious
+but non-compromised experiment is excluded from reward and all future lineage,
+then search backtracks to a verified eligible parent and an independent legal
+method. Only compromised integrity, or actual exhaustion of legal choices,
+stops the loop at this gate.
 
 ## Search policy
 
@@ -72,6 +76,8 @@ The core policy is deterministic, score-guided AIDE-style depth-first search:
   enter one fixed residual-ensemble test from the trusted parent;
 - severe regressions, rejected outputs, suspicious/compromised results, no-ops,
   unstable results, and invalid/retracted nodes are hard-pruned;
+- hard-pruning a suspicious non-compromised node does not stop search while an
+  independent method remains legal from a verified eligible frontier node;
 - a stateless LinUCB ranker is reconstructed from verified ledger history and
   reorders only the legal choices emitted by these deterministic gates. It
   cannot invent a family, method, parent, refinement, or ensemble component.

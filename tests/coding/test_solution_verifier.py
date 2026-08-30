@@ -86,6 +86,9 @@ def test_deepseek_solution_verifier_accepts_strict_grounded_json() -> None:
     assert captured[0][0] == "https://api.deepseek.com/chat/completions"
     assert captured[0][2]["response_format"] == {"type": "json_object"}
     assert "untrusted evidence" in captured[0][2]["messages"][0]["content"]
+    verifier_prompt = captured[0][2]["messages"][0]["content"]
+    assert "Git ancestry" in verifier_prompt and "not proof" in verifier_prompt
+    assert "loading it alone does not preserve" in verifier_prompt
     assert "never leak secret" not in captured[0][2]["messages"][1]["content"]
     assert "[REDACTED]" in captured[0][2]["messages"][1]["content"]
 

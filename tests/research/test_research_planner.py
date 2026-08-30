@@ -30,7 +30,7 @@ def make_spec(context, choice):
         "context_id": context.context_id,
         "hypothesis": "Pairwise loss aligns training with ranking metrics.",
         "family": choice.family,
-        "change_summary": "Replace pointwise loss with pairwise BPR.",
+        "change_summary": "Add the policy-selected bounded mechanism.",
         "expected_mechanism": "Improve within-user ordering.",
         "success_criteria": type("Criteria", (), {"full_parent_delta_min": 0.002})(),
         "falsification_condition": "No stable improvement.",
@@ -44,7 +44,7 @@ def make_spec(context, choice):
                 "cost_tier": "medium",
             },
         )(),
-        "method_card_ids": ["objective_pairwise_bpr"],
+        "method_card_ids": [choice.method_card_id],
         "evidence_event_ids": ["evt_000001"],
     }.items():
         setattr(spec, name, value)
@@ -120,3 +120,31 @@ def test_guardrail_blocks_never_call_provider(
     assert result["action"] == "blocked"
     assert result["reason_code"] == reason_code
     assert provider.requests == []
+
+
+def test_suspicious_result_is_quarantined_without_stopping_planner(
+    planner_context,
+):
+    planner_context.family_history = [
+        make_summary(
+            "exp_0001",
+            parent_experiment_id="exp_0000",
+            family="objective",
+            parent_eligible=False,
+            trust_verdict="suspicious",
+            integrity="inconclusive",
+            method_card_ids=["objective_pairwise_bpr"],
+        )
+    ]
+    provider = MockResearchProvider(
+        lambda request: make_spec(planner_context, request.policy_choice)
+    )
+    planner = ResearchPlanner(provider, output_factory=output_factory)
+
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result["action"] == "propose"
+    assert result["reason_code"] == "SUSPICIOUS_RESULT_QUARANTINED"
+    assert result["spec"].family == "temporal_history"
+    assert result["spec"].parent_experiment_id == "exp_0000"
+    assert len(provider.requests) == 1

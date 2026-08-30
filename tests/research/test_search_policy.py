@@ -303,6 +303,52 @@ def test_playbook_blocks_unbranchable_results(
     assert choice.reason_code == reason_code
 
 
+def test_playbook_quarantines_suspicious_result_and_continues_independently(
+    planner_context,
+):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="suspicious",
+        integrity="inconclusive",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "SUSPICIOUS_RESULT_QUARANTINED"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.family == "temporal_history"
+    assert choice.method_card_id == "temporal_history_compact"
+
+
+def test_playbook_stops_after_quarantine_only_when_no_independent_method_remains(
+    planner_context,
+):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="suspicious",
+        integrity="inconclusive",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    context = context_with_latest(
+        planner_context,
+        latest,
+        allowed_families=["objective"],
+    )
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.action == "blocked"
+    assert choice.reason_code == "NO_ELIGIBLE_METHOD"
+
+
 def test_playbook_branches_after_terminal_proxy_prune(planner_context):
     latest = make_summary(
         "exp_0001",

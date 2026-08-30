@@ -180,6 +180,8 @@ def test_coding_prompt_is_exact_bounded_and_credential_free() -> None:
     assert "do not list the repository root" in prompt
     assert "controller-owned post-patch checks" in prompt
     assert "unconstrained real-valued ranking scores" in prompt
+    assert "parent_commit_sha as the executable research parent" in prompt
+    assert "does not preserve inherited parent behavior" in prompt
     assert '"parent_delta": -0.04' in prompt
     assert '"spearman_vs_fm_baseline": 0.67' in prompt
     assert "then call task_done" in prompt
