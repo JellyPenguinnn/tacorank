@@ -2,6 +2,7 @@
 
 from .resources import ResourceSummary, aggregate_resources
 from .results import (
+    experiment_timing,
     rebuild_operational_state,
     rebuild_views,
     render_evaluation_summary,
@@ -10,11 +11,13 @@ from .results import (
     render_resources,
     render_status,
     render_summary,
+    runtime_status,
 )
 
 __all__ = [
     "ResourceSummary",
     "aggregate_resources",
+    "experiment_timing",
     "rebuild_operational_state",
     "rebuild_views",
     "render_evaluation_summary",
@@ -23,4 +26,5 @@ __all__ = [
     "render_resources",
     "render_status",
     "render_summary",
+    "runtime_status",
 ]

@@ -7,11 +7,12 @@ from tacorank.research.search_policy import PolicyChoice, SearchPolicy
 from .conftest import make_summary
 
 
-def test_policy_probes_untried_high_value_family_from_baseline(planner_context):
+def test_policy_starts_score_guided_depth_first_from_baseline(planner_context):
     choice = SearchPolicy().choose(planner_context)
 
     assert choice.action == "propose"
-    assert choice.phase == "breadth"
+    assert choice.phase == "depth"
+    assert choice.reason_code == "SCORE_GUIDED_DEPTH_FIRST"
     assert choice.family == "objective"
     assert choice.parent.experiment_id == "exp_0000"
     assert choice.method_card_id == "objective_pairwise_bpr"
@@ -96,6 +97,118 @@ def test_policy_returns_to_trusted_frontier_with_family_diversity(planner_contex
     assert choice.phase == "depth"
     assert choice.parent.experiment_id == "exp_0001"
     assert choice.family == "ensemble"
+
+
+def test_policy_deepens_best_branch_before_untried_baseline_family(planner_context):
+    root = make_summary("exp_0000", score=0.5946)
+    best = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="objective",
+        score=0.61,
+        parent_eligible=True,
+        parent_delta=None,
+    )
+    contract = SimpleNamespace(**vars(planner_context.contract_summary))
+    contract.allowed_families = ["model"]
+    context = SimpleNamespace(
+        contract_summary=contract,
+        baseline=root,
+        current_best=best,
+        eligible_frontier=[root, best],
+        family_history=[best],
+        method_cards=planner_context.method_cards,
+        playbook=planner_context.playbook,
+    )
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.reason_code == "SCORE_GUIDED_DEPTH_FIRST"
+    assert choice.parent.experiment_id == "exp_0001"
+    assert choice.family == "model"
+
+
+def test_policy_prefers_deeper_branch_when_trusted_scores_tie(planner_context):
+    root = make_summary("exp_0000", score=0.61)
+    child = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="objective",
+        score=0.61,
+        parent_eligible=True,
+        parent_delta=None,
+    )
+    grandchild = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0001",
+        commit_sha="c" * 40,
+        family="objective",
+        score=0.61,
+        parent_eligible=True,
+        parent_delta=None,
+    )
+    contract = SimpleNamespace(**vars(planner_context.contract_summary))
+    contract.allowed_families = ["model"]
+    context = SimpleNamespace(
+        contract_summary=contract,
+        baseline=root,
+        current_best=grandchild,
+        eligible_frontier=[root, child, grandchild],
+        family_history=[child, grandchild],
+        method_cards=planner_context.method_cards,
+        playbook=planner_context.playbook,
+    )
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.parent.experiment_id == "exp_0002"
+
+
+def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
+    root = make_summary("exp_0000", score=0.5946)
+    best = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="objective",
+        score=0.61,
+        parent_eligible=True,
+        parent_delta=None,
+    )
+    pairwise = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0001",
+        family="objective",
+        parent_eligible=False,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    listwise = make_summary(
+        "exp_0003",
+        parent_experiment_id="exp_0001",
+        family="objective",
+        parent_eligible=False,
+        parent_delta=None,
+        method_card_ids=["objective_listwise_user_softmax"],
+    )
+    contract = SimpleNamespace(**vars(planner_context.contract_summary))
+    contract.allowed_families = ["objective"]
+    context = SimpleNamespace(
+        contract_summary=contract,
+        baseline=root,
+        current_best=best,
+        eligible_frontier=[root, best],
+        family_history=[best, pairwise, listwise],
+        method_cards=planner_context.method_cards,
+        playbook=planner_context.playbook,
+    )
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.reason_code == "SCORE_GUIDED_DEPTH_FIRST"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.method_card_id == "objective_pairwise_bpr"
 
 
 def test_playbook_routes_pairwise_gauc_up_ndcg_down_to_objective(planner_context):
@@ -547,6 +660,61 @@ def test_playbook_moves_meaningful_pairwise_no_gain_to_history(planner_context):
     assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
     assert choice.family == "temporal_history"
     assert choice.method_card_id == "temporal_history_compact"
+
+
+def test_directionally_positive_parent_prevents_premature_search_stop(
+    planner_context,
+):
+    latest = make_summary(
+        "exp_0006",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        score=0.6022787269104787,
+        parent_eligible=True,
+        parent_delta=0.0008099705575197,
+        prediction_change=0.95,
+        method_card_ids=["objective_listwise_user_softmax"],
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
+    assert choice.parent.experiment_id == "exp_0006"
+    assert choice.family != "objective"
+
+
+def test_near_best_exploratory_parent_continues_depth_first(planner_context):
+    root = make_summary("exp_0000", score=0.601468756352959)
+    exploratory = make_summary(
+        "exp_0003",
+        parent_experiment_id="exp_0000",
+        family="duration_bias",
+        score=0.6014212941699442,
+        decision="accept",
+        parent_eligible=True,
+        trust_verdict="inconclusive",
+        stability="confirmed",
+        parent_delta=-0.0000474621830148,
+        prediction_change=0.8,
+        method_card_ids=["duration_bias_censored_watch_time"],
+    )
+    context = SimpleNamespace(
+        contract_summary=SimpleNamespace(**vars(planner_context.contract_summary)),
+        baseline=root,
+        current_best=root,
+        eligible_frontier=[root, exploratory],
+        family_history=[exploratory],
+        method_cards=planner_context.method_cards,
+        playbook=planner_context.playbook,
+    )
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "MEANINGFUL_CHANGE_NO_GAIN"
+    assert choice.parent.experiment_id == "exp_0003"
+    assert choice.family != "duration_bias"
 
 
 def test_playbook_deepens_trusted_improvement(planner_context):

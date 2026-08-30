@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -22,7 +23,7 @@ from .memory.replay import replay
 from .orchestrator.router import Harness
 from .orchestrator.state_machine import validator
 from .providers import DeepSeekResearchProvider, ProviderError
-from .reporting import rebuild_views
+from .reporting import rebuild_views, runtime_status
 from .research.eda import PlannerEdaToolbox
 from .run_layout import RunLayout
 from .schemas import EvaluationResult
@@ -39,12 +40,36 @@ def _store(root: Path, run_id: str) -> EventStore:
     )
 
 
-def _status_dict(state) -> dict:
+def _status_dict(events) -> dict:
+    state = project(events)
+    runtime = runtime_status(events)
+    observed_at = datetime.now(timezone.utc)
+
+    def elapsed_since(value):
+        if value is None:
+            return None
+        started = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return max(0.0, (observed_at - started).total_seconds())
+
     return {
         "run_id": state.run_id,
         "status": state.status.value,
         "phase": state.phase,
+        "current_experiment_id": runtime["experiment_id"],
+        "current_attempt": runtime["attempt"],
+        "current_fidelity": runtime["fidelity"],
+        "stage_started_at": runtime["stage_started_at"],
+        "stage_elapsed_seconds_at_ledger_head": runtime[
+            "stage_elapsed_seconds_at_ledger_head"
+        ],
+        "stage_elapsed_seconds": elapsed_since(runtime["stage_started_at"]),
+        "configured_timeout_seconds": runtime["configured_timeout_seconds"],
+        "estimated_deadline": runtime["estimated_deadline"],
         "last_event_id": state.last_event_id,
+        "last_event_type": runtime["last_event_type"],
+        "last_event_at": runtime["last_event_at"],
+        "last_event_age_seconds": elapsed_since(runtime["last_event_at"]),
+        "status_observed_at": observed_at.isoformat().replace("+00:00", "Z"),
         "best_experiment_id": state.best_experiment_id,
         "best_primary_score": state.best_primary_score,
         "experiments_proposed": state.experiments_proposed,
@@ -345,7 +370,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 RunLayout(config.repository_root, config.run_id).run_directory,
                 events,
             )
-            print(json.dumps(_status_dict(project(events)), sort_keys=True))
+            print(json.dumps(_status_dict(events), sort_keys=True))
             return 0
 
         root = args.repository_root.resolve()
@@ -358,7 +383,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             replay(events, artifact_store=store.artifact_store)
             print("valid: %d events, head=%s" % (len(events), state.last_event_hash))
         elif args.command == "status":
-            print(json.dumps(_status_dict(state), sort_keys=True))
+            print(json.dumps(_status_dict(events), sort_keys=True))
         elif args.command == "rebuild-views":
             rebuild_views(RunLayout(root, args.run_id).run_directory, events)
             print("rebuilt derived views for %s" % args.run_id)

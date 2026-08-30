@@ -28,7 +28,9 @@ class TrustConfig:
     gain_concentration_threshold: float = 0.70
     drift_slope_threshold: float = 0.002
     validation_arm_gap_threshold: float = 0.006
-    proxy_improvement_threshold: float = 0.0
+    # Proxy deltas below this magnitude are not reliable enough to prune or to
+    # claim an improvement.  They receive one bounded full-fidelity check.
+    proxy_improvement_threshold: float = 0.0016
     require_non_decreasing_metrics: bool = False
     no_op: NoOpConfig = field(default_factory=NoOpConfig)
 
@@ -110,15 +112,6 @@ def assess_trust(
         )
     if (
         evidence.parent_delta > 0
-        and evidence.internal_proxy_delta is not None
-        and evidence.internal_proxy_delta < 0
-    ):
-        return _assessment(
-            Verdict.SUSPICIOUS, Stability.NOT_APPLICABLE,
-            Integrity.INCONCLUSIVE, ["PROXY_FULL_SIGN_CONFLICT"], aggregate
-        )
-    if (
-        evidence.parent_delta > 0
         and evidence.unbiased_audit_delta is not None
         and evidence.unbiased_audit_delta <= 0
     ):
@@ -147,12 +140,13 @@ def assess_trust(
             Integrity.CLEAN, directional_flags, aggregate
         )
     if evidence.population == Population.INTERNAL_PROXY or evidence.fidelity == Fidelity.PROXY:
-        if evidence.parent_delta > cfg.proxy_improvement_threshold:
+        proxy_noise_tolerance = cfg.proxy_improvement_threshold
+        if evidence.parent_delta > proxy_noise_tolerance:
             return _assessment(
                 Verdict.ACCEPTED, Stability.NOT_APPLICABLE,
                 Integrity.CLEAN, directional_flags, aggregate
             )
-        if evidence.parent_delta <= 0:
+        if evidence.parent_delta < -proxy_noise_tolerance:
             return _assessment(
                 Verdict.NEGATIVE, Stability.NOT_APPLICABLE,
                 Integrity.CLEAN, directional_flags, aggregate
@@ -174,6 +168,15 @@ def assess_trust(
         )
     aggregate_delta = aggregate.mean - evidence.parent_primary
     if abs(aggregate_delta) <= aggregate.eta:
+        directional_threshold = max(2.0 * aggregate.standard_error, 1e-12)
+        if aggregate_delta > directional_threshold:
+            return _assessment(
+                Verdict.ACCEPTED,
+                Stability.CONFIRMED,
+                Integrity.CLEAN,
+                ["CONFIRMED_POSITIVE_BELOW_LADDER"] + directional_flags,
+                aggregate,
+            )
         return _assessment(
             Verdict.INCONCLUSIVE, Stability.CONFIRMED,
             Integrity.CLEAN, ["WITHIN_NOISE"] + directional_flags, aggregate
@@ -191,6 +194,13 @@ def assess_trust(
 
 def _directional_flags(evidence: TrustEvidence, config: TrustConfig) -> list:
     flags = []
+    if (
+        evidence.internal_proxy_delta is not None
+        and evidence.parent_delta * evidence.internal_proxy_delta < 0
+    ):
+        # Proxy and full use different samples.  A sign change is useful
+        # generalization evidence, but is not an integrity failure by itself.
+        flags.append("PROXY_FULL_DIRECTION_CONFLICT")
     deltas = list(evidence.metric_deltas.values())
     if deltas and min(deltas) < 0 < max(deltas):
         flags.append("METRIC_DIRECTION_CONFLICT")

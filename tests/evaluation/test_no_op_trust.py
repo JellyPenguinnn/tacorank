@@ -2,7 +2,13 @@ import unittest
 
 from tacorank.evaluation.no_op import NoOpConfig, analyze_prediction_change, is_no_op
 from tacorank.evaluation.trust import TrustConfig, TrustEvidence, assess_trust
-from tacorank.evaluation.types import Fidelity, Population, Stability, Verdict
+from tacorank.evaluation.types import (
+    Fidelity,
+    Integrity,
+    Population,
+    Stability,
+    Verdict,
+)
 
 
 def evidence(change, parent_delta=0.0, **overrides):
@@ -45,7 +51,7 @@ class NoOpTrustTests(unittest.TestCase):
             evidence(
                 change,
                 parent_delta=0.0005,
-                seed_scores=(0.6003, 0.6005, 0.6004),
+                seed_scores=(0.5998, 0.6004, 0.6001),
             )
         )
         self.assertEqual(within.verdict, Verdict.INCONCLUSIVE)
@@ -57,6 +63,68 @@ class NoOpTrustTests(unittest.TestCase):
             )
         )
         self.assertEqual(negative.verdict, Verdict.NEGATIVE)
+
+    def test_confirmed_directional_gain_below_ladder_is_trusted_for_search(self):
+        change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
+        trust = assess_trust(
+            evidence(
+                change,
+                parent_delta=0.00083,
+                parent_primary=0.601468756352959,
+                seed_scores=(
+                    0.6022655471814293,
+                    0.6022722994862122,
+                    0.6022983340637944,
+                ),
+            )
+        )
+
+        self.assertEqual(trust.verdict, Verdict.ACCEPTED)
+        self.assertEqual(trust.stability, Stability.CONFIRMED)
+        self.assertIn("CONFIRMED_POSITIVE_BELOW_LADDER", trust.flags)
+        self.assertLess(trust.seed_mean - 0.601468756352959, trust.eta_applied)
+
+    def test_proxy_uses_symmetric_noise_band_before_pruning(self):
+        change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
+        proxy = {
+            "population": Population.INTERNAL_PROXY,
+            "fidelity": Fidelity.PROXY,
+            "seed_scores": (0.60,),
+        }
+
+        positive = assess_trust(evidence(change, parent_delta=0.002, **proxy))
+        near_positive = assess_trust(
+            evidence(change, parent_delta=0.0001, **proxy)
+        )
+        near_negative = assess_trust(
+            evidence(change, parent_delta=-0.0001, **proxy)
+        )
+        negative = assess_trust(evidence(change, parent_delta=-0.002, **proxy))
+
+        self.assertEqual(positive.verdict, Verdict.ACCEPTED)
+        self.assertEqual(near_positive.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("WITHIN_NOISE", near_positive.flags)
+        self.assertEqual(near_negative.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("WITHIN_NOISE", near_negative.flags)
+        self.assertEqual(negative.verdict, Verdict.NEGATIVE)
+
+    def test_proxy_full_direction_conflict_is_advisory_during_confirmation(self):
+        change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
+        trust = assess_trust(
+            evidence(
+                change,
+                parent_primary=0.601468756352959,
+                parent_delta=0.00007795016284650735,
+                seed_scores=(0.6015467065158056,),
+                internal_proxy_delta=-0.0006046776713612978,
+            )
+        )
+
+        self.assertEqual(trust.verdict, Verdict.ACCEPTED)
+        self.assertEqual(trust.stability, Stability.SINGLE_SEED)
+        self.assertEqual(trust.integrity, Integrity.CLEAN)
+        self.assertIn("PROXY_FULL_DIRECTION_CONFLICT", trust.flags)
+        self.assertNotIn("PROXY_FULL_SIGN_CONFLICT", trust.flags)
 
     def test_cross_population_and_metric_conflicts_are_visible(self):
         change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])

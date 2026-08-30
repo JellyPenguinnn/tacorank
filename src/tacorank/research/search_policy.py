@@ -1,4 +1,4 @@
-"""Deterministic, playbook-driven AIDE search policy."""
+"""Deterministic, playbook-driven, score-guided depth-first search policy."""
 
 from __future__ import annotations
 
@@ -190,7 +190,7 @@ def _method_for_family(
     }
     if preferred is None:
         # This card requires an explicit secondary component chosen by the
-        # soft-portfolio route. Generic breadth/depth proposals have no such
+        # soft-portfolio route. Generic depth-first proposals have no such
         # component contract and must not select it.
         eligible.pop("ensemble_diverse_residual_candidate", None)
     attempted = {
@@ -260,6 +260,31 @@ def _best_parent(eligible: Sequence[ExperimentNodeView]) -> ExperimentNodeView:
     )[0]
 
 
+def _depth_first_frontier(
+    graph: GraphView,
+    eligible: Sequence[ExperimentNodeView],
+    limit: int,
+) -> tuple[ExperimentNodeView, ...]:
+    """Rank trusted branches by score, then depth, for deterministic backtracking."""
+
+    # The first sort supplies the stable tie-break for equal score and depth:
+    # the newest experiment ID stays at the front, matching stack-like DFS.
+    newest_first = sorted(
+        eligible,
+        key=lambda node: node.experiment_id,
+        reverse=True,
+    )
+    ranked = sorted(
+        newest_first,
+        key=lambda node: (
+            _score(node),
+            len(graph.ancestors_of(node.experiment_id)),
+        ),
+        reverse=True,
+    )
+    return tuple(ranked[:limit])
+
+
 def _latest_parent(
     latest: Any, eligible: Sequence[ExperimentNodeView]
 ) -> ExperimentNodeView:
@@ -278,6 +303,7 @@ def _next_independent_choice(
     *,
     reason_code: str,
     reason: str,
+    preferred_parent: ExperimentNodeView | None = None,
 ) -> PolicyChoice | None:
     choices = _independent_choices(
         context,
@@ -286,6 +312,7 @@ def _next_independent_choice(
         latest_family,
         reason_code=reason_code,
         reason=reason,
+        preferred_parent=preferred_parent,
     )
     return choices[0] if choices else None
 
@@ -298,11 +325,12 @@ def _independent_choices(
     *,
     reason_code: str,
     reason: str,
+    preferred_parent: ExperimentNodeView | None = None,
 ) -> tuple[PolicyChoice, ...]:
     """Return every legal independent-family action in deterministic order."""
 
     tried = set(_family_history(context))
-    parent = _best_parent(eligible)
+    parent = preferred_parent or _best_parent(eligible)
     ordered = [
         family
         for family in _family_order(context)
@@ -577,6 +605,7 @@ def _playbook_choice(
     prediction_change = _number(get_value(latest, "prediction_change", None))
     parent_delta = _number(get_value(latest, "parent_delta", None))
     decision = _normalized(get_value(latest, "decision", None))
+    parent_eligible = bool(get_value(latest, "parent_eligible", False))
     gauc_delta = _metric_delta(latest, "gauc")
     ndcg_delta = _metric_delta(latest, "ndcg@5", "ndcg")
     family = str(get_value(latest, "family", ""))
@@ -585,12 +614,19 @@ def _playbook_choice(
         str(item) for item in as_list(get_value(latest, "method_card_ids", None))
     }
     is_pairwise = "objective_pairwise_bpr" in method_ids
+    exploratory_full_public = (
+        verdict == "inconclusive"
+        and stability == "confirmed"
+        and decision in {"accept", "accepted"}
+        and parent_eligible
+    )
     clean_full_public = (
-        verdict in {"accepted", "verified"}
+        (verdict in {"accepted", "verified"} or exploratory_full_public)
         and integrity == "clean"
         and fidelity == "full"
         and population == "public_validation"
         and output_accepted is True
+        and stability in {"single_seed", "confirmed", "not_applicable"}
         and prediction_change is not None
     )
     parent = _latest_parent(latest, eligible)
@@ -635,13 +671,7 @@ def _playbook_choice(
                 "The latest result requires seed confirmation before branching.",
             )
         if rule == "non_public_or_incomplete" and (
-            output_accepted is not True
-            or fidelity != "full"
-            or population != "public_validation"
-            or verdict not in {"accepted", "verified"}
-            or integrity != "clean"
-            or stability not in {"single_seed", "confirmed", "not_applicable"}
-            or prediction_change is None
+            not clean_full_public
         ):
             terminal_clean_full = (
                 output_accepted is True
@@ -766,13 +796,14 @@ def _playbook_choice(
             and prediction_change is not None
             and prediction_change > no_op_threshold
         ):
+            exploration_parent = _latest_parent(latest, eligible)
             preferred = (
                 "temporal_history_compact" if is_pairwise else None
             )
             if preferred and "temporal_history" in allowed:
                 return _required_method_choice(
                     context,
-                    _best_parent(eligible),
+                    exploration_parent,
                     "temporal_history",
                     preferred,
                     reason_code="MEANINGFUL_CHANGE_NO_GAIN",
@@ -785,6 +816,7 @@ def _playbook_choice(
                 family,
                 reason_code="MEANINGFUL_CHANGE_NO_GAIN",
                 reason="Predictions changed without trusted gain; move to the next independent mechanism.",
+                preferred_parent=exploration_parent,
             ) or _blocked("NO_ELIGIBLE_METHOD", "No independent eligible method remains.")
         if (
             rule == "trusted_improvement"
@@ -906,63 +938,40 @@ class SearchPolicy:
         if routed is not None:
             return routed
 
-        tried = set(history)
-        baseline = next((node for node in eligible if node.is_root), None)
-        breadth_parent = baseline or min(eligible, key=lambda node: node.experiment_id)
-        breadth: list[PolicyChoice] = []
-        for family in allowed:
-            if family in tried:
-                continue
-            card = _method_for_family(
-                context,
-                family,
-                parent_experiment_id=breadth_parent.experiment_id,
-            )
-            if card is None:
-                continue
-            breadth.append(
-                _proposal(
-                    parent=breadth_parent,
-                    family=family,
-                    card=card,
-                    phase="breadth",
-                    reason_code="BREADTH_FAMILY_PROBE",
-                    reason="Probe untried method %s in family %s from %s."
-                    % (get_value(card, "method_id", ""), family, breadth_parent.experiment_id),
-                )
-            )
-        if breadth:
-            return self._rank(breadth, context)
-
-        frontier = sorted(
-            eligible,
-            key=lambda node: (-_score(node), node.child_count, node.experiment_id),
-        )[: self.frontier_limit]
-        parent = frontier[0]
+        frontier = _depth_first_frontier(graph, eligible, self.frontier_limit)
         recent = set(history[-2:])
-        depth: list[PolicyChoice] = []
-        for family in allowed:
-            card = _method_for_family(
-                context,
-                family,
-                parent_experiment_id=parent.experiment_id,
-            )
-            if card is None:
-                continue
-            depth.append(
-                _proposal(
-                    parent=parent,
-                    family=family,
-                    card=card,
-                    phase="depth",
-                    reason_code="EVIDENCE_GUIDED_DEPTH",
-                    reason="Select %s using trusted score and legal method %s."
-                    % (parent.experiment_id, get_value(card, "method_id", "")),
+        for parent in frontier:
+            depth: list[PolicyChoice] = []
+            for family in allowed:
+                card = _method_for_family(
+                    context,
+                    family,
+                    parent_experiment_id=parent.experiment_id,
+                )
+                if card is None:
+                    continue
+                depth.append(
+                    _proposal(
+                        parent=parent,
+                        family=family,
+                        card=card,
+                        phase="depth",
+                        reason_code="SCORE_GUIDED_DEPTH_FIRST",
+                        reason=(
+                            "Continue depth-first from trusted branch %s using legal "
+                            "method %s; backtrack only after this branch is exhausted."
+                            % (parent.experiment_id, get_value(card, "method_id", ""))
+                        ),
+                    )
+                )
+            depth.sort(
+                key=lambda choice: (
+                    choice.family in recent,
+                    allowed.index(choice.family),
                 )
             )
-        depth.sort(key=lambda choice: (choice.family in recent, allowed.index(choice.family)))
-        if depth:
-            return self._rank(depth, context)
+            if depth:
+                return self._rank(depth, context)
         return _blocked(
             "NO_ELIGIBLE_METHOD",
             "No candidate method satisfies status, data, prerequisite, prohibition and family gates.",

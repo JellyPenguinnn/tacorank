@@ -5,6 +5,8 @@
 **Primary task:** within-user ranking of `long_view`
 **Primary score:** contract-defined mean of GAUC and nDCG@5
 **Core rule:** one experiment changes one research mechanism.
+**Traversal:** score-guided depth-first search; deepen the best trusted branch
+before backtracking, rather than probing every research family from baseline.
 
 ```json
 {
@@ -88,17 +90,27 @@ Apply these rules from top to bottom. The first matching rule wins.
 | Priority | Evidence condition | Required response | Research branch? |
 | --- | --- | --- | --- |
 | 0 | `output.checked.accepted = false` | Fix or abandon the output/contract failure through recovery. | No |
-| 1 | Trust integrity is `compromised`, or verdict is `suspicious` | Quarantine the result; investigate data, evaluator, or leakage. | No |
-| 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Give Trae one scoped 20-step wiring-repair action and rerun the same fidelity after Gate A. If predictions remain identical, record a neutral terminal `no_op` and return the evidence to the legal-choice ranker; do not emit a controller prune decision. The ranker selects either one modified same-mechanism plan from the trusted parent or an independent mechanism. | Trusted parent only |
+| 1 | Trust integrity is `compromised`, or verdict is `suspicious` because of concrete evaluator, alignment, contract, forbidden-input, or output evidence | Quarantine the result; investigate data, evaluator, or leakage. A proxy/full direction change alone is advisory, not an integrity failure. | No |
+| 2 | Verdict is `no_op`, or prediction change is below the contract's no-op threshold | Verify that the patch affected logits, gradients, and intended rows. Give Trae one scoped 20-step wiring-repair action and rerun the same fidelity after Gate A. If predictions remain identical, record a neutral terminal `no_op` and return the evidence to the legal-choice ranker; do not emit a controller prune decision. The ranker selects either one modified same-mechanism plan from the trusted parent or an independent mechanism. | Trusted parent only |
 | 3 | Stability is `unstable` | Confirm seeds or simplify/regularize the same mechanism. | No new family |
-| 4 | Fidelity is `smoke` or `proxy` | Promote only if deterministic promotion rules pass. | No parent promotion |
+| 4 | Fidelity is `smoke` or `proxy` | Promote a clear proxy improvement, or one clean result within the symmetric proxy noise band, to one bounded full-fidelity check. Prune only a regression beyond that band. | No parent promotion |
 | 5 | Full public result is trusted and improves the parent by more than `epsilon` | Accept; confirm once if stability is only `single_seed`, then deepen the same family. | Yes |
-| 6 | Full public result changes predictions meaningfully but gain is within `[-epsilon, +epsilon]` | Treat as inconclusive/noise; record the result and move to the next independent mechanism. | Yes |
+| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, and remains within `eta` of the current validation best | Retain it as an exploratory research parent, keep `best_eligible = false`, and continue DFS from that node with a legal independent mechanism. | Yes, exploratory |
 | 7 | Full public result is trusted and worse than `-epsilon` | Treat the tested mechanism as falsified under its stated conditions; do not tune it indefinitely. | Yes |
 
-Only a full, verified, public-validation result with `trust.verdict = accepted`
-and `trust.integrity = clean` may create a future parent. A positive proxy score
-can justify more evaluation, but never a new trusted branch.
+Only a full, verified, clean, seed-confirmed public-validation result may create
+a future parent. Accepted results are trusted parents. An inconclusive result
+may be an explicitly marked exploratory parent only while its confirmed mean
+remains within `eta` of the current validation best. A proxy result can justify
+full evaluation but never becomes a parent by itself. Exploratory parents keep
+`best_eligible = false`; only the full Ladder threshold can update validation
+best.
+
+A proxy/full direction change is recorded as
+`PROXY_FULL_DIRECTION_CONFLICT`. Because proxy and full use different samples,
+that flag is advisory and seed confirmation continues. Hash, contract,
+alignment, forbidden-input, and output-integrity failures remain quarantine
+conditions.
 
 ### Hard prune, soft prune, and portfolio retention
 
@@ -158,8 +170,11 @@ Recommended cohorts:
 ## 4. Direction priority for this run
 
 The default order is expected-value per unit cost, not an instruction to try
-every item. Skip any direction whose prerequisites fail or whose estimated
-cost does not fit the remaining budget.
+every item. Once a direction creates the best trusted parent, continue research
+from that branch until its legal methods are exhausted or verified evidence
+falsifies it. Only then backtrack to the next trusted branch or independent
+direction. Skip any direction whose prerequisites fail or whose estimated cost
+does not fit the remaining budget.
 
 ### Direction 0 — baseline and evaluator parity
 

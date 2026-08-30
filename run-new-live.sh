@@ -8,6 +8,7 @@
 # Optional environment:
 #   TACORANK_PYTHON312  Absolute path to Python 3.12.
 #   TACORANK_DOCKER     Absolute path to the Docker executable.
+#   TACORANK_RUN_ID     New run identity reserved by a trusted launcher.
 
 set -eu
 
@@ -104,10 +105,21 @@ docker_executable=${TACORANK_DOCKER:-}
 if [ -z "$docker_executable" ]; then
     docker_executable=$(command -v docker 2>/dev/null || true)
 fi
+if [ -z "$docker_executable" ] && [ -x "/Applications/Docker.app/Contents/Resources/bin/docker" ]; then
+    docker_executable="/Applications/Docker.app/Contents/Resources/bin/docker"
+fi
 if [ -z "$docker_executable" ] && [ -x "/Applications/Rancher Desktop.app/Contents/Resources/resources/darwin/bin/docker" ]; then
     docker_executable="/Applications/Rancher Desktop.app/Contents/Resources/resources/darwin/bin/docker"
 fi
 [ -n "$docker_executable" ] || die "Docker was not found; set TACORANK_DOCKER"
+
+# Docker Desktop resolves its credential helper by name. Preserve the user's
+# PATH while ensuring helpers beside the selected Docker executable are visible.
+docker_bin_dir=$(dirname "$docker_executable")
+case ":$PATH:" in
+    *":$docker_bin_dir:"*) ;;
+    *) PATH="$docker_bin_dir:$PATH"; export PATH ;;
+esac
 
 mkdir -p "$repo_root/.tacorank"
 lock_dir="$repo_root/.tacorank/live-run.lock"
@@ -128,21 +140,40 @@ trap 'exit 1' 1 2 3 15
 printf '%s\n' "$$" > "$lock_dir/pid"
 
 stamp=$(date -u '+%Y%m%dT%H%M%SZ')
-counter=0
-while :; do
-    if [ "$counter" -eq 0 ]; then
-        run_id="run_${stamp}_$$"
-    else
-        run_id="run_${stamp}_$$_${counter}"
-    fi
+requested_run_id=${TACORANK_RUN_ID:-}
+if [ -n "$requested_run_id" ]; then
+    case "$requested_run_id" in
+        [A-Za-z0-9]*) ;;
+        *) die "TACORANK_RUN_ID must start with an alphanumeric character" ;;
+    esac
+    case "$requested_run_id" in
+        *[!A-Za-z0-9._-]*|'') die "TACORANK_RUN_ID is invalid" ;;
+    esac
+    [ "${#requested_run_id}" -le 128 ] || die "TACORANK_RUN_ID is too long"
+    run_id=$requested_run_id
     deployment_dir="$repo_root/.tacorank/deployments/$run_id"
     runtime_dir="$(dirname "$repo_root")/.tacorank-runtime/$(basename "$repo_root")-$run_id"
     run_dir="$repo_root/runs/$run_id"
-    if [ ! -e "$deployment_dir" ] && [ ! -e "$runtime_dir" ] && [ ! -e "$run_dir" ]; then
-        break
-    fi
-    counter=$((counter + 1))
-done
+    [ ! -e "$deployment_dir" ] || die "deployment directory already exists for $run_id"
+    [ ! -e "$runtime_dir" ] || die "runtime directory already exists for $run_id"
+    [ ! -e "$run_dir" ] || die "run directory already exists for $run_id"
+else
+    counter=0
+    while :; do
+        if [ "$counter" -eq 0 ]; then
+            run_id="run_${stamp}_$$"
+        else
+            run_id="run_${stamp}_$$_${counter}"
+        fi
+        deployment_dir="$repo_root/.tacorank/deployments/$run_id"
+        runtime_dir="$(dirname "$repo_root")/.tacorank-runtime/$(basename "$repo_root")-$run_id"
+        run_dir="$repo_root/runs/$run_id"
+        if [ ! -e "$deployment_dir" ] && [ ! -e "$runtime_dir" ] && [ ! -e "$run_dir" ]; then
+            break
+        fi
+        counter=$((counter + 1))
+    done
+fi
 
 data_dir="$repo_root/KuaiRand-Pure/data"
 config="$deployment_dir/run-config.json"

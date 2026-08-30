@@ -8,6 +8,7 @@ import pytest
 from tacorank.context.builder import (
     ContextBuildError,
     _planner_parent_metric_deltas,
+    _planner_primary_score,
 )
 from tacorank.context.redaction import redact
 from tacorank.research.duplicate_detection import compute_duplicate_key
@@ -130,6 +131,16 @@ def test_planner_metric_deltas_are_authoritative_and_route_safe() -> None:
         parent_metrics=full_parent,
         same_route=True,
     ) == pytest.approx({"GAUC": -0.03, "nDCG@5": -0.02})
+
+
+def test_planner_parent_ranking_uses_confirmed_seed_mean() -> None:
+    metric_set = SimpleNamespace(primary_score=0.6007)
+    confirmed = SimpleNamespace(trust=SimpleNamespace(seed_mean=0.60063))
+    unconfirmed = SimpleNamespace(trust=SimpleNamespace(seed_mean=None))
+
+    assert _planner_primary_score(confirmed, metric_set) == 0.60063
+    assert _planner_primary_score(unconfirmed, metric_set) == 0.6007
+    assert _planner_primary_score(None, None) is None
 
 
 def test_planner_context_separates_active_lessons_from_experiment_history(

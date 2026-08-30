@@ -30,18 +30,40 @@ Evaluation-driven family selection must apply the mandatory decision order in
 policy. Invalid, suspicious, no-op, unstable, and proxy-only results never
 become positive research rewards or parent nodes.
 
+The proxy gate uses a symmetric `0.0016` primary-score noise band. Clean proxy
+results inside the band receive one full-fidelity evaluation instead of being
+pruned on the sign of a tiny delta. Results below `-0.0016` remain hard proxy
+regressions; proxy results never become parents or best checkpoints directly.
+
+Full-fidelity branching and validation-best selection use separate gates. A
+clean, confirmed result within `0.0016` of the current validation best may be
+an explicitly accepted exploratory DFS parent, even if its small delta is not
+directionally positive. It remains ineligible for validation-best selection
+until it clears the full Ladder threshold against the current best. This lets
+research deepen a near-best mechanism without allowing cumulative drift away
+from the protected best.
+
+Proxy/full direction disagreement is advisory rather than an integrity
+failure. The controller records `PROXY_FULL_DIRECTION_CONFLICT` and completes
+seed confirmation. Only concrete evaluator, contract, alignment,
+forbidden-input, or output evidence causes integrity quarantine.
+
 ## Search policy
 
-The core policy is deterministic AIDE-style portfolio search:
+The core policy is deterministic, score-guided AIDE-style depth-first search:
 
-- breadth first probes untried high-value families in this order: objective,
-  temporal history, multitask, duration bias, temporal features, and model;
-- depth then retains at most three trusted frontier nodes, preferring higher
-  trusted primary score, fewer children, family diversity, and stable ID
-  tie-breaking;
+- rank at most three trusted or controller-approved exploratory frontier nodes
+  by higher confirmed primary score,
+  deeper lineage, and stable newest-ID tie-breaking;
+- continue from the best-ranked branch while it has a legal untried method,
+  and backtrack to the next trusted branch only when that branch is exhausted;
+- do not require every research family to be probed from the baseline before
+  deepening a better branch; family order remains a deterministic tie-break for
+  legal methods on the selected parent;
 - only baseline roots with a verified decision and non-root experiments with a
-  trusted full-fidelity result may be normal branch parents; a soft node can be
-  used only as the base of its one authorized refinement;
+  clean, confirmed full-fidelity result may be branch parents; an inconclusive
+  node additionally requires explicit exploratory parent approval and must
+  remain within `0.0016` of validation best;
 - clean proxy/full results within `max(5 * epsilon, 0.01)` of their parent, or
   with a component-metric trade-off, are soft-pruned rather than forgotten;
 - a soft result may receive at most one documented metric-trade-off refinement

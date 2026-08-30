@@ -110,6 +110,20 @@ def _planner_parent_metric_deltas(
     }
 
 
+def _planner_primary_score(
+    evaluation: Optional[object], metric_set: Optional[object]
+) -> Optional[float]:
+    """Prefer the confirmed seed mean when ranking research parents."""
+
+    trust = getattr(evaluation, "trust", None) if evaluation is not None else None
+    seed_mean = getattr(trust, "seed_mean", None)
+    if seed_mean is not None:
+        return float(seed_mean)
+    if metric_set is None:
+        return None
+    return float(metric_set.primary_score)
+
+
 def _path_is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
@@ -657,7 +671,7 @@ class ContextBuilder:
                     output_accepted=(output.accepted if output else None),
                     output_checks=(dict(output.checks) if output else {}),
                     output_violations=(list(output.violations) if output else []),
-                    primary_score=(metric_set.primary_score if metric_set else None),
+                    primary_score=_planner_primary_score(evaluation, metric_set),
                     metric_set=metric_set,
                     metric_deltas=metric_deltas,
                     baseline_delta=evaluation.baseline_delta if evaluation else None,

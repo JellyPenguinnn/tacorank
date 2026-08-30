@@ -81,6 +81,42 @@ def test_graph_view_accepts_memory_schema_node_names():
     assert projected.is_parent_eligible
 
 
+def test_confirmed_inconclusive_result_can_be_explicit_exploratory_parent():
+    root = make_summary("exp_0000", score=0.601468756352959)
+    exploratory = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        score=0.6013,
+        decision="accept",
+        parent_eligible=True,
+        trust_verdict="inconclusive",
+        stability="confirmed",
+        integrity="clean",
+    )
+    context = SimpleNamespace(
+        baseline=root,
+        current_best=root,
+        eligible_frontier=[root, exploratory],
+        family_history=[exploratory],
+    )
+
+    graph = GraphView.from_context(context)
+
+    assert graph.get("exp_0001").is_exploratory_parent
+    assert {node.experiment_id for node in graph.eligible_parents()} == {
+        "exp_0000",
+        "exp_0001",
+    }
+
+    exploratory.parent_eligible = None
+    unapproved = GraphView.from_context(
+        SimpleNamespace(eligible_frontier=[root, exploratory])
+    )
+    assert {node.experiment_id for node in unapproved.eligible_parents()} == {
+        "exp_0000"
+    }
+
+
 def test_explicit_empty_frontier_is_authoritative():
     root = make_summary("exp_0000")
     context = SimpleNamespace(
