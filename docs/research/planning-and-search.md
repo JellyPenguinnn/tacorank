@@ -57,6 +57,11 @@ The core policy is deterministic, score-guided AIDE-style depth-first search:
   deeper lineage, and stable newest-ID tie-breaking;
 - continue from the best-ranked branch while it has a legal untried method,
   and backtrack to the next trusted branch only when that branch is exhausted;
+- when the latest clean result changes predictions but has no trusted gain,
+  select the highest-scoring non-baseline eligible node rather than blindly
+  extending the newest node; prefer an untried method in that node's family,
+  permit one materially different same-card child when the family exposes only
+  one method, and switch families only after that parent/family route is used;
 - do not require every research family to be probed from the baseline before
   deepening a better branch; family order remains a deterministic tie-break for
   legal methods on the selected parent;
