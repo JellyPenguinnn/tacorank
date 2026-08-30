@@ -32,7 +32,9 @@ The contract does not permit the duration signal.
 
 Add one bounded, train-only log-duration interaction or calibrated residual to
 the supplied FM parent. `duration_ms` is video length, not censored watch time;
-reject any implementation that treats it as `play_time_ms`.
+reject any implementation that treats it as `play_time_ms`. The FM values are
+unconstrained ranking scores, so bound only the residual and never clip,
+sigmoid, normalize, or rescale the combined score.
 
 ## Sources
 

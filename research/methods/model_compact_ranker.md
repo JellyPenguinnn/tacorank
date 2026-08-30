@@ -32,7 +32,9 @@ Train one compact additive residual over the supplied FM parent with fixed
 resource bounds. Use all rows or a deterministic representative sample with an
 explicit coverage fraction; report user/item/date unknown rates, avoid a
 chronologically biased first-N slice, and retain the FM score for unseen
-categories.
+categories. Keep the FM value on its unconstrained ranking-score scale: bound
+only the learned residual and never clip, sigmoid, normalize, or rescale the
+combined score.
 
 ## Sources
 

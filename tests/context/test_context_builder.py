@@ -138,7 +138,9 @@ def test_planner_context_separates_active_lessons_from_experiment_history(
     harness.bootstrap(baseline_evaluation)
     asyncio.run(harness.run_one_experiment())
 
-    context = harness.context_builder.build_planner(harness.events())
+    context = harness.context_builder.build_planner(
+        harness.events(), max_tokens=3_000
+    )
 
     assert len(context.family_history) == 1
     assert len(context.active_lessons) == 1
@@ -271,6 +273,85 @@ def test_coder_context_contains_the_real_worker_contract(harness, baseline_evalu
     assert context.context_artifact == context.artifact
     assert context.step_limit == harness.config.coding_step_limit
     assert context.token_limit == harness.config.coding_token_limit
+    assert context.estimated_tokens <= harness.config.context_token_limit
+    assert "unconstrained real-valued ranking" in " ".join(
+        context.coding_invariants
+    )
+
+
+def test_coder_context_makes_cited_prior_results_non_optional(
+    harness, baseline_evaluation
+):
+    harness.bootstrap(baseline_evaluation)
+    asyncio.run(harness.run_one_experiment())
+    events = harness.events()
+    first_spec = next(
+        event.payload.spec
+        for event in events
+        if event.payload.type == "experiment.proposed"
+    )
+    evidence_ids = [
+        event.event_id
+        for event in events
+        if event.payload.type in {"evaluation.completed", "experiment.decided"}
+        and (
+            getattr(event.payload, "result", None) is not None
+            or getattr(event.payload, "decision", None) is not None
+        )
+    ]
+    second_spec = first_spec.model_copy(
+        update={
+            "experiment_id": "exp_002",
+            "evidence_event_ids": evidence_ids,
+            "method_card_ids": ["objective_pairwise_bpr"],
+        }
+    )
+
+    context = harness.context_builder.build_coder(events, second_spec)
+
+    assert context.prior_result_summaries
+    prior = context.prior_result_summaries[0]
+    assert prior.experiment_id == first_spec.experiment_id
+    assert set(prior.source_event_ids).issubset(evidence_ids)
+    assert set(prior.source_event_ids).issubset(context.source_event_ids)
+    assert not set(prior.source_event_ids).intersection(context.excluded_source_ids)
+    assert "Approved prior-result constraints" in context.content
+    assert context.selected_method_cards
+
+
+def test_coder_context_fails_instead_of_trimming_approved_guidance(
+    harness, baseline_evaluation
+):
+    harness.bootstrap(baseline_evaluation)
+    events = harness.events()
+    proposal = asyncio.run(
+        harness.planner.propose(harness.context_builder.build_planner(events))
+    ).spec
+    assert proposal is not None
+    values = proposal.model_dump()
+    values["method_card_ids"] = ["objective_pairwise_bpr"]
+    values["duplicate_key"] = compute_duplicate_key(values)
+    spec = harness.context_builder.bind_implementation(
+        ResearchProposal(**values)
+    )
+
+    with pytest.raises(ContextBuildError, match="mandatory"):
+        harness.context_builder.build_coder(harness.events(), spec, max_tokens=1)
+
+
+def test_coder_context_rejects_unavailable_method_guidance(
+    harness, baseline_evaluation
+):
+    harness.bootstrap(baseline_evaluation)
+    planner_context = harness.context_builder.build_planner(harness.events())
+    proposal = asyncio.run(harness.planner.propose(planner_context)).spec
+    assert proposal is not None
+    spec = harness.context_builder.bind_implementation(proposal).model_copy(
+        update={"method_card_ids": ["method_that_does_not_exist"]}
+    )
+
+    with pytest.raises(ContextBuildError, match="method_that_does_not_exist"):
+        harness.context_builder.build_coder(harness.events(), spec)
 
 
 def test_execution_attempts_are_unique_across_fidelities(harness, baseline_evaluation):

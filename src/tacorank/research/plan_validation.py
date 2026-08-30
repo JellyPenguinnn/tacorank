@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Any
 
+from .code_blind import contains_implementation_reference
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
 from .graph_view import (
     ExperimentNodeView,
@@ -17,7 +18,6 @@ from .graph_view import (
 )
 from .method_eligibility import evaluate_method_card, method_card_map
 from .search_eligibility import classify_search_eligibility
-
 
 HIDDEN_PATTERNS = (
     "hidden test",
@@ -31,14 +31,6 @@ HIDDEN_PATTERNS = (
 SHARED_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 EVENT_ID_PATTERN = re.compile(r"evt_\d{6,}$")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?$")
-CODE_DETAIL_PATTERN = re.compile(
-    r"(?:^|\s)(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|"
-    r"\.(?:py|pyi|js|ts|tsx|java|go|rs|cpp|cc|c|h)\b|"
-    r"\b(?:entrypoint|function name|class name|line number|source file)\b",
-    flags=re.IGNORECASE,
-)
-
-
 @dataclass(frozen=True)
 class ValidationResult:
     accepted: bool
@@ -321,7 +313,7 @@ class PlanValidator:
         ).lower()
         if any(pattern in text for pattern in HIDDEN_PATTERNS):
             errors.append("HIDDEN_TEST_REFERENCE")
-        if CODE_DETAIL_PATTERN.search(text):
+        if contains_implementation_reference(text):
             errors.append("CODE_SPECIFIC_PLAN_FORBIDDEN")
         if any(component_id.lower() not in text for component_id in component_ids):
             errors.append("ENSEMBLE_COMPONENT_NOT_DESCRIBED")

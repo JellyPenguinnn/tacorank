@@ -481,6 +481,7 @@ class LedgerOutputGate:
         event_store: EventStore,
         populations: Mapping[str, _PopulationData],
         artifact_roots: Sequence[str],
+        max_single_score_fraction: float,
     ) -> None:
         self.repository_root = repository_root
         self.event_store = event_store
@@ -489,7 +490,10 @@ class LedgerOutputGate:
             key: OutputGate(
                 repository_root=repository_root,
                 artifact_roots=artifact_roots,
-                contract=_output_contract(population.rows),
+                contract=_output_contract(
+                    population.rows,
+                    max_single_score_fraction=max_single_score_fraction,
+                ),
             )
             for key, population in populations.items()
         }
@@ -1211,6 +1215,7 @@ def build_live_adapters(
             event_store=event_store,
             populations=populations,
             artifact_roots=config.artifact_roots,
+            max_single_score_fraction=config.max_single_score_fraction,
         ),
         evaluator=evaluator,
         baseline=baseline,
@@ -1387,7 +1392,11 @@ def _protected_population_manifests(
     return manifests
 
 
-def _output_contract(rows: Sequence[Mapping[str, Any]]) -> OutputContract:
+def _output_contract(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    max_single_score_fraction: float = 0.5,
+) -> OutputContract:
     return OutputContract(
         columns=(
             OutputColumn("row_id", "integer"),
@@ -1400,6 +1409,7 @@ def _output_contract(rows: Sequence[Mapping[str, Any]]) -> OutputContract:
         identity_columns=("user_id", "video_id"),
         row_id_column="row_id",
         forbidden_columns=("label", "target"),
+        maximum_single_score_fraction=max_single_score_fraction,
     )
 
 

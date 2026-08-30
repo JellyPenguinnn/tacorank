@@ -31,7 +31,12 @@ DEFAULT_TARGET_INTERFACE_EXCERPTS = {
         "-> None; include this file in target_files; read only "
         "invocation.input_root and write exactly invocation.output_path as "
         "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
-        "invocation.seed; return None"
+        "invocation.seed; return None. fm_baseline_predictions.csv contains "
+        "unconstrained real-valued FM ranking scores, not probabilities. Never "
+        "sigmoid, clip to [0,1], normalize, or rescale the FM parent or the "
+        "parent-plus-residual result. Bound only the residual on the parent's "
+        "original score scale and preserve the exact parent score when no "
+        "supported residual is available."
     )
 }
 
@@ -97,6 +102,7 @@ class RunConfig(StrictModel):
     research_capabilities: List[NonEmptyStr] = Field(default_factory=list)
     active_research_prohibitions: List[NonEmptyStr] = Field(default_factory=list)
     prediction_change_no_op_threshold: float = Field(default=0.001, ge=0.0, le=1.0)
+    max_single_score_fraction: float = Field(default=0.5, gt=0.0, le=1.0)
     target_interface_excerpts: Dict[str, str] = Field(
         default_factory=lambda: dict(DEFAULT_TARGET_INTERFACE_EXCERPTS)
     )

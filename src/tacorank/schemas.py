@@ -1472,6 +1472,36 @@ class PlannerContext(ContextDocument):
         return normalized
 
 
+class CoderPriorResultSummary(StrictModel):
+    """Compact, label-safe experiment feedback supplied to the coding worker."""
+
+    experiment_id: NonEmptyStr
+    family: Optional[str] = None
+    highest_completed_fidelity: Optional[Fidelity] = None
+    population: Optional[Population] = None
+    decision: Optional[ExperimentDecisionKind] = None
+    decision_reason_code: Optional[NonEmptyStr] = None
+    primary_score: Optional[float] = None
+    metric_deltas: Dict[str, float] = Field(default_factory=dict)
+    parent_delta: Optional[float] = None
+    prediction_change: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    prediction_spearman_vs_parent: Optional[float] = Field(
+        default=None, ge=-1.0, le=1.0
+    )
+    diagnostic_metrics: Dict[NonEmptyStr, float] = Field(default_factory=dict)
+    trust_verdict: Optional[TrustVerdict] = None
+    trust_flags: List[NonEmptyStr] = Field(default_factory=list)
+    failure_hypotheses: List[NonEmptyStr] = Field(default_factory=list)
+    source_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+
+    @field_validator("source_event_ids")
+    @classmethod
+    def validate_source_event_ids(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("source_event_ids must be unique")
+        return values
+
+
 class CoderContext(ContextDocument):
     role: Literal["coder"] = "coder"
     contract_sha256: str
@@ -1483,6 +1513,8 @@ class CoderContext(ContextDocument):
     allowed_command_ids: List[NonEmptyStr]
     selected_method_cards: List[Dict[str, Any]] = Field(default_factory=list)
     active_lessons: List[Dict[str, Any]] = Field(default_factory=list)
+    coding_invariants: List[NonEmptyStr] = Field(default_factory=list)
+    prior_result_summaries: List[CoderPriorResultSummary] = Field(default_factory=list)
     step_limit: int = Field(gt=0)
     token_limit: Optional[int] = Field(gt=0)
     wall_time_limit_seconds: int = Field(gt=0)
