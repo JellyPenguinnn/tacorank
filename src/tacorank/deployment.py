@@ -109,10 +109,13 @@ def setup_trae_deployment(
                 "unless the approved hypothesis explicitly replaces the parent. "
                 "Training dates strictly precede score dates. Preserve contiguous "
                 "score row_id order, duplicate rows, finite deterministic scores, "
-                "and exclusive output creation."
+                "and exclusive output creation. The production loader imports "
+                "solution.candidate:run. Keep the implementation in candidate.py "
+                "unless every helper path and its import pattern are explicitly "
+                "authorized by the ExperimentSpec target_files."
             )
         },
-        "coding_step_limit": 40,
+        "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
         "data_boundary_sha256": TRAE_ONLY_DATA_BOUNDARY_SHA256,
@@ -326,10 +329,13 @@ def setup_live_deployment(
                 "Training dates strictly precede score dates. Preserve contiguous "
                 "score row_id order, duplicate rows, finite deterministic scores, "
                 "and exclusive output creation. Use all training rows or report a "
-                "deterministic representative sampling fraction in the code."
+                "deterministic representative sampling fraction in the code. The "
+                "production loader imports solution.candidate:run; keep the "
+                "implementation in candidate.py unless every helper path and import "
+                "pattern are explicitly authorized by target_files."
             )
         },
-        "coding_step_limit": 40,
+        "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
         "research_provider": "deepseek",
@@ -395,13 +401,20 @@ def _trae_payload(
         "reasoning_effort": "high",
         "config_file": str(trae_yaml),
         "config_sha256": _sha256_file(trae_yaml),
-        "max_steps_cap": 40,
+        "max_steps_cap": 64,
         "max_token_cap": None,
         "max_wall_time_seconds_cap": 1800,
-        "repair_step_limit": 20,
+        "repair_step_limit": 48,
         "repair_token_limit": None,
         "repair_wall_time_limit_seconds": 1200,
         "repair_allowed_command_ids": ["candidate_smoke"],
+        "solution_verification_max_attempts": 5,
+        "solution_verification_timeout_seconds": 120,
+        "solution_verification_max_output_tokens": 4096,
+        "solution_verification_max_source_bytes": 524288,
+        "solution_revision_step_limit": 32,
+        "solution_revision_wall_time_limit_seconds": 600,
+        "solution_verifier_credential_environment_name": "DEEPSEEK_API_KEY",
         "approved_environment_names": ["DEEPSEEK_API_KEY"],
         "credential_environment_names": ["DEEPSEEK_API_KEY"],
         "credential_environment_aliases": [
@@ -749,7 +762,7 @@ def _trae_yaml() -> str:
   trae_agent:
     enable_lakeview: false
     model: tacorank_coder
-    max_steps: 40
+    max_steps: 64
     tools:
       - str_replace_based_edit_tool
       - task_done

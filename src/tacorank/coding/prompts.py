@@ -154,11 +154,13 @@ def build_coding_prompt(
         "## Tool-use discipline",
         _json_block({"authoritative_target_files": target_files}),
         "Begin by viewing the authoritative target files directly; do not list the repository root or survey unrelated directories.",
+        "Modify only authoritative_target_files. Do not add ad-hoc smoke, test, helper, or alternate entrypoint files unless each path is explicitly present in authoritative_target_files.",
         "The interface excerpts and method cards below are the supplied integration context. Inspect one non-target file only when a concrete missing symbol or schema blocks the edit.",
+        "The production entrypoint is loaded as solution.candidate:run. Prefer one self-contained candidate.py; use sibling imports only when the approved target files and interface explicitly authorize them.",
         "When the interface supplies setup-verified FM scores, preserve them as the parent and implement the approved mechanism as a bounded residual unless the ExperimentSpec explicitly requires replacement.",
         "Before task_done, review the edited score path for full/representative training coverage, non-zero trainable gradients, user-conditioned score variation, correct feature semantics, deterministic seeds, and finite fallback scores.",
         "The symbolic allowed_command_ids are controller-owned post-patch checks, not shell tools available in this coding action. Do not search for or invoke them.",
-        "Use the next editing-capable tool call after the target view to make the smallest coherent edit, verify the edited target if needed, and then call task_done.",
+        "Use the next editing-capable tool call after the target view to make the smallest coherent edit. Once the required edit and one bounded recheck are complete, then call task_done immediately; do not spend remaining steps browsing or making unrelated improvements.",
         "",
         "## Required target interfaces",
         _json_block(_json_value(_required_attribute(context, "target_interface_excerpts"))),
@@ -232,6 +234,7 @@ def build_repair_prompt(
     protected_paths = _validated_paths(
         _required_attribute(context, "protected_paths"), "protected_paths"
     )
+    target_files = _validated_paths(spec_document.get("target_files"), "target_files")
     decision_document = _json_document(decision, "recovery_decision")
     if decision_document.get("action") != "trae_repair":
         raise PromptContractError("recovery decision is not a trae_repair action")
@@ -263,9 +266,14 @@ def build_repair_prompt(
         "",
         "## File policy",
         _json_block(
-            {"editable_roots": editable_roots, "protected_paths": protected_paths}
+            {
+                "editable_roots": editable_roots,
+                "protected_paths": protected_paths,
+                "authoritative_target_files": target_files,
+            }
         ),
         "Only edit paths under editable_roots. Protected paths always win.",
+        "Modify only authoritative_target_files; do not add ad-hoc smoke, test, helper, or alternate entrypoint files.",
         "",
         "## Original ExperimentSpec (must remain unchanged)",
         _json_block(spec_document),
@@ -291,7 +299,73 @@ def build_repair_prompt(
         ),
         "",
         "## Completion contract",
-        "Make only the smallest repair justified by this evidence. Run permitted lightweight checks and finish with a non-empty repair patch plus a concise account of files changed and checks actually run.",
+        "Make only the smallest repair justified by this evidence. After the edit and one bounded recheck, call task_done immediately. Finish with a non-empty repair patch plus a concise account of files changed and checks actually run.",
+    ]
+    return _finalize("\n".join(sections), safe_redactor)
+
+
+def build_solution_revision_prompt(
+    context: Any,
+    experiment_spec: Any,
+    verification: Any,
+    *,
+    review_attempt: int,
+    max_review_attempts: int,
+    step_limit: int,
+    wall_time_limit_seconds: int,
+    redactor: Optional[SecretRedactor] = None,
+) -> str:
+    """Build one verifier-grounded Trae revision without changing the hypothesis."""
+
+    safe_redactor = redactor or SecretRedactor()
+    spec_document = _json_document(experiment_spec, "experiment_spec")
+    target_files = _validated_paths(spec_document.get("target_files"), "target_files")
+    verification_document = _json_document(verification, "solution_verification")
+    if verification_document.get("accepted") is not False:
+        raise PromptContractError("solution revision requires a rejected verification")
+    required = verification_document.get("required_changes")
+    if not isinstance(required, list) or not required:
+        raise PromptContractError("solution revision requires bounded required changes")
+    if (
+        isinstance(review_attempt, bool)
+        or not isinstance(review_attempt, int)
+        or review_attempt < 1
+        or review_attempt >= max_review_attempts
+    ):
+        raise PromptContractError("solution review attempt is outside its bounded range")
+
+    sections = [
+        "# TacoRank bounded implementation-fidelity revision",
+        "",
+        "Revise the existing candidate only to address the grounded verifier findings below. Preserve the approved hypothesis, mechanism, data boundary, target stage, and target files exactly.",
+        "The verifier is not an evaluator. Do not optimize imagined metrics, access labels, run full training, install packages, use network access, or broaden the experiment.",
+        "",
+        "## Hard bounds",
+        _json_block(
+            {
+                "completed_review_attempt": review_attempt,
+                "max_review_attempts": max_review_attempts,
+                "max_steps": _standalone_positive_int(step_limit, "step_limit"),
+                "wall_time_limit_seconds": _standalone_positive_int(
+                    wall_time_limit_seconds, "wall_time_limit_seconds"
+                ),
+                "authoritative_target_files": target_files,
+            }
+        ),
+        "Modify only authoritative_target_files. Do not add smoke, test, helper, or alternate entrypoint files.",
+        "Begin with the named file and exact finding; do not survey the repository.",
+        "",
+        "## Approved ExperimentSpec (unchanged)",
+        _json_block(spec_document),
+        "",
+        "## Grounded implementation review",
+        _json_block(verification_document),
+        "",
+        "## Target interface",
+        _json_block(_json_value(getattr(context, "target_interface_excerpts", {}))),
+        "",
+        "## Completion contract",
+        "Make the smallest coherent correction for every required change. Once the edit and one bounded recheck are complete, call task_done immediately and report only what changed.",
     ]
     return _finalize("\n".join(sections), safe_redactor)
 

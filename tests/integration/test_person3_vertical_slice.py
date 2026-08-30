@@ -238,6 +238,8 @@ models:
         repair_token_limit=40,
         repair_wall_time_limit_seconds=3,
         repair_allowed_command_ids=("candidate_smoke",),
+        solution_revision_step_limit=2,
+        solution_revision_wall_time_limit_seconds=3,
         trusted_test_mode=True,
     )
     spec = {

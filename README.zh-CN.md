@@ -31,9 +31,9 @@ TacoRank 是一个面向 KuaiRand-Pure 的确定性、全程留证的自动化�
 
 ## 功能特性
 
-- 完整的“研究员 → 编码工作器 → Gate A → CPU 执行 → Gate B → 评测 → 反思”循环。
+- 完整的“研究员 → Trae 编码 ↔ 有界实现校验器 → Gate A → CPU 执行 → Gate B → 评测 → 反思”循环。
 - 唯一的确定性控制器负责工作流状态、预算、恢复、收敛、晋级、回滚和最终选择。
-- 使用 DeepSeek 进行研究规划，并以固定版本的 Trae 作为生产编码工作器；隔离的测试替身只用于测试。
+- 使用 DeepSeek 进行研究规划与最多 5 轮的“方案到代码”校验，并以固定版本的 Trae 作为生产编码工作器；隔离的测试替身只用于测试。
 - 一次性 Git worktree、受保护路径检查、符号化执行命令、Docker 隔离、资源限制与类型化恢复决策。
 - 追加写入、哈希链保护的事件账本，以及可重放状态、不可变证据制品和可复现派生报告。
 - 严格遵循 KuaiRand-Pure 评测：基于 `long_view` 的用户内排序、受保护 GAUC 与 nDCG@5、无标签 test 推理及官方提交检查。
@@ -96,7 +96,7 @@ TacoRank 有三类相互独立的权威来源：
 | Python | 3.9 或更高 | TacoRank CLI 与控制平面 |
 | Python | 3.12.x | 由 setup 创建的隔离 Trae 固定运行时 |
 | Docker | 正在运行的兼容 Docker 守护进程 | 加固 Trae 编辑工具与 CPU 候选执行 |
-| DeepSeek | 可访问目标模型的 `DEEPSEEK_API_KEY` | 研究规划与 Trae 编码 |
+| DeepSeek | 可访问目标模型的 `DEEPSEEK_API_KEY` | 研究规划、Trae 编码与有界实现校验 |
 | KuaiRand-Pure | 本地官方数据，或允许 setup 下载的网络 | 训练、评测和生成提交 |
 
 实时工作流当前仅使用 CPU。在 macOS 上可使用 Docker Desktop，或 Colima 等兼容 Docker 的本地守护进程。
@@ -179,7 +179,7 @@ export DEEPSEEK_API_KEY='your-key'
   --input examples/trae/experiment-spec.json
 ```
 
-本地 preflight 会在不读取凭证的情况下检查固定 Trae 运行时和 Docker 工具边界。实时 preflight 会向 DeepSeek 认证，并以 high reasoning 验证 `deepseek-v4-flash` 访问。示例会在一次性 worktree 中生成真实补丁并执行 Gate A，随后有意在访问数据、训练、评测或创建账本之前停止。
+本地 preflight 会在不读取凭证的情况下检查固定 Trae 运行时和 Docker 工具边界。实时 preflight 会向 DeepSeek 认证，并以 high reasoning 验证 `deepseek-v4-flash` 访问。示例会在一次性 worktree 中生成真实补丁，按原始 ExperimentSpec 完成最多 5 轮有界校验/修订并执行 Gate A，随后有意在访问数据、训练、评测或创建账本之前停止。
 
 ## 运行操作
 
@@ -238,7 +238,7 @@ src/tacorank/
   memory/            追加写入事件存储与重放
   context/           有界、按角色构建的上下文
   orchestrator/      确定性状态机与适配器路由
-  coding/            固定 Trae 适配器、prompt 与脱敏
+  coding/            固定 Trae 适配器、语义校验器、prompt 与脱敏
   git/               实验 ref、补丁与一次性 worktree
   safety/            受保护清单、Gate A 与 Gate B
   execution/         符号化命令、Docker runner 与遥测
@@ -304,7 +304,7 @@ PYTHONPATH=src:. .venv/bin/python -m pytest \
 
 截至 2026-08-30：
 
-- 当前完整自动化测试套件通过 509 项测试，并有 11 项符合预期的平台跳过。
+- 当前完整自动化测试套件通过 549 项测试，并有 11 项符合预期的平台跳过。
 - 一次有界实时 CPU 运行使用了生产 DeepSeek 研究员、固定 Trae 工作器、加固 Docker runner 和官方 KuaiRand-Pure 数据。
 - Trae 生成了仅修改 `solution/candidate.py` 的 pairwise BPR 候选；14 项 Gate A 检查全部通过，smoke 与 proxy 的 11 项 Gate B 检查也全部通过。
 - 受保护 proxy 评测得到 GAUC `0.62112551`、nDCG@5 `0.51277198`、primary `0.56694875`，因此控制器正确剪枝该候选。
@@ -312,12 +312,15 @@ PYTHONPATH=src:. .venv/bin/python -m pytest \
 - 另一次真实迭代回归运行完成了第一轮编码、Gate A、CPU smoke/proxy、Gate B、受保护评测与剪枝，随后持久化创建并提出 `exp_002`，进入新的 Trae 编码上下文。观察到跨轮继续行为后，该运行在第二轮编码期间被有意停止。
 - 运行后取证发现，可编辑的 popularity 父模型得分为 `0.580721929`，而被单独评测的官方 FM 为 `0.601468756`。修复后的候选现在会逐字节复现官方 FM；对 124,909 行 full validation 的 CPU 重放得到 GAUC `0.6671326322`、nDCG@5 `0.5358048805`、primary `0.6014687564`。
 - 针对 `exp_006` 的 DeepSeek 畸形工具参数路径，现有可执行兼容补丁测试已与 Waihong 的有界自恢复策略集成。工作器会保留脱敏证据以及准确的 provider token/耗时记账；畸形参数先在 Trae 内部纠正，若仍形成 adapter failure，则由该策略分类决定同 commit 重试、放弃或停止。新的真实 provider 验证仍需从干净 commit 重新生成 deployment，不能由这些确定性检查推断。
+- 新增的确定性回归测试还覆盖最多 5 轮的方案到代码校验、校验器 JSON 修复、Trae 修订/耗尽路径、累计 token 与 artifact 记账、ExperimentSpec 目标文件约束，以及 Gate A 隔离入口导入。这些测试不表示历史付费运行已经使用新的校验器。
 
 以上证据证明了真实集成的基线路径、跨迭代继续行为和当前可执行 FM 一致性，但并不证明经过实际时间的实时收敛，也不证明已经产生获胜候选。有界验收没有执行连续三次无提升的 full 迭代；由于候选在 proxy 失败，也没有进入 candidate-best clean reproduction 路径。确定性集成测试覆盖了这些控制路径。历史证据与范围见 [`docs/person3-handoff.md`](docs/person3-handoff.md)。
 
 ## 安全性与可复现性
 
 - Gate A 在执行前把获准补丁绑定到 commit、diff、contract、受保护清单和数据 identity。
+- Gate A 之前的实现校验器只检查代码是否忠实实现获准方案，最多执行 5 次校验（初始方案加最多 4 次有界 Trae 修订）；它不读取指标，也不能替代 Gate A、Gate B 或受保护评测。
+- Gate A 会拒绝 `ExperimentSpec.target_files` 之外的累计改动，并在只读、禁网 Docker 边界内导入 `solution.candidate:run` 后才签发回执。
 - Runner 只解析已审核的符号化命令，绝不接受 LLM 生成的原始 shell 命令。
 - 候选代码在一次性 worktree 和资源受限的 CPU Docker 容器中运行，并受输出配额约束。
 - Gate B 在评测前检查预测结构、行 identity、数值有限性、生产 commit、数据清单、命令与执行 seal。

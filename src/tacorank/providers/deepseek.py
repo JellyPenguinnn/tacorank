@@ -283,7 +283,7 @@ def _research_candidate(value: Any) -> Dict[str, Any]:
     )
 
 
-def _default_transport(
+def default_chat_transport(
     url: str,
     headers: Mapping[str, str],
     payload: Mapping[str, Any],
@@ -347,7 +347,7 @@ class DeepSeekResearchProvider:
         self.max_output_tokens = max_output_tokens
         self.thinking_enabled = thinking_enabled
         self.reasoning_effort = reasoning_effort
-        self.transport = transport or _default_transport
+        self.transport = transport or default_chat_transport
         self._last_candidate: Optional[Dict[str, Any]] = None
         self._input_tokens = 0
         self._output_tokens = 0

@@ -462,6 +462,7 @@ def test_generated_trae_yaml_uses_v4_flash() -> None:
     document = deployment_module._trae_yaml()
 
     assert "model: deepseek-v4-flash" in document
+    assert "max_steps: 64" in document
     assert "deepseek-v4-pro" not in document
 
 

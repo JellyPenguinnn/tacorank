@@ -19,6 +19,7 @@ from ..providers import DeepSeekResearchProvider
 from ..research.duplicate_detection import compute_duplicate_key
 from ..safety import (
     DataAccessPolicy,
+    DockerEntrypointSmokeCheck,
     PatchGate,
     ProtectedManifest,
     ReceiptStore,
@@ -63,6 +64,8 @@ class TraeStandaloneConfig(StrictModel):
     coding_wall_time_limit_seconds: int = Field(gt=0)
     data_boundary_sha256: str
     trae: Dict[str, Any]
+    candidate_entrypoint: str = "solution.candidate:run"
+    container_python_executable: str = "/usr/local/bin/python3"
 
     @field_validator("contract_path", "protected_paths_path")
     @classmethod
@@ -371,6 +374,13 @@ async def run_trae_example(
             "%s: %s%s" % (exc.code, exc.summary, suffix)
         ) from exc
 
+    coding = config.coding_config()
+    if (
+        coding.docker_executable is None
+        or coding.docker_host is None
+        or coding.docker_image is None
+    ):
+        raise TraeStandaloneError("Gate A requires the reviewed Docker boundary")
     gate = PatchGate(
         repository_root=worktrees.path_for(run_id, experiment_id),
         artifact_repository_root=config.repository_root,
@@ -388,14 +398,24 @@ async def run_trae_example(
         allowed_import_roots=None,
         allowed_capability_imports=(),
         allowed_dependency_changes=(),
+        smoke_check=DockerEntrypointSmokeCheck(
+            docker_executable=coding.docker_executable,
+            docker_host=coding.docker_host,
+            image=coding.docker_image,
+            container_python_executable=config.container_python_executable,
+            entrypoint=config.candidate_entrypoint,
+        ),
     )
-    checked = await gate.check(candidate, experiment_root_commit_sha=base_commit)
+    checked = await gate.check(
+        candidate,
+        experiment_root_commit_sha=base_commit,
+        authorized_changed_files=spec.target_files,
+    )
     if not checked.accepted:
         violations = [violation.code for violation in checked.violations]
         raise TraeStandaloneError(
             "Trae created a patch, but Gate A rejected it: " + ", ".join(violations)
         )
-    coding = config.coding_config()
     return {
         "status": "passed",
         "run_id": run_id,
