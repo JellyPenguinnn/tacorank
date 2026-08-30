@@ -136,7 +136,9 @@ class EventStore:
             try:
                 decoded = json.loads(raw_line.decode("utf-8"))
                 event = Event.model_validate(decoded)
-                _validate_idempotency_payload_hash(event.idempotency_key, event.payload)
+                _validate_idempotency_payload_hash(
+                    event.idempotency_key, decoded["payload"]
+                )
             except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
                 raise LedgerCorruptionError(
                     "invalid complete ledger line %d: %s" % (line_number, exc)
@@ -146,7 +148,11 @@ class EventStore:
                     "invalid complete ledger line %d: %s" % (line_number, exc)
                 ) from exc
 
-            if raw_line != canonical_dumps(event).encode("utf-8"):
+            # Validate the exact stored representation. Re-serializing the
+            # current model would inject defaults added by a later compatible
+            # schema version and falsely classify an older hash-valid event as
+            # corruption.
+            if raw_line != canonical_dumps(decoded).encode("utf-8"):
                 raise LedgerCorruptionError(
                     "ledger line %d is not canonical JSON" % line_number
                 )

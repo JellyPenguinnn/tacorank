@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"objective_listwise_user_softmax","family":"objective","status":"candidate","tags":["listwise","within_user","top_k"],"cost_tier":"medium","sources":["https://mlanthology.org/icml/2007/cao2007icml-learning/"]}
+{"schema_version":"1.0","method_id":"objective_listwise_user_softmax","family":"objective","status":"candidate","tags":["listwise","within_user","top_k"],"cost_tier":"medium","prerequisites":["pairwise_tested","user_impression_groups"],"allowed_data":["train_interactions","user_id","long_view"],"prohibition_conditions":["uninformative_lists_unhandled"],"sources":["https://mlanthology.org/icml/2007/cao2007icml-learning/"]}
 ```
 
 ## Mechanism

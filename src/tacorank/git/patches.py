@@ -188,7 +188,14 @@ def commit_staged_patch(
             "committed patch bytes do not match the verified staged bytes",
         )
     status = _git(
-        root, ("status", "--porcelain=v1", "-z", "--untracked-files=all")
+        root,
+        (
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ),
     ).stdout
     if status:
         raise GitOperationError("WORKTREE_DIRTY", "worktree remained dirty after commit")
@@ -326,7 +333,13 @@ def _preflight_changed_file_bytes(root: Path, max_diff_bytes: Optional[int]) -> 
         raise GitOperationError("INVALID_GIT_BOUND", "max_diff_bytes must be positive")
     status = _git(
         root,
-        ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+        (
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ),
         max_stdout_bytes=max(max_diff_bytes, 64 * 1024),
     ).stdout
     records = status.split(b"\x00")

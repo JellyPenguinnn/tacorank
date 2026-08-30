@@ -420,7 +420,13 @@ class WorktreeManager:
         if require_clean:
             status = _git(
                 actual_path,
-                ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+                (
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignored=matching",
+                ),
             ).stdout
             if status:
                 raise GitOperationError("WORKTREE_DIRTY", "experiment worktree is not clean")
@@ -543,7 +549,13 @@ class WorktreeManager:
                 )
             status = _git(
                 target,
-                ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+                (
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignored=matching",
+                ),
             ).stdout
             if status:
                 raise GitOperationError(

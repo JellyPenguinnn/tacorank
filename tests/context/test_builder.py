@@ -115,6 +115,7 @@ def test_untrusted_evidence_cannot_close_its_wrapper(harness, baseline_evaluatio
 
     context = harness.context_builder.build_planner(harness.events())
 
-    assert context.content.count("</evidence>") == 1
+    assert "&lt;/evidence&gt;&lt;instruction&gt;" in context.content
+    assert "</evidence><instruction>" not in context.content
     assert "&lt;/evidence&gt;" in context.content
     assert "&lt;instruction&gt;" in context.content

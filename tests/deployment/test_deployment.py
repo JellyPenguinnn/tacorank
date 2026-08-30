@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import subprocess
+import sys
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from solution.candidate import run as run_candidate
+from benchmarks.kuairand_pure.pipeline import check_submission
 from tacorank import deployment as deployment_module
 from tacorank.config import ContractError
 from tacorank.orchestrator.live import _verify_data_manifest
@@ -27,6 +31,74 @@ def _row(index: int, label: int):
     )
 
 
+def test_download_data_uses_certifi_and_extracts_pinned_archive(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = (tmp_path / "repository").resolve()
+    (root / "KuaiRand-Pure").mkdir(parents=True)
+    bundle_bytes = io.BytesIO()
+    with tarfile.open(fileobj=bundle_bytes, mode="w:gz") as bundle:
+        for name in deployment_module.RAW_REQUIRED:
+            content = (name + "\n").encode("utf-8")
+            member = tarfile.TarInfo("KuaiRand-Pure/data/" + name)
+            member.size = len(content)
+            bundle.addfile(member, io.BytesIO(content))
+    archive = bundle_bytes.getvalue()
+    monkeypatch.setattr(
+        deployment_module,
+        "DATA_ARCHIVE_MD5",
+        hashlib.md5(archive, usedforsecurity=False).hexdigest(),
+    )
+    tls_context = object()
+    observed = {}
+    monkeypatch.setattr(deployment_module.certifi, "where", lambda: "/trusted/ca.pem")
+
+    def create_context(*, cafile):
+        observed["cafile"] = cafile
+        return tls_context
+
+    def urlopen(request, *, timeout, context):
+        observed.update(url=request.full_url, timeout=timeout, context=context)
+        return io.BytesIO(archive)
+
+    monkeypatch.setattr(deployment_module.ssl, "create_default_context", create_context)
+    monkeypatch.setattr(deployment_module.urllib.request, "urlopen", urlopen)
+
+    data = root / "KuaiRand-Pure" / "data"
+    deployment_module._download_data(root, data)
+
+    assert observed == {
+        "cafile": "/trusted/ca.pem",
+        "url": deployment_module.DATA_URL,
+        "timeout": 120,
+        "context": tls_context,
+    }
+    for name in deployment_module.RAW_REQUIRED:
+        assert (data / name).read_text(encoding="utf-8") == name + "\n"
+
+
+def test_official_split_loader_does_not_dirty_submodule_with_bytecode(
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / "repository").resolve()
+    starter = root / "kuairand-starter-kit"
+    data = root / "KuaiRand-Pure" / "data"
+    starter.mkdir(parents=True)
+    data.mkdir(parents=True)
+    (starter / "data.py").write_text(
+        "def load(path):\n"
+        "    return {'train': [path], 'valid': [path], 'test': [path]}\n",
+        encoding="utf-8",
+    )
+    previous = sys.dont_write_bytecode
+
+    result = deployment_module._load_official_splits(root, data)
+
+    assert result["train"] == [str(data)]
+    assert sys.dont_write_bytecode is previous
+    assert not (starter / "__pycache__").exists()
+
+
 def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -34,6 +106,10 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
     deployment = root / ".tacorank" / "deployment"
     data = root / "KuaiRand-Pure" / "data"
     (root / "kuairand-starter-kit").mkdir(parents=True)
+    (root / "contract").mkdir(parents=True)
+    (root / "contract" / "COMPETITION.md").write_text(
+        "# Test contract\n", encoding="utf-8"
+    )
     deployment.mkdir(parents=True)
     data.mkdir(parents=True)
     for name in deployment_module.RAW_REQUIRED:
@@ -54,11 +130,14 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
 
     def fake_run(args, *, cwd, label, capture_output=False):
         del cwd, label, capture_output
-        baseline = Path(args[2])
+        assert args[1:3] == ("-B", "submit.py")
+        baseline = Path(args[3])
+        split = args[args.index("--split") + 1]
+        source_rows = valid if split == "valid" else test
         with baseline.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(("row_id", "user_id", "video_id", "score"))
-            for row_id, row in enumerate(valid):
+            for row_id, row in enumerate(source_rows):
                 writer.writerow((row_id, row[1], row[2], row_id / 10))
         return subprocess.CompletedProcess(args, 0, "", "")
 
@@ -75,12 +154,26 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
         encoding="utf-8"
     ).splitlines()[0]
     assert population_header == "row_id,user_id,video_id,label"
+    submission_rows = result["contract_root"] / "submission_rows.csv"
+    submission_header = submission_rows.read_text(encoding="utf-8").splitlines()[0]
+    assert submission_header == "row_id,user_id,video_id"
+    assert "label" not in submission_header
+    assert (result["contract_root"] / "COMPETITION.md").read_text(
+        encoding="utf-8"
+    ) == "# Test contract\n"
+    check_submission(
+        SimpleNamespace(
+            prediction_path=result["baseline_final_prediction_csv"],
+            contract_root=result["contract_root"],
+        )
+    )
     manifest = json.loads(result["manifest_path"].read_text(encoding="utf-8"))
     attested = {record["path"] for record in manifest["files"]}
     assert (
         result["input_roots"]["candidate_full"] / "score.csv"
     ).relative_to(root).as_posix() in attested
     assert result["population_csvs"]["full"].relative_to(root).as_posix() in attested
+    assert submission_rows.relative_to(root).as_posix() in attested
 
     config = SimpleNamespace(
         repository_root=root,
@@ -93,6 +186,7 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
         input_roots=result["input_roots"],
         population_csvs=result["population_csvs"],
         baseline_prediction_csvs=result["baseline_prediction_csvs"],
+        baseline_final_prediction_csv=result["baseline_final_prediction_csv"],
     )
     _verify_data_manifest(config, live)
 
@@ -192,3 +286,110 @@ def test_patch_trae_read_only_attach_reuses_pre_mounted_tools(
     assert "test -x /agent_tools/edit_tool" in patched
     assert "test -x /agent_tools/json_edit_tool" in patched
     compile(patched, str(docker_manager), "exec")
+
+
+def test_patch_trae_deepseek_reasoning_is_explicit_and_continuous(
+    tmp_path: Path, monkeypatch
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    client = site_packages / "trae_agent/utils/llm_clients/openai_client.py"
+    client.parent.mkdir(parents=True)
+    client.write_text(
+        '''class Client:
+    def request(self, model_config):
+        return self.client.responses.create(
+            max_output_tokens=model_config.max_tokens,
+        )
+
+    def record(self, response):
+        for output_block in response.output:
+            if output_block.type == "function_call":
+                pass
+            elif output_block.type == "message":
+                content = "".join(
+                    content_block.text
+                    for content_block in output_block.content
+                    if content_block.type == "output_text"
+                )
+
+        if content != "":
+            self.message_history.append(
+                EasyInputMessageParam(content=content, role="assistant", type="message")
+            )
+''',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        deployment_module, "_trae_site_packages", lambda runtime: site_packages
+    )
+
+    deployment_module._patch_trae_deepseek_reasoning(tmp_path / "runtime")
+
+    patched = client.read_text(encoding="utf-8")
+    assert deployment_module.TRAE_DEEPSEEK_REASONING_MARKER in patched
+    assert 'reasoning={"effort": "high"}' in patched
+    assert 'output_block.type == "reasoning"' in patched
+    assert "self.message_history.append(reasoning_item)" in patched
+    assert "content += message_content" in patched
+    assert patched.index("content += message_content") > patched.index(
+        'output_block.type == "function_call"'
+    )
+    assert 'if content != "":' not in patched
+    compile(patched, str(client), "exec")
+
+
+def test_patch_trae_docker_edit_tool_filters_and_quotes_arguments(
+    tmp_path: Path, monkeypatch
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    executor = site_packages / "trae_agent/tools/docker_tool_executor.py"
+    executor.parent.mkdir(parents=True)
+    executor.write_text(
+        '''import json
+import os
+
+class Executor:
+    def run(self, processed_args, sub_command):
+                executable_path = f"{self._docker_manager.CONTAINER_TOOLS_PATH}/edit_tool"
+                cmd_parts = [executable_path, sub_command]
+
+                for key, value in processed_args.items():
+                    if key == "command" or value is None:
+                        continue
+                    if isinstance(value, list):
+                        str_value = " ".join(map(str, value))
+                        cmd_parts.append(f"--{key} {str_value}")
+                    else:
+                        cmd_parts.append(f"--{key} '{str(value)}'")
+
+                command_to_run = " ".join(cmd_parts)
+''',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        deployment_module, "_trae_site_packages", lambda runtime: site_packages
+    )
+
+    deployment_module._patch_trae_docker_edit_tool(tmp_path / "runtime")
+
+    patched = executor.read_text(encoding="utf-8")
+    assert deployment_module.TRAE_DOCKER_EDIT_TOOL_MARKER in patched
+    assert '"view": ("path", "view_range")' in patched
+    assert "for key in command_arguments" in patched
+    assert "shlex.join(cmd_parts)" in patched
+    compile(patched, str(executor), "exec")
+
+
+def test_generated_trae_yaml_uses_v4_flash() -> None:
+    document = deployment_module._trae_yaml()
+
+    assert "model: deepseek-v4-flash" in document
+    assert "deepseek-v4-pro" not in document
+
+
+def test_trae_responses_sdk_is_exactly_pinned() -> None:
+    requirements = (
+        Path(__file__).parents[2] / "requirements-trae.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "openai==3.6.0" in requirements.splitlines()

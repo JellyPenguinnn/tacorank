@@ -295,6 +295,7 @@ models:
             future_column_patterns=(r"(?:^|_)future(?:_|$)",),
         ),
         allowed_command_ids=("candidate_smoke",),
+        artifact_roots=("artifacts", "runs"),
         factories=SHARED_FACTORIES,
         allowed_import_roots=(),
     )

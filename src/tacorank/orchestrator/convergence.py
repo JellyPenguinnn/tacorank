@@ -7,7 +7,14 @@ from typing import Sequence
 
 from ..config import RunConfig
 from ..orchestrator.state import RunState
-from ..schemas import Event, EventType, Fidelity, Population, TrustVerdict
+from ..schemas import (
+    Event,
+    EventType,
+    ExperimentDecisionKind,
+    Fidelity,
+    Population,
+    TrustVerdict,
+)
 
 
 @dataclass(frozen=True)
@@ -18,16 +25,32 @@ class StopDecision:
 
 
 def convergence_pressure(events: Sequence[Event], config: RunConfig) -> int:
-    """Count consecutive trusted full evaluations without epsilon improvement."""
+    """Count terminal research iterations without epsilon improvement.
+
+    Full-fidelity confirmation seeds belong to one experiment iteration.  They
+    must establish trust, but must not independently consume convergence
+    patience.  A terminal full decision is therefore the unit counted here.
+    """
 
     incumbent = None
     non_improving = 0
+    evaluations = {}
     for event in events:
         if event.event_type == EventType.BASELINE_VERIFIED:
             incumbent = event.payload.metric_set.primary_score
         elif event.event_type == EventType.EVALUATION_COMPLETED:
             result = event.payload.result
-            if not (
+            evaluations[event.event_id] = result
+        elif event.event_type == EventType.EXPERIMENT_DECIDED:
+            decision = event.payload.decision
+            if (
+                decision.decision == ExperimentDecisionKind.PROMOTE
+                or decision.fidelity_completed != Fidelity.FULL
+                or decision.evaluation_event_id is None
+            ):
+                continue
+            result = evaluations.get(decision.evaluation_event_id)
+            if result is None or not (
                 result.fidelity == Fidelity.FULL
                 and result.population == Population.PUBLIC_VALIDATION
                 and result.trust.verdict == TrustVerdict.ACCEPTED
@@ -62,8 +85,8 @@ def stop_decision(
         return StopDecision(
             True,
             "converged",
-            "No trusted full evaluation improved the incumbent by more than epsilon "
-            "for %d consecutive evaluations." % pressure,
+            "No trusted terminal full-fidelity iteration improved the incumbent by "
+            "more than epsilon for %d consecutive iterations." % pressure,
         )
     if no_legal_proposal:
         return StopDecision(True, "no_legal_proposal", "No legal non-duplicate proposal remains.")

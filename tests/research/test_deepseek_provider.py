@@ -7,6 +7,7 @@ from urllib.error import HTTPError
 
 import pytest
 
+from tacorank.providers import deepseek as deepseek_module
 from tacorank.agents.research_planner import ResearchPlanner
 from tacorank.cli import _planner_for
 from tacorank.providers.deepseek import DeepSeekResearchProvider
@@ -21,7 +22,7 @@ def candidate(**updates):
         "hypothesis": "Pairwise BPR should improve within-user ranking.",
         "change_summary": "Replace pointwise loss with pairwise BPR.",
         "target_stage": "objective",
-        "target_files": ["solution/loss.py"],
+        "target_files": ["solution/candidate.py"],
         "fidelity_plan": ["smoke", "proxy", "full"],
         "expected_mechanism": "Optimize relative positive-negative ordering.",
         "success_criteria": "Full primary delta is at least 0.002.",
@@ -109,6 +110,13 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert payload["response_format"] == {"type": "json_object"}
     assert payload["max_tokens"] == 1_000
     assert payload["thinking"] == {"type": "enabled"}
+    prompt_document = json.loads(payload["messages"][1]["content"])
+    assert prompt_document["context"]["target_interfaces"] == {
+        "solution/candidate.py": (
+            "Required candidate entrypoint: def run(invocation) -> None"
+        )
+    }
+    assert "solution/train.py" in payload["messages"][0]["content"]
     assert "secret-key" not in json.dumps(payload)
     assert timeout == 120
     assert provider.resource_delta.llm_input_tokens == 101
@@ -171,7 +179,7 @@ def test_research_planner_repairs_target_outside_editable_paths(planner_context)
     result = asyncio.run(planner.propose(planner_context))
 
     assert result["action"] == "propose"
-    assert result["spec"]["target_files"] == ["solution/loss.py"]
+    assert result["spec"]["target_files"] == ["solution/candidate.py"]
     assert len(requests) == 2
     repair_prompt = json.loads(requests[1]["messages"][1]["content"])
     assert (
@@ -182,6 +190,43 @@ def test_research_planner_repairs_target_outside_editable_paths(planner_context)
         "solution",
         "research",
     ]
+    assert repair_prompt["context"]["target_interfaces"] == {
+        "solution/candidate.py": (
+            "Required candidate entrypoint: def run(invocation) -> None"
+        )
+    }
+
+
+def test_research_planner_repairs_invented_train_entrypoint(planner_context):
+    responses = [
+        response(candidate(target_files=["solution/train.py"])),
+        response(candidate(target_files=["solution/candidate.py"])),
+    ]
+    requests = []
+
+    def transport(url, headers, payload, timeout):
+        requests.append(payload)
+        return responses.pop(0)
+
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    planner = ResearchPlanner(
+        provider,
+        output_factory=output_factory,
+        input_token_limit=2_000,
+        output_token_limit=1_000,
+    )
+
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result["action"] == "propose"
+    assert result["spec"]["target_files"] == ["solution/candidate.py"]
+    repair_prompt = json.loads(requests[1]["messages"][1]["content"])
+    assert "TARGET_INTERFACE_NOT_TOUCHED" in repair_prompt["repair"][
+        "validation_errors"
+    ]
+    assert "METHOD_IMPLEMENTATION_TARGET_NOT_TOUCHED" in repair_prompt[
+        "repair"
+    ]["validation_errors"]
 
 
 def test_deepseek_provider_rejects_truncated_completion(planner_context):
@@ -261,8 +306,8 @@ def test_deepseek_preflight_authenticates_and_requires_configured_model(monkeypa
 
     requests = []
 
-    def open_request(request, timeout):
-        requests.append((request, timeout))
+    def open_request(request, timeout, context):
+        requests.append((request, timeout, context))
         return Response()
 
     monkeypatch.setattr("tacorank.providers.deepseek.urlopen", open_request)
@@ -270,15 +315,17 @@ def test_deepseek_preflight_authenticates_and_requires_configured_model(monkeypa
 
     provider.preflight()
 
-    request, timeout = requests[0]
+    request, timeout, context = requests[0]
     assert request.full_url == "https://api.deepseek.com/models"
     assert request.headers["Authorization"] == "Bearer secret-key"
     assert timeout == 30
+    assert context is deepseek_module._TLS_CONTEXT
 
 
 def test_deepseek_preflight_redacts_http_failure_detail(monkeypatch):
-    def reject(request, timeout):
+    def reject(request, timeout, context):
         del request, timeout
+        assert context is deepseek_module._TLS_CONTEXT
         raise HTTPError(
             "https://api.deepseek.com/models",
             401,

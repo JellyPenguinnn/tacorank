@@ -22,6 +22,7 @@ from ..schemas import (
     RecoveryPolicyContext,
     RunRequest,
     RunResult,
+    SubmissionCheckedPayload,
     TelemetrySample,
 )
 
@@ -83,4 +84,11 @@ class Evaluator(Protocol):
     async def decide(
         self, result: EvaluationResult, context: EvaluationDecisionContext
     ) -> ExperimentDecision:
+        ...
+
+
+class FinalSubmissionProvider(Protocol):
+    """Prepare a protected baseline submission without appending ledger state."""
+
+    async def prepare_baseline(self) -> SubmissionCheckedPayload:
         ...

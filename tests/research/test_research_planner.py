@@ -1,8 +1,12 @@
 import asyncio
 
+import pytest
+
 from tacorank.agents.research_planner import ResearchPlanner
 from tacorank.providers.research_provider import MockResearchProvider
 from tacorank.research.duplicate_detection import compute_duplicate_key
+
+from .conftest import make_summary
 
 
 def output_factory(action, spec, reason_code, reason, supporting_event_ids):
@@ -28,7 +32,7 @@ def make_spec(context, choice):
         "family": choice.family,
         "change_summary": "Replace pointwise loss with pairwise BPR.",
         "target_stage": "objective",
-        "target_files": ["solution/loss.py"],
+        "target_files": ["solution/candidate.py"],
         "fidelity_plan": ["smoke", "proxy", "full"],
         "expected_mechanism": "Improve within-user ordering.",
         "success_criteria": type("Criteria", (), {"full_parent_delta_min": 0.002})(),
@@ -78,3 +82,44 @@ def test_planner_returns_blocked_when_no_parent(planner_context):
 
     assert result["action"] == "blocked"
     assert result["reason_code"] == "NO_ELIGIBLE_PARENT"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason_code"),
+    [
+        ({"output_accepted": False}, "OUTPUT_CHECK_REJECTED"),
+        (
+            {"trust_verdict": "suspicious", "integrity": "compromised"},
+            "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
+        ),
+        ({"prediction_change": 0.0}, "NO_OP_REQUIRES_RECOVERY"),
+        ({"stability": "unstable"}, "UNSTABLE_RESULT_REQUIRES_CONFIRMATION"),
+        (
+            {"fidelity": "proxy", "population": "internal_proxy"},
+            "FIDELITY_PROMOTION_REQUIRED",
+        ),
+        ({"output_accepted": None}, "RESULT_NOT_BRANCHABLE"),
+        ({"population": "unbiased_audit"}, "RESULT_NOT_BRANCHABLE"),
+    ],
+)
+def test_guardrail_blocks_never_call_provider(
+    planner_context, overrides, reason_code
+):
+    planner_context.family_history = [
+        make_summary(
+            "exp_0001",
+            parent_experiment_id="exp_0000",
+            family="objective",
+            parent_eligible=False,
+            method_card_ids=["objective_pairwise_bpr"],
+            **overrides,
+        )
+    ]
+    provider = MockResearchProvider(None)
+    planner = ResearchPlanner(provider, output_factory=output_factory)
+
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result["action"] == "blocked"
+    assert result["reason_code"] == reason_code
+    assert provider.requests == []

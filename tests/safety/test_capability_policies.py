@@ -110,3 +110,13 @@ def test_data_policy_allows_training_target_but_blocks_protected_and_future() ->
         'columns = ["validation_target", "future_watch_time"]', "solution/model.py"
     )
     assert {finding.code for finding in source_findings} == codes
+
+    assert policy.inspect_source(
+        'label = int(row["training_target"])', "solution/model.py"
+    ) == ()
+    literal_findings = policy.inspect_source(
+        'label = int(row["validation_target"])', "solution/model.py"
+    )
+    assert {finding.code for finding in literal_findings} == {
+        ViolationCode.HIDDEN_LABEL_ACCESS
+    }

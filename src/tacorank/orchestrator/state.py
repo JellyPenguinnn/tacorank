@@ -84,6 +84,8 @@ class RunState:
     full_evaluations_completed: int = 0
     public_validation_queries: int = 0
     consecutive_non_improving_full_evaluations: int = 0
+    convergence_epsilon: float = 0.002
+    convergence_patience: int = 3
     max_experiments: int = 0
     wall_time_limit_seconds: int = 0
     token_limit: Optional[int] = None

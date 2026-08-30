@@ -24,6 +24,7 @@ from tacorank.coding.trae_adapter import (
 )
 from tacorank.git.patches import capture_commit_patch
 from tacorank.git.worktrees import WorktreeManager
+from tacorank.run_layout import experiment_artifact_prefix
 
 
 _FAKE_TRAE = r'''from __future__ import annotations
@@ -81,6 +82,13 @@ if behavior == "over_tokens":
 response = {"content": "credential=" + os.environ.get("FAKE_TRAE_SECRET", "none")}
 if behavior != "missing_usage":
     response["usage"] = usage
+success = behavior != "reported_failure"
+final_result = (
+    "provider rejected continuation for secret="
+    + os.environ.get("FAKE_TRAE_SECRET", "none")
+    if behavior == "reported_failure"
+    else "patched"
+)
 trajectory = {
     "task": prompt,
     "start_time": "2026-01-01T00:00:00",
@@ -90,8 +98,8 @@ trajectory = {
     "max_steps": max_steps,
     "llm_interactions": [{"provider": provider, "model": model, "response": response}],
     "agent_steps": [{"step_number": 1, "state": "completed"}],
-    "success": True,
-    "final_result": "patched",
+    "success": success,
+    "final_result": final_result,
     "execution_time": 1.0,
     "fake_cli_arguments": sys.argv[1:],
     "fake_environment": {
@@ -567,6 +575,26 @@ def test_adapter_allows_all_reported_tokens_when_limit_is_null(
     assert trajectory["tacorank_adapter"]["max_provider_tokens"] is None
 
 
+def test_reported_failure_retains_only_redacted_bounded_diagnostic(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    parts.environment["FAKE_TRAE_BEHAVIOR"] = "reported_failure"
+
+    with pytest.raises(CodingWorkerError) as failure:
+        asyncio.run(_worker(parts).create_patch(parts.context, parts.spec))
+
+    assert failure.value.code == "TRAE_REPORTED_FAILURE"
+    assert parts.secret not in (failure.value.output_tail or "")
+    assert "[REDACTED]" in (failure.value.output_tail or "")
+    assert "diagnostic_artifact=" in (failure.value.output_tail or "")
+    failure_artifact = parts.repository / experiment_artifact_prefix(
+        "run1", "exp1", attempt=1
+    ) / "trae_failure_trajectory.json"
+    assert failure_artifact.is_file()
+    assert parts.secret.encode("utf-8") not in failure_artifact.read_bytes()
+
+
 def test_candidate_identity_is_required_before_worktree_or_trae(
     adapter_parts: SimpleNamespace,
 ) -> None:
@@ -781,6 +809,20 @@ def test_production_preflight_executes_read_only_mounted_tool(
         % (parts.config.trae_runtime_root / "trae_agent" / "dist")
     ) in calls[1]
     assert calls[2] == ["start", "--attach", container_id]
+
+
+def test_local_preflight_does_not_require_provider_credential(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    parts.environment.pop("FAKE_TRAE_SECRET")
+    worker, _ = _production_worker(parts)
+
+    worker.preflight_local()
+
+    with pytest.raises(CodingWorkerError) as failure:
+        worker.preflight()
+    assert failure.value.code == "TRAE_CREDENTIAL_MISSING"
 
 
 def test_production_preflight_mount_failure_removes_probe(

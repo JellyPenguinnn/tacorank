@@ -117,7 +117,12 @@ class DataAccessPolicy:
             if value is None:
                 continue
             folded = value.casefold()
-            if value in self.protected_columns or any(
+            protected_column_literal = (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and value in self.protected_columns
+            )
+            if protected_column_literal or any(
                 token in folded for token in self.hidden_path_tokens
             ):
                 findings.append(

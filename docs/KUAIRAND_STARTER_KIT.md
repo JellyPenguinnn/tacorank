@@ -105,6 +105,10 @@ python3 submit.py --score --split valid submission.csv    # 校验并打分（�
 `--check` 会拒绝：表头错误、行数不符、`row_id` 跳号、`user_id`/`video_id` 与评测集不对齐、
 `score` 非数字或为 NaN/Inf。**提交前请自行跑一遍 `--check`。**
 
+### TacoRank 集成边界
+
+`tacorank setup-live` 从官方 `valid` 划分生成受保护的 proxy/full 评估人口与标签，从官方 `test` 划分生成不含标签的 `submission_rows.csv`、`candidate_final_infer` 输入视图和 FM fallback 提交。开发循环只能挂载 smoke/proxy/full 的合法视图；test 视图仅在 `run.stopped` 后由控制器挂载给已选中的 validation-best commit。test 预测只经过 Gate B 和 `submit.py --check --split test`，不会返回研究规划、收敛判断或本地指标计算。
+
 ## 从哪里开始改
 
 下面的排序是**实测过的**，不是猜的。组委会已经试过的死路直接标出来，别重复踩。

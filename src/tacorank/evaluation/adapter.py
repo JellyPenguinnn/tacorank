@@ -300,6 +300,7 @@ class ProtectedEvaluatorAdapter:
             completed = subprocess.run(
                 [
                     sys.executable,
+                    "-B",
                     "-I",
                     str(worker_path),
                     str(self.evaluator_path.resolve()),

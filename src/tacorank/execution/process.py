@@ -26,6 +26,9 @@ from tacorank.execution.sandbox import (
 )
 
 
+_RUNTIME_NOT_READY_EXIT_CODE = 75
+
+
 class ProcessLaunchError(RuntimeError):
     """Raised when the executor cannot create the reviewed child process."""
 
@@ -106,6 +109,7 @@ class ManagedProcess:
         self._log_truncated = False
         self._reader_error: Optional[BaseException] = None
         self._runtime_state: Mapping[str, Any] = {}
+        self._runtime_outputs_extracted = False
         self._reader = threading.Thread(
             target=self._read_output,
             name="tacorank-output-{0}".format(process.pid),
@@ -209,7 +213,14 @@ class ManagedProcess:
             state_error = error
         extraction_error: Optional[ProcessLaunchError] = None
         try:
-            self._extract_external_runtime_outputs()
+            cleanup = self._runtime_cleanup
+            supervised = cleanup is not None and cleanup.completion_argv is not None
+            if supervised and not self._runtime_outputs_extracted:
+                raise ProcessLaunchError(
+                    "container exited before live output extraction completed"
+                )
+            if not self._runtime_outputs_extracted:
+                self._extract_external_runtime_outputs()
         except ProcessLaunchError as error:
             extraction_error = error
         cleanup_error: Optional[ProcessLaunchError] = None
@@ -229,6 +240,40 @@ class ManagedProcess:
 
     def close_after_termination(self) -> None:
         self._close_reader()
+
+    def runtime_outputs_ready(self) -> bool:
+        """Return whether the trusted supervisor has finished the candidate."""
+
+        cleanup = self._runtime_cleanup
+        if cleanup is None or cleanup.completion_argv is None:
+            return False
+        completed = self._run_cleanup_command(cleanup.completion_argv)
+        if completed.returncode == 0:
+            return True
+        if completed.returncode == _RUNTIME_NOT_READY_EXIT_CODE:
+            return False
+        raise ProcessLaunchError("container output completion probe failed")
+
+    def extract_ready_runtime_outputs(self) -> None:
+        """Copy bounded tmpfs outputs while live, then release the supervisor."""
+
+        cleanup = self._runtime_cleanup
+        if (
+            cleanup is None
+            or cleanup.output_extraction is None
+            or cleanup.completion_argv is None
+            or cleanup.release_argv is None
+        ):
+            raise ProcessLaunchError("live runtime output handshake is unavailable")
+        if self._runtime_outputs_extracted:
+            raise ProcessLaunchError("runtime outputs were already extracted")
+        if not self.runtime_outputs_ready():
+            raise ProcessLaunchError("candidate has not completed output production")
+        self._extract_external_runtime_outputs()
+        self._runtime_outputs_extracted = True
+        released = self._run_cleanup_command(cleanup.release_argv)
+        if released.returncode != 0:
+            raise ProcessLaunchError("container output release failed")
 
     def _signal_group(
         self, requested_signal: signal.Signals, *, force: bool = False

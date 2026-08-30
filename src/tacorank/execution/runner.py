@@ -227,8 +227,11 @@ class ExecutionRunner:
         exit_code: Optional[int]
         try:
             initial_seal = self.seal_verifier.verify(request, workspace)
-            submission_prediction = self._submission_prediction(
+            submission_artifact = self._submission_artifact(
                 request, identity.command_id
+            )
+            submission_prediction = (
+                submission_artifact[0] if submission_artifact is not None else None
             )
             context = CommandContext(
                 repository_root=self.repository_root,
@@ -414,6 +417,29 @@ class ExecutionRunner:
                         )
                         break
 
+                    try:
+                        outputs_ready = process.runtime_outputs_ready()
+                    except ProcessLaunchError:
+                        termination = (
+                            "infrastructure_error",
+                            "RUNTIME_OUTPUT_HANDSHAKE_FAILURE",
+                            "container output completion probe failed",
+                        )
+                        break
+                    if outputs_ready:
+                        try:
+                            process.extract_ready_runtime_outputs()
+                        except ProcessLaunchError:
+                            termination = (
+                                "infrastructure_error",
+                                "RUNTIME_OUTPUT_EXTRACTION_FAILURE",
+                                "bounded container output extraction failed",
+                            )
+                            break
+                        release_wait = limits.wall_time_seconds - elapsed
+                        process.wait(timeout=min(0.1, max(0.001, release_wait)))
+                        continue
+
                     remaining = limits.wall_time_seconds - elapsed
                     time.sleep(
                         min(self.policy.telemetry_interval_seconds, max(0.001, remaining))
@@ -475,6 +501,10 @@ class ExecutionRunner:
                     "ARTIFACT_CAPTURE_FAILURE",
                     "expected artifact capture failed",
                 )
+
+        result_prediction_artifact = outputs.prediction_artifact
+        if submission_artifact is not None:
+            result_prediction_artifact = submission_artifact[1]
 
         if (
             post_seal_verified
@@ -547,7 +577,7 @@ class ExecutionRunner:
             log_artifact=log_artifact,
             telemetry_artifact=telemetry_artifact,
             checkpoint_artifact=outputs.checkpoint_artifact,
-            prediction_artifact=outputs.prediction_artifact,
+            prediction_artifact=result_prediction_artifact,
             resource_delta=resource_delta,
         )
 
@@ -587,9 +617,9 @@ class ExecutionRunner:
             resource_delta=tracker.finish(),
         )
 
-    def _submission_prediction(
+    def _submission_artifact(
         self, request: Any, command_id: str
-    ) -> Optional[Path]:
+    ) -> Optional[Tuple[Path, Any]]:
         if command_id != "submission_check":
             return None
         resolver = self.submission_artifact_resolver
@@ -608,7 +638,7 @@ class ExecutionRunner:
             raise ExecutionAuthorizationError(
                 "submission_check prior prediction is not a regular artifact"
             )
-        return resolved
+        return resolved, artifact_ref
 
 
 class FakeExecutionRunner:

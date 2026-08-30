@@ -19,34 +19,16 @@ from .context.builder import ContextBuilder
 from .memory.event_store import EventStore, LedgerError
 from .memory.projections import project
 from .memory.replay import replay
-from .orchestrator.fakes import (
-    FakeCodingWorker,
-    FakeEvaluator,
-    FakeExecutionRunner,
-    FakeHealthObserver,
-    FakeOutputGate,
-    FakePatchGate,
-    FakeRecoveryManager,
-    FakeResearchPlanner,
-)
 from .orchestrator.router import Harness
 from .orchestrator.state_machine import validator
 from .providers import DeepSeekResearchProvider, ProviderError
 from .reporting import rebuild_views
-from .schemas import (
-    EvaluationResult,
-    Fidelity,
-    Integrity,
-    MetricSet,
-    Population,
-    Stability,
-    TrustAssessment,
-    TrustVerdict,
-)
+from .run_layout import RunLayout
+from .schemas import EvaluationResult
 
 
 def _ledger(root: Path, run_id: str) -> Path:
-    return root / "runs" / run_id / "events.jsonl"
+    return RunLayout(root, run_id).ledger
 
 
 def _store(root: Path, run_id: str) -> EventStore:
@@ -66,14 +48,14 @@ def _status_dict(state) -> dict:
         "best_primary_score": state.best_primary_score,
         "experiments_proposed": state.experiments_proposed,
         "remaining_experiments": state.remaining_experiments,
+        "full_evaluations_completed": state.full_evaluations_completed,
+        "convergence_pressure": state.consecutive_non_improving_full_evaluations,
+        "stop_reason_code": state.stop_reason_code,
+        "final_experiment_id": state.final_experiment_id,
     }
 
 
 def _planner_for(config: RunConfig):
-    if config.research_provider == "fake":
-        if config.adapter_mode != "fake":
-            raise ContractError("live adapter mode cannot use the fake research provider")
-        return FakeResearchPlanner(config.baseline_commit_sha)
     api_key = os.environ.get(config.deepseek_api_key_env, "").strip()
     if not api_key:
         raise ProviderError(
@@ -100,7 +82,6 @@ def _runtime(
     config: RunConfig,
     *,
     live_config_path: Optional[Path],
-    allow_test_adapters: bool,
 ) -> tuple[Harness, EvaluationResult]:
     verified = verify_contract(config)
     artifacts = ArtifactStore(config.repository_root, config.artifact_roots)
@@ -109,56 +90,38 @@ def _runtime(
         artifact_store=artifacts,
         transition_validator=validator,
     )
-    if config.adapter_mode == "fake":
-        if not allow_test_adapters:
-            raise ContractError(
-                "fake adapters are test-only; pass --allow-test-adapters explicitly"
-            )
-        adapters = {
-            "coding_worker": FakeCodingWorker(artifacts),
-            "patch_gate": FakePatchGate(artifacts),
-            "runner": FakeExecutionRunner(artifacts),
-            "health_observer": FakeHealthObserver(),
-            "recovery_manager": FakeRecoveryManager(),
-            "output_gate": FakeOutputGate(),
-            "evaluator": FakeEvaluator(
-                config.metric_names, config.primary_metric_name
-            ),
-        }
-        baseline = _fake_baseline(config, verified.contract_sha256)
-    else:
-        if live_config_path is None:
-            raise ContractError("live adapter mode requires --live-config")
-        if config.live_adapter_config_sha256 is None:
-            raise ContractError(
-                "live adapter mode requires a frozen live_adapter_config_sha256"
-            )
-        actual_live_hash = hashlib.sha256(live_config_path.read_bytes()).hexdigest()
-        if actual_live_hash != config.live_adapter_config_sha256:
-            raise ContractError("live adapter configuration hash does not match")
-        from .orchestrator.live import LiveAdapterConfig, build_live_adapters
-
-        live = LiveAdapterConfig.load(live_config_path)
-        built = build_live_adapters(
-            config=config,
-            verified=verified,
-            live=live,
-            event_store=store,
-            artifact_store=artifacts,
+    if live_config_path is None:
+        raise ContractError("production runs require --live-config")
+    if config.live_adapter_config_sha256 is None:
+        raise ContractError(
+            "production runs require a frozen live_adapter_config_sha256"
         )
-        adapters = {
-            "coding_worker": built.coding_worker,
-            "patch_gate": built.patch_gate,
-            "runner": built.runner,
-            "health_observer": built.health_observer,
-            "recovery_manager": built.recovery_manager,
-            "output_gate": built.output_gate,
-            "evaluator": built.evaluator,
-        }
-        baseline = built.baseline
+    actual_live_hash = hashlib.sha256(live_config_path.read_bytes()).hexdigest()
+    if actual_live_hash != config.live_adapter_config_sha256:
+        raise ContractError("live adapter configuration hash does not match")
+    from .orchestrator.live import LiveAdapterConfig, build_live_adapters
+
+    live = LiveAdapterConfig.load(live_config_path)
+    built = build_live_adapters(
+        config=config,
+        verified=verified,
+        live=live,
+        event_store=store,
+        artifact_store=artifacts,
+    )
+    adapters = {
+        "coding_worker": built.coding_worker,
+        "patch_gate": built.patch_gate,
+        "runner": built.runner,
+        "health_observer": built.health_observer,
+        "recovery_manager": built.recovery_manager,
+        "output_gate": built.output_gate,
+        "evaluator": built.evaluator,
+        "final_submission_provider": built.final_submission_provider,
+    }
+    baseline = built.baseline
     planner = _planner_for(config)
-    if config.adapter_mode == "live":
-        planner.provider.preflight()
+    planner.provider.preflight()
     harness = Harness(
         config=config,
         verified_contract=verified,
@@ -168,37 +131,6 @@ def _runtime(
         **adapters,
     )
     return harness, baseline
-
-
-def _fake_baseline(config: RunConfig, contract_sha256: str) -> EvaluationResult:
-    if config.baseline_metrics is None:
-        raise ContractError("fake adapter mode requires frozen baseline_metrics in config")
-    metric_set = MetricSet(
-        metrics=config.baseline_metrics,
-        primary_metric_name=config.primary_metric_name,
-        primary_score=config.baseline_metrics[config.primary_metric_name],
-    )
-    return EvaluationResult(
-        run_id=config.run_id,
-        experiment_id="baseline",
-        attempt=1,
-        population=Population.PUBLIC_VALIDATION,
-        fidelity=Fidelity.FULL,
-        seed=config.seed_schedule[0],
-        public_query_index=1,
-        evaluator_sha256=config.evaluator_sha256,
-        contract_sha256=contract_sha256,
-        metric_set=metric_set,
-        baseline_delta=0,
-        parent_delta=0,
-        previous_best_delta=0,
-        prediction_change=1,
-        trust=TrustAssessment(
-            verdict=TrustVerdict.ACCEPTED,
-            stability=Stability.CONFIRMED,
-            integrity=Integrity.CLEAN,
-        ),
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -222,17 +154,51 @@ def build_parser() -> argparse.ArgumentParser:
     setup_live.add_argument("--run-id", default="run_001")
     setup_live.add_argument("--download-data", action="store_true")
 
-    run = commands.add_parser("run", help="start a frozen run")
+    setup_trae = commands.add_parser(
+        "setup-trae",
+        help="prepare the production Trae coding path without benchmark data",
+    )
+    setup_trae.add_argument("--repository-root", type=Path, default=Path.cwd())
+    setup_trae.add_argument(
+        "--deployment-dir", type=Path, default=Path(".tacorank/trae")
+    )
+    setup_trae.add_argument("--runtime-dir", type=Path)
+    setup_trae.add_argument("--python312", type=Path)
+    setup_trae.add_argument("--docker", type=Path)
+
+    trae_preflight = commands.add_parser(
+        "trae-preflight",
+        help="verify Docker, pinned Trae, credential, and DeepSeek model access",
+    )
+    trae_preflight.add_argument("--config", type=Path, required=True)
+    trae_preflight.add_argument(
+        "--local-only",
+        action="store_true",
+        help="verify the pinned Trae and Docker runtime without reading a credential",
+    )
+
+    trae_example = commands.add_parser(
+        "trae-run-example",
+        help="run one real Trae patch and Gate A without ML training",
+    )
+    trae_example.add_argument("--config", type=Path, required=True)
+    trae_example.add_argument(
+        "--input",
+        type=Path,
+        default=Path("examples/trae/experiment-spec.json"),
+    )
+    trae_example.add_argument("--run-id", default="trae_trial_001")
+    trae_example.add_argument("--experiment-id", default="exp_0001")
+
+    run = commands.add_parser(
+        "run", help="run the frozen autonomous loop through final submission checking"
+    )
     run.add_argument("--config", type=Path, required=True)
     run.add_argument(
         "--live-config",
         type=Path,
-        help="operator-reviewed production adapter configuration",
-    )
-    run.add_argument(
-        "--allow-test-adapters",
-        action="store_true",
-        help="explicitly permit deterministic fake adapters for tests only",
+        required=True,
+        help="required operator-reviewed production adapter configuration",
     )
 
     preflight = commands.add_parser(
@@ -241,7 +207,11 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--config", type=Path, required=True)
     preflight.add_argument("--live-config", type=Path, required=True)
 
-    for name in ("resume", "status", "validate-ledger", "rebuild-views", "finalize"):
+    for name in ("resume", "finalize"):
+        command = commands.add_parser(name)
+        command.add_argument("--config", type=Path, required=True)
+        command.add_argument("--live-config", type=Path, required=True)
+    for name in ("status", "validate-ledger", "rebuild-views"):
         command = commands.add_parser(name)
         command.add_argument("--run-id", required=True)
         command.add_argument("--repository-root", type=Path, default=Path.cwd())
@@ -273,16 +243,53 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(json.dumps(result, sort_keys=True))
             return 0
 
-        if args.command in {"run", "preflight"}:
+        if args.command == "setup-trae":
+            from .deployment import setup_trae_deployment
+
+            root = args.repository_root.resolve(strict=True)
+            python312 = args.python312 or Path(shutil.which("python3.12") or "python3.12")
+            docker = args.docker or Path(shutil.which("docker") or "docker")
+            runtime = args.runtime_dir or (
+                Path(".tacorank-runtime") / (root.name + "-trae")
+            )
+            result = setup_trae_deployment(
+                repository_root=root,
+                deployment_directory=args.deployment_dir,
+                runtime_directory=runtime,
+                python312=python312,
+                docker_executable=docker,
+            )
+            print(json.dumps(result, sort_keys=True))
+            return 0
+
+        if args.command in {"trae-preflight", "trae-run-example"}:
+            from .coding.standalone import (
+                TraeStandaloneConfig,
+                preflight_trae,
+                run_example_sync,
+            )
+
+            trae_config = TraeStandaloneConfig.load(args.config)
+            if args.command == "trae-preflight":
+                result = preflight_trae(
+                    trae_config,
+                    local_only=args.local_only,
+                )
+            else:
+                result = run_example_sync(
+                    trae_config,
+                    args.input,
+                    run_id=args.run_id,
+                    experiment_id=args.experiment_id,
+                )
+            print(json.dumps(result, sort_keys=True))
+            return 0
+
+        if args.command in {"run", "preflight", "resume", "finalize"}:
             config = RunConfig.load(args.config)
-            if args.command == "preflight" and config.adapter_mode != "live":
-                raise ContractError("preflight accepts production live configuration only")
             harness, baseline = _runtime(
                 config,
                 live_config_path=args.live_config,
-                allow_test_adapters=(
-                    args.allow_test_adapters if args.command == "run" else False
-                ),
             )
             if args.command == "preflight":
                 print(
@@ -290,7 +297,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         {
                             "run_id": config.run_id,
                             "status": "passed",
-                            "adapter_mode": "live",
+                            "runtime": "live",
                             "research_provider": config.research_provider,
                             "baseline_primary": baseline.metric_set.primary_score,
                             "ledger_created": False,
@@ -300,10 +307,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 del harness
                 return 0
-            harness.bootstrap(baseline)
-            asyncio.run(harness.run_one_experiment())
+            if args.command == "run":
+                harness.bootstrap(baseline)
+            else:
+                events = harness.events()
+                if not events:
+                    raise LedgerError("no ledger exists for run_id %s" % config.run_id)
+                started = events[0].payload
+                if (
+                    started.type != "run.started"
+                    or started.config_sha256 != harness.verified_contract.config_sha256
+                    or started.contract_sha256
+                    != harness.verified_contract.contract_sha256
+                ):
+                    raise ContractError(
+                        "resume configuration does not match the frozen run identity"
+                    )
+            if args.command == "finalize":
+                asyncio.run(harness.finalize())
+            else:
+                asyncio.run(harness.run_to_completion())
             events = harness.events()
-            rebuild_views(config.repository_root / "runs" / config.run_id, events)
+            rebuild_views(
+                RunLayout(config.repository_root, config.run_id).run_directory,
+                events,
+            )
             print(json.dumps(_status_dict(project(events)), sort_keys=True))
             return 0
 
@@ -319,17 +347,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "status":
             print(json.dumps(_status_dict(state), sort_keys=True))
         elif args.command == "rebuild-views":
-            rebuild_views(root / "runs" / args.run_id, events)
+            rebuild_views(RunLayout(root, args.run_id).run_directory, events)
             print("rebuilt derived views for %s" % args.run_id)
-        elif args.command == "resume":
-            print(json.dumps({**_status_dict(state), "resume_from": state.phase}, sort_keys=True))
-        elif args.command == "finalize":
-            if state.status.value != "stopped":
-                raise LedgerError("finalize requires run.stopped and clean reproduction evidence")
-            raise LedgerError(
-                "final selection requires the real runner/evaluator reproduction adapter; "
-                "P0 intentionally refuses to fabricate it"
-            )
         return 0
     except (
         ContractError,

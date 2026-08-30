@@ -2,10 +2,12 @@
 
 from .resources import ResourceSummary, aggregate_resources
 from .results import (
+    rebuild_operational_state,
     rebuild_views,
     render_evaluation_summary,
     render_lessons,
     render_metric_table,
+    render_resources,
     render_status,
     render_summary,
 )
@@ -13,10 +15,12 @@ from .results import (
 __all__ = [
     "ResourceSummary",
     "aggregate_resources",
+    "rebuild_operational_state",
     "rebuild_views",
     "render_evaluation_summary",
     "render_lessons",
     "render_metric_table",
+    "render_resources",
     "render_status",
     "render_summary",
 ]

@@ -14,7 +14,12 @@ from typing import Optional
 
 import pytest
 
-from tacorank.execution.commands import CommandContext, CommandProfile, CommandRegistry
+from tacorank.execution.commands import (
+    CommandContext,
+    CommandProfile,
+    CommandRegistry,
+    ExpectedArtifact,
+)
 from tacorank.execution.sandbox import (
     ContainerMountPolicy,
     ContainerReadOnlyMount,
@@ -515,6 +520,17 @@ def test_docker_portable_quota_uses_bounded_tmpfs_and_output_copy(
     tmp_path: Path,
 ) -> None:
     command, config, worktree, artifacts = _resolved(tmp_path)
+    command = replace(
+        command,
+        expected_artifacts=(
+            ExpectedArtifact(
+                role="prediction",
+                relative_path="prediction.csv",
+                kind="predictions",
+                content_type="text/csv",
+            ),
+        ),
+    )
     sandbox = DockerSandbox(
         _policy(worktree, artifacts),
         image=IMAGE,
@@ -551,10 +567,27 @@ def test_docker_portable_quota_uses_bounded_tmpfs_and_output_copy(
         mechanism="container_tmpfs",
     )
     assert launch.runtime_cleanup is not None
+    assert launch.argv[launch.argv.index("--user") + 1] == "0:0"
+    cap_adds = [
+        launch.argv[index + 1]
+        for index, value in enumerate(launch.argv)
+        if value == "--cap-add"
+    ]
+    assert cap_adds == ["SETUID", "SETGID"]
+    assert "tacorank.execution.container_supervisor" in launch.argv
     extraction = launch.runtime_cleanup.output_extraction
     assert extraction is not None
-    assert extraction.argv[1] == "cp"
-    assert extraction.argv[-1] == "-"
+    assert extraction.argv[1:4] == ("exec", "--user", sandbox.container_user)
+    assert "tacorank.execution.container_supervisor" in extraction.argv
+    assert "export" in extraction.argv
+    assert extraction.argv[-2:] == ("--allowed-output", "prediction.csv")
+    assert launch.runtime_cleanup.completion_argv is not None
+    assert launch.runtime_cleanup.release_argv is not None
+    assert launch.runtime_cleanup.completion_argv[1:4] == (
+        "exec",
+        "--user",
+        "0:0",
+    )
 
 
 def test_docker_preflight_launches_and_cleans_exact_capability_probe(
@@ -605,6 +638,10 @@ def test_docker_preflight_launches_and_cleans_exact_capability_probe(
 
     assert proof.environment_sha256 == IMAGE_ENVIRONMENT_SHA256
     assert any(argv[1] == "run" and "--read-only" in argv for argv in calls)
+    runtime_probe = next(argv for argv in calls if argv[1] == "run")
+    assert "tacorank.execution.container_supervisor" in runtime_probe
+    assert "self-test" in runtime_probe
+    assert runtime_probe[runtime_probe.index("--user") + 1] == "0:0"
     assert any(argv[1:3] == ["rm", "--force"] for argv in calls)
     assert all(
         environment["DOCKER_HOST"] == "unix://" + str(socket_path)

@@ -152,6 +152,24 @@ def test_dirty_or_wrong_commit_worktree_is_rejected(
     assert failure.value.code == "WORKTREE_DIRTY"
 
 
+def test_ignored_worktree_change_is_rejected(
+    repository: tuple[Path, str], tmp_path: Path
+) -> None:
+    root, _ = repository
+    (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    _git(root, "add", ".gitignore")
+    _git(root, "commit", "-m", "ignore generated file")
+    base = _git(root, "rev-parse", "HEAD").strip()
+    manager = WorktreeManager(root, tmp_path / "worktrees")
+    record = manager.create("run1", "ignored", base)
+    (record.path / "ignored.txt").write_text("dirty", encoding="utf-8")
+
+    with pytest.raises(GitOperationError) as failure:
+        manager.verify(record, expected_commit_sha=base, require_clean=True)
+
+    assert failure.value.code == "WORKTREE_DIRTY"
+
+
 def test_worktree_lease_is_exclusive_bounded_and_stale_safe(
     repository: tuple[Path, str], tmp_path: Path
 ) -> None:

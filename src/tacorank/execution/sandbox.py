@@ -277,12 +277,14 @@ class RuntimeCleanupSpec:
     environment: Mapping[str, str]
     state_argv: Optional[Tuple[str, ...]] = None
     output_extraction: Optional["RuntimeOutputExtractionSpec"] = None
+    completion_argv: Optional[Tuple[str, ...]] = None
+    release_argv: Optional[Tuple[str, ...]] = None
     timeout_seconds: float = 10.0
 
 
 @dataclass(frozen=True)
 class RuntimeOutputExtractionSpec:
-    """Stream a stopped container's bounded tmpfs outputs into trusted storage."""
+    """Stream a live container's bounded tmpfs outputs into trusted storage."""
 
     argv: Tuple[str, ...]
     destination: Path
@@ -567,6 +569,13 @@ class DockerSandbox:
                 )
             network = self.network_name
 
+        portable_tmpfs = self.output_quota_verifier is None
+        runtime_user = "0:0" if portable_tmpfs else self.container_user
+        supervisor_capabilities = (
+            ["--cap-add", "SETUID", "--cap-add", "SETGID"]
+            if portable_tmpfs
+            else []
+        )
         argv = [
             str(docker),
             "run",
@@ -582,6 +591,7 @@ class DockerSandbox:
             "--read-only",
             "--cap-drop",
             "ALL",
+            *supervisor_capabilities,
             "--security-opt",
             "no-new-privileges:true",
             "--pids-limit",
@@ -595,13 +605,12 @@ class DockerSandbox:
             "--ulimit",
             "nofile={0}:{0}".format(configuration.limits.max_open_files),
             "--user",
-            self.container_user,
+            runtime_user,
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,noexec,size={0}m".format(self.tmpfs_size_mb),
             "--mount",
             _bind_mount(workspace, "/workspace", read_only=True),
         ]
-        portable_tmpfs = self.output_quota_verifier is None
         if portable_tmpfs:
             argv.extend(
                 (
@@ -625,19 +634,63 @@ class DockerSandbox:
             argv.extend(
                 ("--env", "{0}={1}".format(key, container_environment[key]))
             )
-        # Force the reviewed executable instead of allowing an image-baked
-        # ENTRYPOINT to intercept the symbolic command argv.
-        argv.extend(("--entrypoint", container_executable, self.image))
-        argv.extend(container_arguments)
+        # A tmpfs disappears when a container stops.  The reviewed supervisor
+        # runs as root, drops only the candidate child to ``container_user``,
+        # and keeps the container alive until the controller has copied the
+        # allowlisted outputs.  Dedicated quota filesystems do not need this
+        # handshake and retain the direct reviewed entrypoint.
+        control_directory = "/tmp/{0}-control".format(name)
+        if portable_tmpfs:
+            child_uid, child_gid = self.container_user.split(":", 1)
+            argv.extend(
+                (
+                    "--entrypoint",
+                    container_executable,
+                    self.image,
+                    "-m",
+                    "tacorank.execution.container_supervisor",
+                    "run",
+                    "--control-directory",
+                    control_directory,
+                    "--uid",
+                    child_uid,
+                    "--gid",
+                    child_gid,
+                    "--",
+                )
+            )
+            argv.extend(container_arguments)
+        else:
+            # Force the reviewed executable instead of allowing an image-baked
+            # ENTRYPOINT to intercept the symbolic command argv.
+            argv.extend(("--entrypoint", container_executable, self.image))
+            argv.extend(container_arguments)
 
         extraction = None
         if portable_tmpfs:
+            allowed_outputs = tuple(
+                sorted(item.relative_path for item in command.expected_artifacts)
+            )
+            export_arguments = tuple(
+                argument
+                for relative in allowed_outputs
+                for argument in ("--allowed-output", relative)
+            )
             extraction = RuntimeOutputExtractionSpec(
-                argv=(str(docker), "cp", name + ":/artifacts/.", "-"),
-                destination=artifact_directory,
-                allowed_relative_paths=tuple(
-                    sorted(item.relative_path for item in command.expected_artifacts)
+                argv=(
+                    str(docker),
+                    "exec",
+                    "--user",
+                    self.container_user,
+                    name,
+                    container_executable,
+                    "-m",
+                    "tacorank.execution.container_supervisor",
+                    "export",
+                    *export_arguments,
                 ),
+                destination=artifact_directory,
+                allowed_relative_paths=allowed_outputs,
                 max_bytes=output_quota.enforced_max_bytes,
             )
         cleanup = RuntimeCleanupSpec(
@@ -670,6 +723,40 @@ class DockerSandbox:
                 name,
             ),
             output_extraction=extraction,
+            completion_argv=(
+                (
+                    str(docker),
+                    "exec",
+                    "--user",
+                    "0:0",
+                    name,
+                    container_executable,
+                    "-m",
+                    "tacorank.execution.container_supervisor",
+                    "probe",
+                    "--control-directory",
+                    control_directory,
+                )
+                if portable_tmpfs
+                else None
+            ),
+            release_argv=(
+                (
+                    str(docker),
+                    "exec",
+                    "--user",
+                    "0:0",
+                    name,
+                    container_executable,
+                    "-m",
+                    "tacorank.execution.container_supervisor",
+                    "release",
+                    "--control-directory",
+                    control_directory,
+                )
+                if portable_tmpfs
+                else None
+            ),
         )
         metrics = RuntimeMetricsSpec(
             argv=(
@@ -732,15 +819,7 @@ class DockerSandbox:
                 "production Docker execution requires a hard output disk quota limit"
             )
         name = "tacorank-preflight-{0}".format(secrets.token_hex(12))
-        script = (
-            "import json,os;"
-            "import tacorank.execution.solution_cli;"
-            "import benchmarks.kuairand_pure.pipeline;"
-            "s=os.statvfs('/artifacts');"
-            "p='/artifacts/preflight';"
-            "open(p,'wb').write(b'ok');os.unlink(p);"
-            "print(json.dumps({'capacity':s.f_frsize*s.f_blocks}))"
-        )
+        child_uid, child_gid = self.container_user.split(":", 1)
         command = [
             str(docker),
             "run",
@@ -753,6 +832,10 @@ class DockerSandbox:
             "--read-only",
             "--cap-drop",
             "ALL",
+            "--cap-add",
+            "SETUID",
+            "--cap-add",
+            "SETGID",
             "--security-opt",
             "no-new-privileges:true",
             "--pids-limit",
@@ -764,7 +847,7 @@ class DockerSandbox:
             "--cpus",
             "1",
             "--user",
-            self.container_user,
+            "0:0",
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,noexec,size=32m",
             "--tmpfs",
@@ -772,8 +855,13 @@ class DockerSandbox:
             "--entrypoint",
             "/usr/local/bin/python3",
             self.image,
-            "-c",
-            script,
+            "-m",
+            "tacorank.execution.container_supervisor",
+            "self-test",
+            "--uid",
+            child_uid,
+            "--gid",
+            child_gid,
         ]
         cleanup_completed: Optional[subprocess.CompletedProcess[str]] = None
         cleanup_error: Optional[BaseException] = None

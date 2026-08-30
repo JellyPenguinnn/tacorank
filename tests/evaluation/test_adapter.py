@@ -303,6 +303,20 @@ class ProtectedAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(EvaluationIntegrityError, "verified event"):
             service.evaluate(fabricated_request)
 
+    def test_single_seed_trust_converts_without_unconfirmed_aggregate(self):
+        request = fixed_evaluation_request(1, 11)
+        result = evaluation_service(
+            FixedScoreAdapter(0.60), request.output_gate
+        ).evaluate(request)
+
+        self.assertEqual(result.trust.seed_count, 1)
+        self.assertIsNone(result.trust.seed_mean)
+        self.assertIsNone(result.trust.seed_stderr)
+        canonical = result.to_canonical()
+        self.assertEqual(canonical.trust.seed_count, 1)
+        self.assertIsNone(canonical.trust.seed_mean)
+        self.assertIsNone(canonical.trust.seed_stderr)
+
     def test_seed_confirmation_resolves_events_and_includes_current_score(self):
         first_request = fixed_evaluation_request(1, 11)
         first = evaluation_service(

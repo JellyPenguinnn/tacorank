@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0",
+  "run_id": "$RUN_ID",
+  "experiment_id": "$EXPERIMENT_ID",
+  "parent_experiment_id": "baseline",
+  "parent_commit_sha": "$BASE_COMMIT",
+  "context_id": "ctx_planner_example",
+  "hypothesis": "A strictly past-only recency-decayed item and author prior will improve cold-start and drift-sensitive ranking over the static item-popularity baseline.",
+  "family": "features",
+  "change_summary": "Add one deterministic recency-decayed item and author statistic, blend it with the existing smoothed item rate, and preserve the reviewed candidate interface.",
+  "target_stage": "candidate_scoring",
+  "target_files": [
+    "solution/candidate.py"
+  ],
+  "fidelity_plan": [
+    "smoke",
+    "proxy",
+    "full"
+  ],
+  "expected_mechanism": "Recent training interactions receive greater weight while the author prior supplies a bounded fallback for sparse or unseen videos.",
+  "success_criteria": "The patch passes Gate A and the later matched-budget CPU smoke and proxy evaluations improve the primary metric without leakage or output-contract failures.",
+  "falsification_condition": "Reject if Gate A fails, temporal ordering is ambiguous, the score is not finite and deterministic, or matched-budget proxy evaluation does not improve over the parent.",
+  "estimated_cost": {
+    "llm_tokens_upper_bound": 131072,
+    "wall_time_seconds_upper_bound": 1800,
+    "gpu_seconds_upper_bound": 0,
+    "cost_tier": "low"
+  },
+  "method_card_ids": [
+    "temporal_drift_past_only"
+  ],
+  "evidence_event_ids": [],
+  "duplicate_key": "$DUPLICATE_KEY"
+}

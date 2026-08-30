@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"evaluation_random_exposure_robustness","family":"evaluation","status":"candidate","tags":["random_exposure","unbiased_evaluation","robustness"],"cost_tier":"low","sources":["https://arxiv.org/abs/2208.08696","https://github.com/chongminggao/KuaiRand"]}
+{"schema_version":"1.0","method_id":"evaluation_random_exposure_robustness","family":"evaluation","status":"candidate","tags":["random_exposure","unbiased_evaluation","robustness"],"cost_tier":"low","prerequisites":["random_exposure_log","standard_public_evaluation_complete"],"allowed_data":["random_exposure_log","verified_predictions"],"prohibition_conditions":["adaptive_tuning_on_audit_labels"],"sources":["https://arxiv.org/abs/2208.08696","https://github.com/chongminggao/KuaiRand"]}
 ```
 
 ## Mechanism

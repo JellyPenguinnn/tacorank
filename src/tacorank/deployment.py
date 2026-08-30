@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -15,7 +16,13 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, Mapping, Sequence, Tuple
 
-from .coding import hash_trae_runtime_package
+import certifi
+
+from .coding import (
+    TRAE_DEEPSEEK_REASONING_MARKER,
+    TRAE_DOCKER_EDIT_TOOL_MARKER,
+    hash_trae_runtime_package,
+)
 from .docker_host import normalize_local_docker_host
 from .evaluation.proxy import split_validation_indices
 
@@ -31,10 +38,95 @@ RAW_REQUIRED = (
     "log_standard_4_22_to_5_08_pure.csv",
     "video_features_basic_pure.csv",
 )
+TRAE_ONLY_DATA_BOUNDARY_SHA256 = hashlib.sha256(
+    b"tacorank-trae-only-no-dataset-v1"
+).hexdigest()
 
 
 class DeploymentError(RuntimeError):
     """A local production prerequisite or generated identity is invalid."""
+
+
+def setup_trae_deployment(
+    *,
+    repository_root: Path,
+    deployment_directory: Path,
+    runtime_directory: Path,
+    python312: Path,
+    docker_executable: Path,
+) -> Mapping[str, Any]:
+    """Prepare only the production Trae coding path, without benchmark data."""
+
+    root = Path(repository_root).resolve(strict=True)
+    deployment = _new_directory_inside(root, deployment_directory)
+    runtime = _new_external_directory(root, runtime_directory)
+    python = _regular_executable(python312, "Python 3.12")
+    docker = _regular_executable(docker_executable, "Docker")
+    docker_host = _discover_docker_host(docker, root)
+    _require_python312(python)
+    _require_clean_tracked_checkout(root)
+    _run(
+        ("git", "submodule", "update", "--init", "--recursive"),
+        cwd=root,
+        label="Git submodule initialization",
+    )
+
+    runtime.mkdir(parents=True, exist_ok=False)
+    deployment.mkdir(parents=True, exist_ok=False)
+    assets = _prepare_trae_runtime(root, runtime, python, docker)
+    config_path = deployment / "trae-deployment.json"
+    payload = {
+        "schema_version": "1.0",
+        "repository_root": str(root),
+        "worktree_root": str(
+            (root.parent / ".tacorank-worktrees" / root.name).resolve()
+        ),
+        "required_submodules": ["kuairand-starter-kit"],
+        "contract_path": "contract/COMPETITION.md",
+        "protected_paths_path": "PROTECTED_PATHS.md",
+        "artifact_roots": ["artifacts", "runs"],
+        "editable_roots": ["solution"],
+        "allowed_command_ids": [
+            "candidate_smoke",
+            "candidate_proxy",
+            "candidate_full",
+        ],
+        "target_interface_excerpts": {
+            "candidate": (
+                "def run(invocation: PipelineInvocation) -> None; read only "
+                "invocation.input_root and write exactly invocation.output_path as "
+                "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
+                "invocation.seed; return None. train.csv has the exact columns "
+                "date,user_id,video_id,author_id,tab,duration_ms,long_view, where "
+                "date is an integer YYYYMMDD value; "
+                "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
+                "and never exposes long_view. Training dates strictly precede score "
+                "dates. Preserve contiguous score row_id order, duplicate rows, "
+                "finite deterministic scores, and exclusive output creation."
+            )
+        },
+        "coding_step_limit": 40,
+        "coding_token_limit": None,
+        "coding_wall_time_limit_seconds": 1800,
+        "data_boundary_sha256": TRAE_ONLY_DATA_BOUNDARY_SHA256,
+        "trae": _trae_payload(
+            runtime=runtime,
+            runtime_identity=assets["runtime_identity"],
+            trae_yaml=assets["trae_yaml"],
+            docker=docker,
+            docker_host=docker_host,
+            image=assets["image"],
+        ),
+    }
+    _write_json_exclusive(config_path, payload)
+    return {
+        "trae_config": str(config_path),
+        "runtime": str(runtime),
+        "docker_image": assets["image"],
+        "model": DEEPSEEK_MODEL,
+        "reasoning_effort": "high",
+        "dataset_prepared": False,
+    }
 
 
 def setup_live_deployment(
@@ -73,16 +165,13 @@ def setup_live_deployment(
 
     runtime.mkdir(parents=True, exist_ok=False)
     deployment.mkdir(parents=True, exist_ok=False)
-    _install_trae(python, runtime, root)
-    _patch_trae_read_only_attach(runtime)
-    image, image_environment_sha256 = _build_runtime_image(root, docker)
-    _install_trae_tools(runtime, docker, image, root)
-    runtime_identity = _trae_identity(runtime)
+    assets = _prepare_trae_runtime(root, runtime, python, docker)
+    image = str(assets["image"])
+    image_environment_sha256 = str(assets["image_environment_sha256"])
+    runtime_identity = assets["runtime_identity"]
     generated_data = _prepare_data(root, deployment, data)
 
-    trae_yaml = runtime / "trae-agent.yaml"
-    _write_text_exclusive(trae_yaml, _trae_yaml())
-    trae_yaml.chmod(0o600)
+    trae_yaml = assets["trae_yaml"]
     live_path = deployment / "live-adapters.json"
     run_path = deployment / "run-config.json"
     manifest_path = generated_data["manifest_path"]
@@ -95,46 +184,15 @@ def setup_live_deployment(
             (root.parent / ".tacorank-worktrees" / root.name).resolve()
         ),
         "required_submodules": ["kuairand-starter-kit"],
-        "trae": {
-            "command_prefix": [str(runtime_identity["executable"])],
-            "trae_version": "0.1.0",
-            "provider": "openai",
-            "provider_base_url": DEEPSEEK_BASE_URL,
-            "model_id": DEEPSEEK_MODEL,
-            "config_file": str(trae_yaml),
-            "config_sha256": _sha256_file(trae_yaml),
-            "max_steps_cap": 20,
-            "max_token_cap": None,
-            "max_wall_time_seconds_cap": 900,
-            "repair_step_limit": 12,
-            "repair_token_limit": None,
-            "repair_wall_time_limit_seconds": 600,
-            "repair_allowed_command_ids": ["candidate_smoke"],
-            "approved_environment_names": ["DEEPSEEK_API_KEY"],
-            "credential_environment_names": ["DEEPSEEK_API_KEY"],
-            "credential_environment_aliases": [
-                ["DEEPSEEK_API_KEY", "OPENAI_API_KEY"]
-            ],
-            "trae_source_revision": TRAE_SOURCE_REVISION,
-            "trae_install_root": str(runtime),
-            "trae_install_identity_file": str(runtime_identity["direct_url"]),
-            "trae_install_identity_sha256": _sha256_file(
-                runtime_identity["direct_url"]
-            ),
-            "trae_executable_sha256": _sha256_file(runtime_identity["executable"]),
-            "trae_runtime_root": str(runtime_identity["site_packages"]),
-            "trae_runtime_manifest_sha256": hash_trae_runtime_package(
-                runtime_identity["site_packages"]
-            ),
-            "python_dotenv_metadata_file": str(runtime_identity["dotenv_metadata"]),
-            "python_dotenv_metadata_sha256": _sha256_file(
-                runtime_identity["dotenv_metadata"]
-            ),
-            "docker_image": image,
-            "docker_executable": str(docker),
-            "docker_host": docker_host,
-        },
-        "contract_root": str((root / "contract").resolve(strict=True)),
+        "trae": _trae_payload(
+            runtime=runtime,
+            runtime_identity=runtime_identity,
+            trae_yaml=trae_yaml,
+            docker=docker,
+            docker_host=docker_host,
+            image=image,
+        ),
+        "contract_root": str(generated_data["contract_root"]),
         "input_roots": {
             key: str(value) for key, value in generated_data["input_roots"].items()
         },
@@ -161,6 +219,9 @@ def setup_live_deployment(
             key: str(value)
             for key, value in generated_data["baseline_prediction_csvs"].items()
         },
+        "baseline_final_prediction_csv": str(
+            generated_data["baseline_final_prediction_csv"]
+        ),
         "candidate_allowed_columns": [
             "date",
             "user_id",
@@ -204,17 +265,51 @@ def setup_live_deployment(
         "adapter_mode": "live",
         "live_adapter_config_sha256": _sha256_file(live_path),
         "editable_roots": ["solution"],
+        "allowed_research_families": [
+            "objective",
+            "temporal_history",
+            "multitask",
+            "duration_bias",
+            "features",
+            "model",
+            "sampling",
+            "ensemble",
+            "evaluation",
+            "other",
+        ],
+        "allowed_research_data": [
+            "train_interactions",
+            "public_validation",
+            "user_id",
+            "video_id",
+            "author_id",
+            "tab",
+            "date",
+            "duration_ms",
+            "long_view",
+            "verified_predictions",
+        ],
+        "research_capabilities": [],
+        "active_research_prohibitions": [],
+        "prediction_change_no_op_threshold": 0.001,
         "target_interface_excerpts": {
-            "candidate": (
-                "def run(invocation: PipelineInvocation) -> None; read only "
+            "solution/candidate.py": (
+                "Required candidate entrypoint: def run(invocation: "
+                "PipelineInvocation) -> None; include this file in target_files; read only "
                 "invocation.input_root and write exactly invocation.output_path as "
                 "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
-                "invocation.seed; return None"
+                "invocation.seed; return None. train.csv has the exact columns "
+                "date,user_id,video_id,author_id,tab,duration_ms,long_view, where "
+                "date is an integer YYYYMMDD value; "
+                "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
+                "and never exposes long_view. Training dates strictly precede score "
+                "dates. Preserve contiguous score row_id order, duplicate rows, "
+                "finite deterministic scores, and exclusive output creation."
             )
         },
-        "coding_step_limit": 20,
+        "coding_step_limit": 40,
         "coding_token_limit": None,
-        "coding_wall_time_limit_seconds": 900,
+        "coding_wall_time_limit_seconds": 1800,
         "research_provider": "deepseek",
         "deepseek_model": DEEPSEEK_MODEL,
         "deepseek_base_url": DEEPSEEK_BASE_URL,
@@ -231,6 +326,83 @@ def setup_live_deployment(
         "data_manifest": str(manifest_path),
         "runtime": str(runtime),
         "docker_image": image,
+    }
+
+
+def _prepare_trae_runtime(
+    root: Path,
+    runtime: Path,
+    python: Path,
+    docker: Path,
+) -> Mapping[str, Any]:
+    """Install, compatibility-patch, and attest the reviewed Trae runtime."""
+
+    _install_trae(python, runtime, root)
+    _patch_trae_read_only_attach(runtime)
+    _patch_trae_deepseek_reasoning(runtime)
+    _patch_trae_docker_edit_tool(runtime)
+    image, image_environment_sha256 = _build_runtime_image(root, docker)
+    _install_trae_tools(runtime, docker, image, root)
+    runtime_identity = _trae_identity(runtime)
+    trae_yaml = runtime / "trae-agent.yaml"
+    _write_text_exclusive(trae_yaml, _trae_yaml())
+    trae_yaml.chmod(0o600)
+    return {
+        "image": image,
+        "image_environment_sha256": image_environment_sha256,
+        "runtime_identity": runtime_identity,
+        "trae_yaml": trae_yaml,
+    }
+
+
+def _trae_payload(
+    *,
+    runtime: Path,
+    runtime_identity: Mapping[str, Path],
+    trae_yaml: Path,
+    docker: Path,
+    docker_host: str,
+    image: str,
+) -> Mapping[str, Any]:
+    return {
+        "command_prefix": [str(runtime_identity["executable"])],
+        "trae_version": "0.1.0",
+        "provider": "openai",
+        "provider_base_url": DEEPSEEK_BASE_URL,
+        "model_id": DEEPSEEK_MODEL,
+        "reasoning_effort": "high",
+        "config_file": str(trae_yaml),
+        "config_sha256": _sha256_file(trae_yaml),
+        "max_steps_cap": 40,
+        "max_token_cap": None,
+        "max_wall_time_seconds_cap": 1800,
+        "repair_step_limit": 20,
+        "repair_token_limit": None,
+        "repair_wall_time_limit_seconds": 1200,
+        "repair_allowed_command_ids": ["candidate_smoke"],
+        "approved_environment_names": ["DEEPSEEK_API_KEY"],
+        "credential_environment_names": ["DEEPSEEK_API_KEY"],
+        "credential_environment_aliases": [
+            ["DEEPSEEK_API_KEY", "OPENAI_API_KEY"]
+        ],
+        "trae_source_revision": TRAE_SOURCE_REVISION,
+        "trae_install_root": str(runtime),
+        "trae_install_identity_file": str(runtime_identity["direct_url"]),
+        "trae_install_identity_sha256": _sha256_file(
+            runtime_identity["direct_url"]
+        ),
+        "trae_executable_sha256": _sha256_file(runtime_identity["executable"]),
+        "trae_runtime_root": str(runtime_identity["site_packages"]),
+        "trae_runtime_manifest_sha256": hash_trae_runtime_package(
+            runtime_identity["site_packages"]
+        ),
+        "python_dotenv_metadata_file": str(runtime_identity["dotenv_metadata"]),
+        "python_dotenv_metadata_sha256": _sha256_file(
+            runtime_identity["dotenv_metadata"]
+        ),
+        "docker_image": image,
+        "docker_executable": str(docker),
+        "docker_host": docker_host,
     }
 
 
@@ -254,6 +426,13 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     baselines = protected / "baselines"
     populations.mkdir(mode=0o700)
     baselines.mkdir(mode=0o700)
+    contract_view = deployment / "contract"
+    contract_view.mkdir(mode=0o700)
+    _copy_exclusive(
+        root / "contract" / "COMPETITION.md",
+        contract_view / "COMPETITION.md",
+    )
+    _write_submission_rows(contract_view / "submission_rows.csv", test)
     population_csvs = {
         "smoke": populations / "smoke.csv",
         "proxy": populations / "proxy.csv",
@@ -267,6 +446,7 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     _run(
         (
             sys.executable,
+            "-B",
             "submit.py",
             str(official_baseline),
             "--data_dir",
@@ -287,6 +467,22 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
         baseline_prediction_csvs["proxy"], baseline_rows, proxy_indices
     )
     _copy_exclusive(official_baseline, baseline_prediction_csvs["full"])
+    baseline_final_prediction_csv = protected / "official-fm-test.csv"
+    _run(
+        (
+            sys.executable,
+            "-B",
+            "submit.py",
+            str(baseline_final_prediction_csv),
+            "--data_dir",
+            str(data),
+            "--split",
+            "test",
+            "--make",
+        ),
+        cwd=root / "kuairand-starter-kit",
+        label="official FM final submission generation",
+    )
 
     common = views / "common"
     common.mkdir(mode=0o700)
@@ -352,9 +548,11 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     )
     return {
         "manifest_path": manifest_path,
+        "contract_root": contract_view,
         "input_roots": input_roots,
         "population_csvs": population_csvs,
         "baseline_prediction_csvs": baseline_prediction_csvs,
+        "baseline_final_prediction_csv": baseline_final_prediction_csv,
     }
 
 
@@ -366,7 +564,12 @@ def _load_official_splits(root: Path, data: Path) -> Mapping[str, Any]:
     if specification is None or specification.loader is None:
         raise DeploymentError("official KuaiRand data loader could not be loaded")
     module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        specification.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module.load(str(data))
 
 
@@ -396,6 +599,14 @@ def _write_population(path: Path, rows: Iterable[Sequence[Any]]) -> None:
         writer.writerow(("row_id", "user_id", "video_id", "label"))
         for row_id, row in enumerate(rows):
             writer.writerow((row_id, row[1], row[2], row[6]))
+
+
+def _write_submission_rows(path: Path, rows: Iterable[Sequence[Any]]) -> None:
+    with _exclusive_csv(path) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("row_id", "user_id", "video_id"))
+        for row_id, row in enumerate(rows):
+            writer.writerow((row_id, row[1], row[2]))
 
 
 def _read_prediction_rows(path: Path, expected_count: int) -> Sequence[Tuple[str, str, str]]:
@@ -429,7 +640,7 @@ def _trae_yaml() -> str:
   trae_agent:
     enable_lakeview: false
     model: tacorank_coder
-    max_steps: 20
+    max_steps: 40
     tools:
       - str_replace_based_edit_tool
       - task_done
@@ -447,7 +658,7 @@ models:
   tacorank_coder:
     model_provider: openai
     model: deepseek-v4-flash
-    max_tokens: 4096
+    max_tokens: 32768
     temperature: 0
     top_p: 1
     top_k: 0
@@ -518,6 +729,170 @@ def _patch_trae_read_only_attach(runtime: Path) -> None:
         docker_manager.write_text(patched, encoding="utf-8")
     except (OSError, SyntaxError) as exc:
         raise DeploymentError("pinned Trae read-only attach patch is invalid") from exc
+
+
+def _patch_trae_deepseek_reasoning(runtime: Path) -> None:
+    """Make the pinned Responses client explicit and continuous for DeepSeek thinking."""
+
+    client = (
+        _trae_site_packages(runtime)
+        / "trae_agent"
+        / "utils"
+        / "llm_clients"
+        / "openai_client.py"
+    )
+    try:
+        if (
+            client.is_symlink()
+            or not client.is_file()
+            or client.resolve(strict=True) != client
+        ):
+            raise DeploymentError("Trae OpenAI client is not a canonical source file")
+        original = client.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DeploymentError("Trae OpenAI client could not be read") from exc
+
+    request_anchor = """            max_output_tokens=model_config.max_tokens,
+"""
+    response_anchor = """        for output_block in response.output:
+            if output_block.type == "function_call":
+"""
+    message_anchor = '''            elif output_block.type == "message":
+                content = "".join(
+                    content_block.text
+                    for content_block in output_block.content
+                    if content_block.type == "output_text"
+                )
+
+        if content != "":
+            self.message_history.append(
+                EasyInputMessageParam(content=content, role="assistant", type="message")
+            )
+'''
+    if (
+        original.count(request_anchor) != 1
+        or original.count(response_anchor) != 1
+        or original.count(message_anchor) != 1
+        or TRAE_DEEPSEEK_REASONING_MARKER in original
+    ):
+        raise DeploymentError("pinned Trae DeepSeek patch does not apply cleanly")
+
+    ordered_message = '''            elif output_block.type == "message":
+                message_content = "".join(
+                    content_block.text
+                    for content_block in output_block.content
+                    if content_block.type == "output_text"
+                )
+                content += message_content
+                if message_content:
+                    self.message_history.append(
+                        EasyInputMessageParam(
+                            content=message_content,
+                            role="assistant",
+                            type="message",
+                        )
+                    )
+'''
+    patched = original.replace(
+        request_anchor,
+        request_anchor
+        + """            reasoning={"effort": "high"}
+            if model_config.model.startswith("deepseek-")
+            else openai.NOT_GIVEN,
+""",
+    ).replace(
+        response_anchor,
+        f'''        for output_block in response.output:
+            # {TRAE_DEEPSEEK_REASONING_MARKER}.
+            if output_block.type == "reasoning":
+                reasoning_item = output_block.model_dump(exclude_none=True)
+                reasoning_item.pop("summary", None)
+                reasoning_item.pop("encrypted_content", None)
+                self.message_history.append(reasoning_item)
+            elif output_block.type == "function_call":
+''',
+    ).replace(message_anchor, ordered_message)
+    try:
+        compile(patched, str(client), "exec")
+        client.write_text(patched, encoding="utf-8")
+    except (OSError, SyntaxError) as exc:
+        raise DeploymentError("pinned Trae DeepSeek patch is invalid") from exc
+
+
+def _patch_trae_docker_edit_tool(runtime: Path) -> None:
+    """Normalize DeepSeek edit calls before the pinned Docker CLI boundary."""
+
+    executor = (
+        _trae_site_packages(runtime)
+        / "trae_agent"
+        / "tools"
+        / "docker_tool_executor.py"
+    )
+    try:
+        if (
+            executor.is_symlink()
+            or not executor.is_file()
+            or executor.resolve(strict=True) != executor
+        ):
+            raise DeploymentError("Trae Docker edit executor is not a canonical source file")
+        original = executor.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DeploymentError("Trae Docker edit executor could not be read") from exc
+
+    import_anchor = "import os\n"
+    block_anchor = '''                executable_path = f"{self._docker_manager.CONTAINER_TOOLS_PATH}/edit_tool"
+                cmd_parts = [executable_path, sub_command]
+
+                for key, value in processed_args.items():
+                    if key == "command" or value is None:
+                        continue
+                    if isinstance(value, list):
+                        str_value = " ".join(map(str, value))
+                        cmd_parts.append(f"--{key} {str_value}")
+                    else:
+                        cmd_parts.append(f"--{key} '{str(value)}'")
+
+                command_to_run = " ".join(cmd_parts)
+'''
+    if (
+        original.count(import_anchor) != 1
+        or original.count(block_anchor) != 1
+        or TRAE_DOCKER_EDIT_TOOL_MARKER in original
+    ):
+        raise DeploymentError("pinned Trae Docker edit patch does not apply cleanly")
+
+    replacement = f'''                # {TRAE_DOCKER_EDIT_TOOL_MARKER}.
+                command_arguments = {{
+                    "view": ("path", "view_range"),
+                    "create": ("path", "file_text"),
+                    "str_replace": ("path", "old_str", "new_str"),
+                    "insert": ("path", "insert_line", "new_str"),
+                }}.get(sub_command)
+                if command_arguments is None:
+                    raise ValueError(f"Unsupported edit sub-command: {{sub_command}}")
+
+                executable_path = f"{{self._docker_manager.CONTAINER_TOOLS_PATH}}/edit_tool"
+                cmd_parts = [executable_path, sub_command]
+                for key in command_arguments:
+                    value = processed_args.get(key)
+                    if value is None:
+                        continue
+                    cmd_parts.append(f"--{{key}}")
+                    if isinstance(value, list):
+                        cmd_parts.extend(str(item) for item in value)
+                    else:
+                        cmd_parts.append(str(value))
+
+                command_to_run = shlex.join(cmd_parts)
+'''
+    patched = original.replace(import_anchor, import_anchor + "import shlex\n").replace(
+        block_anchor, replacement
+    )
+    try:
+        compile(patched, str(executor), "exec")
+        executor.write_text(patched, encoding="utf-8")
+    except (OSError, SyntaxError) as exc:
+        raise DeploymentError("pinned Trae Docker edit patch is invalid") from exc
 
 
 def _install_trae_tools(
@@ -726,8 +1101,13 @@ def _download_data(root: Path, data: Path) -> None:
     total_bytes = 0
     try:
         request = urllib.request.Request(DATA_URL, method="GET")
+        tls_context = ssl.create_default_context(cafile=certifi.where())
         with os.fdopen(descriptor, "wb") as output:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=120,
+                context=tls_context,
+            ) as response:
                 while True:
                     block = response.read(1024 * 1024)
                     if not block:

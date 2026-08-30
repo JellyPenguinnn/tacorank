@@ -54,6 +54,7 @@ from ..git import WorktreeManager
 from ..memory.event_store import EventStore
 from ..memory.projections import project
 from ..recovery import RecoveryManager
+from ..run_layout import run_artifact_root
 from ..safety import (
     DataAccessPolicy,
     DataViewPolicy,
@@ -66,6 +67,9 @@ from ..safety import (
     ReceiptStore,
 )
 from ..schemas import (
+    ArtifactKind,
+    CheckResult,
+    CheckStatus,
     EvaluationDecisionContext,
     EvaluationRequest,
     EvaluationResult,
@@ -75,6 +79,7 @@ from ..schemas import (
     Population,
     Stability,
     StrictModel,
+    SubmissionCheckedPayload,
     TrustAssessment,
     TrustVerdict,
     normalize_relative_path,
@@ -93,14 +98,6 @@ _INPUT_COMMAND_IDS = frozenset(
     }
 )
 _POPULATION_KEYS = frozenset({"smoke", "proxy", "full"})
-_TRAE_PATH_KEYS = (
-    "config_file",
-    "docker_executable",
-    "trae_install_root",
-    "trae_install_identity_file",
-    "trae_runtime_root",
-    "python_dotenv_metadata_file",
-)
 
 
 class LiveAdapterConfig(StrictModel):
@@ -127,6 +124,7 @@ class LiveAdapterConfig(StrictModel):
     data_manifest_path: Path
     population_csvs: Dict[str, Path]
     baseline_prediction_csvs: Dict[str, Path]
+    baseline_final_prediction_csv: Path
     candidate_allowed_columns: List[str] = Field(default_factory=list)
     protected_columns: List[str] = Field(default_factory=lambda: ["label"])
     hidden_path_tokens: List[str] = Field(
@@ -168,6 +166,7 @@ class LiveAdapterConfig(StrictModel):
             "python_executable",
             "docker_executable",
             "data_manifest_path",
+            "baseline_final_prediction_csv",
         ):
             raw[key] = str(_resolve_config_path(base, raw[key]))
         for mapping_name in (
@@ -208,29 +207,14 @@ class LiveAdapters:
     output_gate: Any
     evaluator: Any
     baseline: EvaluationResult
+    final_submission_provider: Any
 
 
 def _trae_config_from_mapping(values: Mapping[str, Any]) -> TraeConfig:
     """Normalize JSON-shaped live values at the Trae dataclass boundary."""
 
-    normalized = dict(values)
     try:
-        normalized["command_prefix"] = tuple(normalized["command_prefix"])
-        for key in _TRAE_PATH_KEYS:
-            if normalized.get(key) is not None:
-                normalized[key] = Path(normalized[key])
-        for key in (
-            "repair_allowed_command_ids",
-            "approved_environment_names",
-            "credential_environment_names",
-        ):
-            if key in normalized:
-                normalized[key] = tuple(normalized[key])
-        if "credential_environment_aliases" in normalized:
-            normalized["credential_environment_aliases"] = tuple(
-                tuple(item) for item in normalized["credential_environment_aliases"]
-            )
-        return TraeConfig(**normalized)
+        return TraeConfig.from_mapping(values)
     except (KeyError, TypeError, ValueError) as error:
         raise ContractError("live Trae configuration has invalid field types") from error
 
@@ -239,6 +223,49 @@ def _trae_config_from_mapping(values: Mapping[str, Any]) -> TraeConfig:
 class _PopulationData:
     rows: Tuple[Mapping[str, Any], ...]
     labels: Tuple[int, ...]
+
+
+class ProtectedBaselineFinalSubmission:
+    """Copy and re-check the manifest-attested official FM test submission."""
+
+    def __init__(
+        self,
+        *,
+        config: RunConfig,
+        artifact_store: ArtifactStore,
+        source: Path,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> None:
+        self.config = config
+        self.artifact_store = artifact_store
+        self.source = source
+        self.rows = tuple(rows)
+
+    async def prepare_baseline(self) -> SubmissionCheckedPayload:
+        checked = validate_submission(self.source, self.rows)
+        artifact = self.artifact_store.write(
+            artifact_id="baseline_final_submission",
+            kind=ArtifactKind.SUBMISSION,
+            relative_path=(
+                run_artifact_root(self.config.run_id) + "/baseline/final/submission.csv"
+            ),
+            content=self.source.read_bytes(),
+            content_type="text/csv",
+        )
+        return SubmissionCheckedPayload(
+            accepted=True,
+            submission_artifact=artifact,
+            checks=[
+                CheckResult(
+                    name="official_submission_contract",
+                    status=CheckStatus.PASS,
+                    summary=(
+                        "%d ordered rows; %.6f unique-score fraction"
+                        % (checked.rows, checked.unique_score_fraction)
+                    ),
+                )
+            ],
+        )
 
 
 class LedgerCandidateIdentityResolver:
@@ -361,6 +388,42 @@ class LedgerReceiptArtifactResolver:
         )
 
 
+class LedgerSubmissionArtifactResolver:
+    """Resolve only the selected commit's accepted final-inference output."""
+
+    def __init__(self, event_store: EventStore) -> None:
+        self.event_store = event_store
+
+    def resolve(self, request: Any) -> Any:
+        events = self.event_store.read_events(repair_tail=True)
+        state = project(events)
+        if (
+            request.command_id != "submission_check"
+            or request.experiment_id != state.best_experiment_id
+            or request.patch_commit_sha != state.best_commit_sha
+        ):
+            raise ContractError("submission check does not target the selected commit")
+        started_by_attempt = {
+            event.payload.request.attempt: event.payload.request
+            for event in events
+            if event.payload.type == "execution.started"
+            and event.payload.request.experiment_id == request.experiment_id
+        }
+        for event in reversed(events):
+            if event.payload.type != "output.checked":
+                continue
+            output = event.payload.result
+            if output.experiment_id != request.experiment_id or not output.accepted:
+                continue
+            source_request = started_by_attempt.get(output.attempt)
+            if source_request is not None and (
+                source_request.command_id == "candidate_final_infer"
+                and source_request.patch_commit_sha == request.patch_commit_sha
+            ):
+                return output.prediction_artifact
+        raise ContractError("selected commit has no accepted final-inference output")
+
+
 class LedgerOutputGate:
     def __init__(
         self,
@@ -422,7 +485,11 @@ class LedgerOutputGate:
 
     async def check(self, result: Any) -> Any:
         request, receipt = self._request_and_receipt(result)
-        key = result.fidelity.value
+        key = (
+            "final"
+            if request.command_id == "candidate_final_infer"
+            else result.fidelity.value
+        )
         gate = self.gates.get(key)
         if gate is None:
             raise ContractError("no Gate B population is frozen for %s" % key)
@@ -512,14 +579,19 @@ class ProtectedEvaluationBridge:
         state = project(self.event_store.read_events(repair_tail=True))
         best_batch = self._reference_batch(state.best_experiment_id, key, population)
         previous_best = self._score_reference(best_batch, population, request)
-        seed_events = tuple(
-            event.event_id
-            for event in self.event_store.read_events(repair_tail=True)
-            if event.payload.type == "evaluation.completed"
-            and event.payload.result.experiment_id == request.experiment_id
-            and event.payload.result.population == request.population
-            and event.payload.result.fidelity == request.fidelity
-            and event.payload.result.attempt < request.attempt
+        execution_request = self._execution_request(request.output_checked_event_id)
+        seed_events = (
+            tuple(
+                event.event_id
+                for event in self.event_store.read_events(repair_tail=True)
+                if event.payload.type == "evaluation.completed"
+                and event.payload.result.experiment_id == request.experiment_id
+                and event.payload.result.population == request.population
+                and event.payload.result.fidelity == request.fidelity
+                and event.payload.result.attempt < request.attempt
+            )
+            if execution_request.command_id != "clean_reproduce"
+            else ()
         )
         gate = self._resolve_gate(request.output_checked_event_id)
         inputs = EvaluationInputs(
@@ -623,6 +695,43 @@ class ProtectedEvaluationBridge:
             ordered_row_identity_sha256=result.ordered_row_identity_sha256,
             ordered_prediction_sha256=result.ordered_prediction_sha256,
         )
+
+    def _execution_request(self, output_event_id: str) -> Any:
+        output = next(
+            (
+                event
+                for event in self.event_store.read_events(repair_tail=True)
+                if event.event_id == output_event_id
+                and event.payload.type == "output.checked"
+            ),
+            None,
+        )
+        if output is None:
+            raise ContractError("evaluation output evidence is missing")
+        finished_id = output.causation_event_id
+        finished = next(
+            (
+                event
+                for event in self.event_store.read_events(repair_tail=True)
+                if event.event_id == finished_id
+                and event.payload.type == "execution.finished"
+            ),
+            None,
+        )
+        if finished is None:
+            raise ContractError("evaluation execution evidence is missing")
+        started = next(
+            (
+                event.payload.request
+                for event in self.event_store.read_events(repair_tail=True)
+                if event.event_id == finished.causation_event_id
+                and event.payload.type == "execution.started"
+            ),
+            None,
+        )
+        if started is None:
+            raise ContractError("evaluation request evidence is missing")
+        return started
 
     def _resolve_seed_result(self, event_id: str) -> DomainEvaluationResult:
         event = next(
@@ -763,6 +872,8 @@ def build_live_adapters(
     populations = {
         key: _load_population(path) for key, path in live.population_csvs.items()
     }
+    final_rows = _load_submission_rows(live.contract_root / "submission_rows.csv")
+    populations["final"] = _PopulationData(final_rows, ())
     population_manifests = _protected_population_manifests(populations)
     worktrees = WorktreeManager(
         root, live.worktree_root, required_submodules=live.required_submodules
@@ -775,13 +886,18 @@ def build_live_adapters(
         data_manifest_sha256=config.data_manifest_sha256,
         expected_manifest_sha256=verified.protected_paths_sha256,
     )
-    receipts = ReceiptStore(root)
+    artifact_root = run_artifact_root(config.run_id)
+    receipts = ReceiptStore(
+        root,
+        artifact_root=artifact_root,
+        include_run_id=False,
+    )
     data_policy = DataAccessPolicy(
         views=tuple(
             DataViewPolicy(
                 view_id=command_id,
                 allowed_columns=tuple(live.candidate_allowed_columns),
-                allowed_path_prefixes=("/inputs/data",),
+                allowed_path_prefixes=("/inputs",),
             )
             for command_id in sorted(live.input_roots)
         ),
@@ -822,7 +938,11 @@ def build_live_adapters(
         python_executable=str(live.python_executable),
         container_python_executable=live.container_python_executable,
     )
-    execution_artifacts = CanonicalArtifactStoreAdapter(artifact_store)
+    execution_artifacts = CanonicalArtifactStoreAdapter(
+        artifact_store,
+        artifact_root=artifact_root,
+        include_run_id=False,
+    )
     read_only_roots = tuple(
         dict.fromkeys(
             [live.contract_root.resolve(strict=True)]
@@ -859,6 +979,7 @@ def build_live_adapters(
             protected_manifest=manifest,
             receipt_artifact_resolver=LedgerReceiptArtifactResolver(event_store),
         ),
+        submission_artifact_resolver=LedgerSubmissionArtifactResolver(event_store),
         policy=RunnerPolicy(
             max_timeout_seconds=max(config.timeout_profiles.values()),
         ),
@@ -893,6 +1014,12 @@ def build_live_adapters(
         ),
         evaluator=evaluator,
         baseline=baseline,
+        final_submission_provider=ProtectedBaselineFinalSubmission(
+            config=config,
+            artifact_store=artifact_store,
+            source=live.baseline_final_prediction_csv,
+            rows=final_rows,
+        ),
     )
 
 
@@ -923,6 +1050,27 @@ def _load_population(path: Path) -> _PopulationData:
     if not rows:
         raise ContractError("population CSV must not be empty")
     return _PopulationData(tuple(rows), tuple(labels))
+
+
+def _load_submission_rows(path: Path) -> Tuple[Mapping[str, Any], ...]:
+    rows: List[Mapping[str, Any]] = []
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, strict=True)
+        if tuple(reader.fieldnames or ()) != ("row_id", "user_id", "video_id"):
+            raise ContractError("submission rows have an invalid header")
+        for expected, record in enumerate(reader):
+            if int(record["row_id"]) != expected:
+                raise ContractError("submission row_id must be contiguous and ordered")
+            rows.append(
+                {
+                    "row_id": expected,
+                    "user_id": record["user_id"],
+                    "video_id": record["video_id"],
+                }
+            )
+    if not rows:
+        raise ContractError("submission rows must not be empty")
+    return tuple(rows)
 
 
 def _protected_population_manifests(
@@ -982,12 +1130,12 @@ def _mount_policies(
             mounts=(
                 ContainerReadOnlyMount(
                     live.contract_root.resolve(strict=True),
-                    "/contracts/competition",
+                    "/contracts",
                     "contract",
                 ),
                 ContainerReadOnlyMount(
                     live.input_roots[command_id].resolve(strict=True),
-                    "/inputs/data",
+                    "/inputs",
                     (
                         "hidden_inference_data"
                         if command_id == "candidate_final_infer"
@@ -1014,6 +1162,7 @@ def _require_live_files(config: RunConfig, live: LiveAdapterConfig) -> None:
         ("python_executable", live.python_executable),
         ("docker_executable", live.docker_executable),
         ("data_manifest_path", live.data_manifest_path),
+        ("baseline final prediction", live.baseline_final_prediction_csv),
         *[("input root", value) for value in live.input_roots.values()],
         *[("population CSV", value) for value in live.population_csvs.values()],
         *[("baseline prediction", value) for value in live.baseline_prediction_csvs.values()],
@@ -1144,6 +1293,7 @@ def _verify_data_manifest(config: RunConfig, live: LiveAdapterConfig) -> None:
     required_files.update(
         path.resolve(strict=True) for path in live.baseline_prediction_csvs.values()
     )
+    required_files.add(live.baseline_final_prediction_csv.resolve(strict=True))
     for path in required_files:
         try:
             relative = path.relative_to(root).as_posix()

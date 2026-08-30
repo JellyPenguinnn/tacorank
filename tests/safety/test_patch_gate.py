@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from tacorank.schemas import PatchCheckResult
 from tacorank.safety import (
     InterfaceRequirement,
     ReceiptIdentity,
+    ReceiptStore,
     SharedSchemaFactories,
     SharedSchemaUnavailable,
     ViolationCode,
@@ -18,6 +20,7 @@ from tacorank.safety import (
 
 from .helpers import (
     DATA_SHA,
+    FACTORIES,
     IsolatedSmokeStub,
     artifact,
     artifact_repository_for,
@@ -41,6 +44,44 @@ def layout(tmp_path: Path):
     manifest = make_manifest(repository)
     artifacts = artifact_repository_for(repository)
     return repository, artifacts, root_commit, manifest
+
+
+def test_receipt_store_supports_run_scoped_production_layout(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    store = ReceiptStore(
+        repository,
+        FACTORIES,
+        artifact_root="runs/run_1/artifacts",
+        include_run_id=False,
+        clock=lambda: datetime(2026, 8, 29, tzinfo=timezone.utc),
+    )
+    identity = ReceiptIdentity(
+        run_id="run_1",
+        experiment_id="exp_1",
+        attempt=2,
+        patch_commit_sha="a" * 40,
+        diff_sha256="b" * 64,
+        contract_sha256="c" * 64,
+        protected_manifest_sha256="d" * 64,
+        data_manifest_sha256="e" * 64,
+    )
+
+    receipt = store.write(
+        identity,
+        [{"name": "gate_a", "status": "pass", "summary": "accepted"}],
+    )
+
+    assert receipt.relative_path.startswith(
+        "runs/run_1/artifacts/exp_1/attempt_002/gate_a/"
+    )
+    assert store.verify(
+        receipt.artifact_ref,
+        identity,
+        receipt_id=receipt.receipt_id,
+    )["attempt"] == 2
 
 
 def test_gate_a_accepts_recomputed_commit_and_writes_verifiable_receipt(

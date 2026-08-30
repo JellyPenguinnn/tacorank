@@ -1,17 +1,23 @@
-"""Judge-facing deterministic Markdown result projections."""
+"""Deterministic run-memory and report projections."""
 
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Mapping, Sequence
+import re
+import shutil
+from typing import Dict, Mapping, Sequence
 
 from tacorank.evaluation.comparisons import normalized_headroom
 from tacorank.evaluation.types import EvaluationResult
 
 from ..memory.projections import project
+from ..memory.retrieval import experiment_events
+from ..orchestrator.state import ExperimentStatus
+from ..run_layout import RunLayout
 from ..schemas import Event, LessonStatus
 from .resources import ResourceSummary
 
@@ -102,47 +108,183 @@ def _atomic_write(path: Path, content: str) -> None:
     os.replace(temporary, path)
 
 
-def render_status(events: Sequence[Event]) -> str:
+def _atomic_write_json(path: Path, payload: object) -> None:
+    _atomic_write(
+        path,
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+    )
+
+
+def _state_payload(events: Sequence[Event]) -> dict:
     state = project(events)
-    payload = {
-        "run_id": state.run_id,
-        "status": state.status.value,
-        "phase": state.phase,
-        "last_event_id": state.last_event_id,
-        "active_experiment_id": state.active_experiment_id,
-        "active_attempt": state.active_attempt,
-        "active_fidelity": state.active_fidelity.value if state.active_fidelity else None,
-        "best_experiment_id": state.best_experiment_id,
-        "best_commit_sha": state.best_commit_sha,
-        "best_primary_score": state.best_primary_score,
-        "experiments_proposed": state.experiments_proposed,
-        "remaining_experiments": state.remaining_experiments,
-        "full_evaluations_completed": state.full_evaluations_completed,
-        "public_validation_queries": state.public_validation_queries,
-        "manual_interventions": state.manual_intervention_count,
+    active_jobs = []
+    node = state.current_experiment
+    terminal = {
+        ExperimentStatus.ACCEPTED,
+        ExperimentStatus.REJECTED,
+        ExperimentStatus.PRUNED,
+        ExperimentStatus.INVALID,
     }
+    if (
+        node is not None
+        and node.status not in terminal
+        and state.active_attempt is not None
+        and state.status.value == "running"
+    ):
+        active_jobs.append(
+            {
+                # Phase A remains sequential.  This deterministic projection is
+                # replaced by ledger-owned job IDs when parallel scheduling lands.
+                "job_id": "job_%s_attempt_%03d"
+                % (node.experiment_id, state.active_attempt),
+                "experiment_id": node.experiment_id,
+                "attempt": state.active_attempt,
+                "phase": state.phase,
+                "fidelity": (
+                    state.active_fidelity.value if state.active_fidelity else None
+                ),
+                "worker": None,
+                "identity_source": "derived_sequential",
+            }
+        )
+    totals = state.resource_totals
+    return {
+        "schema_version": "1.0",
+        "run_id": state.run_id,
+        "execution_mode": "sequential",
+        "derived_from": {
+            "event_id": state.last_event_id,
+            "event_hash": state.last_event_hash,
+        },
+        "global": {
+            "status": state.status.value,
+            "phase": state.phase,
+            "best_experiment_id": state.best_experiment_id,
+            "best_commit_sha": state.best_commit_sha,
+            "best_primary_score": state.best_primary_score,
+            "baseline_primary_score": state.baseline_primary_score,
+            "experiments_proposed": state.experiments_proposed,
+            "remaining_iterations": state.remaining_experiments,
+            "full_evaluations_completed": state.full_evaluations_completed,
+            "public_validation_queries": state.public_validation_queries,
+            "manual_interventions": state.manual_intervention_count,
+            "stop_reason_code": state.stop_reason_code,
+            "final_experiment_id": state.final_experiment_id,
+        },
+        "active_jobs": active_jobs,
+        "resources": {
+            "provider_tokens": totals.provider_tokens,
+            "estimated_tokens": totals.estimated_tokens,
+            "unmeasured_tokens": totals.unmeasured_tokens,
+            "total_reported_tokens": totals.total_reported_tokens,
+            "cpu_time_ms": totals.cpu_time_ms,
+            "gpu_hours": totals.gpu_hours,
+            "elapsed_wall_time_seconds": state.elapsed_wall_time_seconds,
+        },
+    }
+
+
+def render_status(events: Sequence[Event]) -> str:
     return "# TacoRank status\n\n```json\n%s\n```\n" % json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, indent=2
+        _state_payload(events), ensure_ascii=False, sort_keys=True, indent=2
     )
 
 
 def render_lessons(events: Sequence[Event]) -> str:
-    state = project(events)
-    lines = ["# Active lessons", ""]
-    active = [lesson for lesson in state.lessons.values() if lesson.status == LessonStatus.ACTIVE.value]
-    active.sort(key=lambda lesson: lesson.lesson_id)
-    if not active:
-        lines.append("No active lessons recorded.")
-    for lesson in active:
+    lessons = _lesson_records(events)
+    lines = [_GENERATED_MARKER, "", "# Lesson memory", ""]
+    if not lessons:
+        lines.append("No lessons recorded.")
+        return "\n".join(lines).rstrip() + "\n"
+    lines.extend(
+        (
+            "| Lesson | Status | Origin | Category | Confidence |",
+            "| --- | --- | --- | --- | ---: |",
+        )
+    )
+    for lesson_id in sorted(lessons):
+        record = lessons[lesson_id]
+        candidate = record["candidate"]
+        lines.append(
+            "| [%s](%s.md) | %s | %s | %s | %.2f |"
+            % (
+                lesson_id,
+                lesson_id,
+                record["status"],
+                candidate.origin.value,
+                candidate.category.value,
+                candidate.confidence,
+            )
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+_GENERATED_MARKER = "<!-- generated by TacoRank; do not edit -->"
+
+
+def _lesson_records(events: Sequence[Event]) -> Dict[str, dict]:
+    records: Dict[str, dict] = {}
+    for event in events:
+        if event.payload.type == "lesson.recorded":
+            records[event.payload.lesson_id] = {
+                "candidate": event.payload.candidate,
+                "status": LessonStatus.ACTIVE.value,
+                "recorded_event_id": event.event_id,
+                "status_event_id": None,
+                "status_reason": None,
+            }
+        elif event.payload.type == "lesson.status_changed":
+            record = records.get(event.payload.lesson_id)
+            if record is not None:
+                record["status"] = event.payload.status.value
+                record["status_event_id"] = event.event_id
+                record["status_reason"] = event.payload.reason
+    return records
+
+
+def _render_lesson(lesson_id: str, record: dict) -> str:
+    candidate = record["candidate"]
+    sources = ", ".join("`%s`" % item for item in candidate.source_event_ids)
+    commits = ", ".join("`%s`" % item for item in candidate.source_commit_shas)
+    lines = [
+        _GENERATED_MARKER,
+        "",
+        "# %s" % lesson_id,
+        "",
+        "- Status: `%s`" % record["status"],
+        "- Origin: `%s`" % candidate.origin.value,
+        "- Category: `%s`" % candidate.category.value,
+        "- Confidence: `%.2f`" % candidate.confidence,
+        "- Tags: %s" % (", ".join(candidate.tags) if candidate.tags else "none"),
+        "- Recorded by: `%s`" % record["recorded_event_id"],
+        "",
+        "## Finding",
+        "",
+        candidate.summary,
+        "",
+        "## Applies when",
+        "",
+        candidate.applicability,
+    ]
+    if candidate.avoid_when:
+        lines.extend(("", "## Avoid when", "", candidate.avoid_when))
+    lines.extend(
+        (
+            "",
+            "## Evidence",
+            "",
+            "- Events: %s" % (sources or "none"),
+            "- Commits: %s" % (commits or "none"),
+        )
+    )
+    if record["status_event_id"]:
         lines.extend(
             (
-                "## %s" % lesson.lesson_id,
                 "",
-                lesson.summary,
+                "## Latest status change",
                 "",
-                "Tags: %s" % (", ".join(lesson.tags) if lesson.tags else "none"),
-                "Evidence: `%s`" % lesson.source_event_id,
-                "",
+                "- Event: `%s`" % record["status_event_id"],
+                "- Reason: %s" % record["status_reason"],
             )
         )
     return "\n".join(lines).rstrip() + "\n"
@@ -151,6 +293,8 @@ def render_lessons(events: Sequence[Event]) -> str:
 def render_summary(events: Sequence[Event]) -> str:
     state = project(events)
     lines = [
+        _GENERATED_MARKER,
+        "",
         "# TacoRank run summary",
         "",
         "| Experiment | Family | Status | Fidelity | Primary | Commit |",
@@ -193,7 +337,343 @@ def render_summary(events: Sequence[Event]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_resources(events: Sequence[Event]) -> str:
+    state = project(events)
+    totals = state.resource_totals
+    return "\n".join(
+        (
+            _GENERATED_MARKER,
+            "",
+            "# TacoRank resource report",
+            "",
+            "- Provider tokens: %d" % totals.provider_tokens,
+            "- Estimated tokens: %d" % totals.estimated_tokens,
+            "- Unmeasured tokens: %d" % totals.unmeasured_tokens,
+            "- Total reported tokens: %d" % totals.total_reported_tokens,
+            "- Agent elapsed wall-clock: %.3f seconds"
+            % state.elapsed_wall_time_seconds,
+            "- Action CPU time: %.3f seconds" % (totals.cpu_time_ms / 1000.0),
+            "- GPU-hours: %.6f" % totals.gpu_hours,
+            "- Manual interventions: %d" % state.manual_intervention_count,
+            "",
+            "Ledger head: `%s` / `%s`"
+            % (state.last_event_id, state.last_event_hash),
+        )
+    ).rstrip() + "\n"
+
+
+def _direction_directories(families: Sequence[str]) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    used: Dict[str, str] = {}
+    for family in sorted(set(families)):
+        base = re.sub(r"[^a-z0-9]+", "-", family.lower()).strip("-") or "other"
+        base = base[:64].rstrip("-") or "other"
+        directory = base
+        previous = used.get(directory)
+        if previous is not None and previous != family:
+            digest = hashlib.sha256(family.encode("utf-8")).hexdigest()[:8]
+            directory = "%s-%s" % (base[:55].rstrip("-"), digest)
+        used[directory] = family
+        result[family] = directory
+    return result
+
+
+def _graph_payload(events: Sequence[Event]) -> dict:
+    state = project(events)
+    proposal_events = [
+        event for event in events if event.payload.type == "experiment.proposed"
+    ]
+    specifications = {
+        event.payload.spec.experiment_id: event.payload.spec
+        for event in proposal_events
+    }
+    directions = _direction_directories(
+        [spec.family for spec in specifications.values()]
+    )
+    nodes = []
+    baseline_event = next(
+        (event for event in events if event.payload.type == "baseline.verified"),
+        None,
+    )
+    if baseline_event is not None:
+        payload = baseline_event.payload
+        nodes.append(
+            {
+                "experiment_id": payload.experiment_id,
+                "node_type": "baseline",
+                "parent_experiment_id": None,
+                "direction": None,
+                "direction_directory": None,
+                "family": None,
+                "hypothesis": "Frozen verified baseline",
+                "method_card_ids": [],
+                "base_commit_sha": None,
+                "latest_commit_sha": payload.commit_sha,
+                "status": "accepted",
+                "highest_fidelity": payload.evaluation.fidelity.value,
+                "metric_set": payload.metric_set.model_dump(mode="json"),
+                "trust": payload.evaluation.trust.model_dump(mode="json"),
+                "estimated_cost": None,
+                "best_eligible": state.best_experiment_id == payload.experiment_id,
+                "event_ids": [
+                    event.event_id
+                    for event in experiment_events(events, payload.experiment_id)
+                ],
+            }
+        )
+    for experiment_id in sorted(specifications):
+        spec = specifications[experiment_id]
+        node = state.experiments[experiment_id]
+        nodes.append(
+            {
+                "experiment_id": experiment_id,
+                "node_type": "experiment",
+                "parent_experiment_id": spec.parent_experiment_id,
+                "direction": spec.family,
+                "direction_directory": directions[spec.family],
+                "family": spec.family,
+                "hypothesis": spec.hypothesis,
+                "change_summary": spec.change_summary,
+                "expected_mechanism": spec.expected_mechanism,
+                "success_criteria": spec.success_criteria,
+                "falsification_condition": spec.falsification_condition,
+                "method_card_ids": list(spec.method_card_ids),
+                "base_commit_sha": node.base_commit_sha,
+                "latest_commit_sha": node.latest_commit_sha,
+                "status": node.status.value,
+                "highest_fidelity": (
+                    node.highest_fidelity.value if node.highest_fidelity else None
+                ),
+                "metric_set": (
+                    node.metric_set.model_dump(mode="json")
+                    if node.metric_set is not None
+                    else None
+                ),
+                "trust": (
+                    node.trust.model_dump(mode="json")
+                    if node.trust is not None
+                    else None
+                ),
+                "estimated_cost": spec.estimated_cost.model_dump(mode="json"),
+                "best_eligible": node.best_eligible,
+                "event_ids": [
+                    event.event_id
+                    for event in experiment_events(events, experiment_id)
+                ],
+            }
+        )
+    return {
+        "schema_version": "1.0",
+        "run_id": state.run_id,
+        "derived_from": {
+            "event_id": state.last_event_id,
+            "event_hash": state.last_event_hash,
+        },
+        "nodes": nodes,
+        "edges": [
+            {
+                "parent": node["parent_experiment_id"],
+                "child": node["experiment_id"],
+            }
+            for node in nodes
+            if node["parent_experiment_id"] is not None
+        ],
+        "directions": [
+            {
+                "direction": family,
+                "directory": directory,
+                "experiment_ids": [
+                    node["experiment_id"]
+                    for node in nodes
+                    if node["direction"] == family
+                ],
+            }
+            for family, directory in sorted(directions.items())
+        ],
+    }
+
+
+def _render_graph(payload: dict) -> str:
+    lines = [
+        _GENERATED_MARKER,
+        "",
+        "# Experiment graph",
+        "",
+        "| Experiment | Parent | Direction | Status | Fidelity | Primary |",
+        "| --- | --- | --- | --- | --- | ---: |",
+    ]
+    for node in payload["nodes"]:
+        metric_set = node["metric_set"]
+        score = metric_set["primary_score"] if metric_set is not None else None
+        lines.append(
+            "| %s | %s | %s | %s | %s | %s |"
+            % (
+                node["experiment_id"],
+                node["parent_experiment_id"] or "—",
+                node["direction"] or "—",
+                node["status"],
+                node["highest_fidelity"] or "—",
+                "%.8f" % score if score is not None else "—",
+            )
+        )
+    lines.extend(("", "## Edges", ""))
+    if not payload["edges"]:
+        lines.append("No experiment edges recorded.")
+    else:
+        lines.extend(
+            "- `%s` → `%s`" % (edge["parent"], edge["child"])
+            for edge in payload["edges"]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_experiment(node: dict, events: Sequence[Event]) -> str:
+    metric_set = node["metric_set"]
+    lines = [
+        _GENERATED_MARKER,
+        "",
+        "# %s" % node["experiment_id"],
+        "",
+        "- Parent: `%s`" % (node["parent_experiment_id"] or "none"),
+        "- Direction: `%s`" % (node["direction"] or "baseline"),
+        "- Status: `%s`" % node["status"],
+        "- Base commit: `%s`" % (node["base_commit_sha"] or "none"),
+        "- Latest commit: `%s`" % (node["latest_commit_sha"] or "none"),
+        "- Method cards: %s"
+        % (
+            ", ".join("`%s`" % item for item in node["method_card_ids"])
+            or "none"
+        ),
+        "",
+        "## Hypothesis",
+        "",
+        node["hypothesis"],
+    ]
+    if node.get("expected_mechanism"):
+        lines.extend(("", "## Expected mechanism", "", node["expected_mechanism"]))
+    if metric_set is not None:
+        lines.extend(
+            (
+                "",
+                "## Result",
+                "",
+                "Primary: `%.8f`" % metric_set["primary_score"],
+                "",
+                "```json",
+                json.dumps(metric_set, ensure_ascii=False, sort_keys=True, indent=2),
+                "```",
+            )
+        )
+    event_by_id = {event.event_id: event for event in events}
+    lines.extend(("", "## Lifecycle", ""))
+    for event_id in node["event_ids"]:
+        event = event_by_id[event_id]
+        lines.append(
+            "- `%s` — `%s` — %s"
+            % (event.event_id, event.event_type.value, event.timestamp.isoformat())
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_direction(direction: dict, node_by_id: Mapping[str, dict]) -> str:
+    methods = sorted(
+        {
+            method
+            for experiment_id in direction["experiment_ids"]
+            for method in node_by_id[experiment_id]["method_card_ids"]
+        }
+    )
+    lines = [
+        _GENERATED_MARKER,
+        "",
+        "# Direction: %s" % direction["direction"],
+        "",
+        "Methods: %s" % (", ".join("`%s`" % item for item in methods) or "none"),
+        "",
+        "| Experiment | Parent | Status | Primary |",
+        "| --- | --- | --- | ---: |",
+    ]
+    for experiment_id in direction["experiment_ids"]:
+        node = node_by_id[experiment_id]
+        metric_set = node["metric_set"]
+        score = metric_set["primary_score"] if metric_set is not None else None
+        lines.append(
+            "| [%s](experiments/%s.md) | %s | %s | %s |"
+            % (
+                experiment_id,
+                experiment_id,
+                node["parent_experiment_id"] or "—",
+                node["status"],
+                "%.8f" % score if score is not None else "—",
+            )
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _prepare_generated_directory(path: Path) -> None:
+    marker = path / ".tacorank-derived"
+    if path.exists():
+        if any(path.iterdir()) and not marker.is_file():
+            raise RuntimeError(
+                "refusing to replace an unmarked derived-view directory: %s" % path
+            )
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+    _atomic_write(marker, "Generated by TacoRank; safe to rebuild.\n")
+
+
+def _layout_for_run_directory(run_directory: Path) -> RunLayout:
+    resolved = Path(run_directory).resolve()
+    layout = RunLayout(resolved.parent.parent, resolved.name)
+    if layout.run_directory != resolved or resolved.parent.name != "runs":
+        raise ValueError("run_directory must be repository_root/runs/<run_id>")
+    return layout
+
+
+def rebuild_operational_state(run_directory: Path, events: Sequence[Event]) -> None:
+    """Atomically refresh the overwriteable current-state projections."""
+
+    layout = _layout_for_run_directory(run_directory)
+    state = project(events)
+    if state.run_id is not None and layout.run_id != state.run_id:
+        raise ValueError("run directory does not match projected run_id")
+    _atomic_write_json(layout.state, _state_payload(events))
+    _atomic_write(layout.status, render_status(events))
+
+
 def rebuild_views(run_directory: Path, events: Sequence[Event]) -> None:
-    _atomic_write(run_directory / "STATUS.md", render_status(events))
-    _atomic_write(run_directory / "LESSONS.md", render_lessons(events))
-    _atomic_write(run_directory / "SUMMARY.md", render_summary(events))
+    """Rebuild every non-authoritative view from the ledger."""
+
+    layout = _layout_for_run_directory(run_directory)
+    rebuild_operational_state(layout.run_directory, events)
+
+    _prepare_generated_directory(layout.lessons)
+    lessons = _lesson_records(events)
+    _atomic_write(layout.lessons / "INDEX.md", render_lessons(events))
+    for lesson_id, record in sorted(lessons.items()):
+        _atomic_write(
+            layout.lessons / (lesson_id + ".md"),
+            _render_lesson(lesson_id, record),
+        )
+
+    _prepare_generated_directory(layout.experiment_graph)
+    graph = _graph_payload(events)
+    _atomic_write_json(layout.experiment_graph / "graph.json", graph)
+    _atomic_write(layout.experiment_graph / "GRAPH.md", _render_graph(graph))
+    directions_root = layout.experiment_graph / "directions"
+    directions_root.mkdir(parents=True, exist_ok=True)
+    node_by_id = {node["experiment_id"]: node for node in graph["nodes"]}
+    for direction in graph["directions"]:
+        directory = directions_root / direction["directory"]
+        experiments_directory = directory / "experiments"
+        experiments_directory.mkdir(parents=True, exist_ok=True)
+        _atomic_write(directory / "README.md", _render_direction(direction, node_by_id))
+        for experiment_id in direction["experiment_ids"]:
+            _atomic_write(
+                experiments_directory / (experiment_id + ".md"),
+                _render_experiment(node_by_id[experiment_id], events),
+            )
+
+    _prepare_generated_directory(layout.reports)
+    _atomic_write(layout.reports / "SUMMARY.md", render_summary(events))
+    _atomic_write(layout.reports / "RESOURCES.md", render_resources(events))

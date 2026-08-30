@@ -129,11 +129,13 @@ class ReceiptStore:
         factories: Optional[SharedSchemaFactories] = None,
         *,
         artifact_root: str = "artifacts",
+        include_run_id: bool = True,
         max_receipt_bytes: int = 1024 * 1024,
         clock: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self.repository_root = Path(repository_root).resolve(strict=True)
         self.artifact_root = normalize_policy_path(artifact_root.rstrip("/"))
+        self.include_run_id = include_run_id
         self.factories = factories
         if (
             isinstance(max_receipt_bytes, bool)
@@ -293,13 +295,23 @@ class ReceiptStore:
         identity: ReceiptIdentity,
         receipt_id: str,
     ) -> str:
-        return "{}/{}/{}/attempt_{}/gate_a/{}.json".format(
-            self.artifact_root,
-            identity.run_id,
-            identity.experiment_id,
-            identity.attempt,
-            receipt_id,
+        components = [self.artifact_root]
+        if self.include_run_id:
+            components.append(identity.run_id)
+        attempt_directory = (
+            "attempt_{}".format(identity.attempt)
+            if self.include_run_id
+            else "attempt_{:03d}".format(identity.attempt)
         )
+        components.extend(
+            (
+                identity.experiment_id,
+                attempt_directory,
+                "gate_a",
+                receipt_id + ".json",
+            )
+        )
+        return "/".join(components)
 
     def _safe_artifact_path(self, relative_path: str) -> Path:
         normalized = normalize_policy_path(relative_path)

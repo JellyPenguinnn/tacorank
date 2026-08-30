@@ -982,9 +982,22 @@ class PlannerContractSummary(StrictModel):
 
     resolved: bool = False
     allowed_families: List[NonEmptyStr] = Field(default_factory=list)
+    allowed_data: List[NonEmptyStr] = Field(default_factory=list)
+    research_capabilities: List[NonEmptyStr] = Field(default_factory=list)
+    active_prohibitions: List[NonEmptyStr] = Field(default_factory=list)
     protected_paths: List[str] = Field(default_factory=list)
     editable_paths: List[str] = Field(default_factory=list)
+    data_manifest_sha256: str
+    evaluator_sha256: str
     epsilon: float = Field(default=0.0, ge=0.0)
+    prediction_change_no_op_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @field_validator("data_manifest_sha256", "evaluator_sha256")
+    @classmethod
+    def validate_planner_contract_hashes(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("planner contract identities must be lowercase sha256")
+        return value
 
 
 class PlannerBudgetSummary(StrictModel):
@@ -1006,6 +1019,74 @@ class PlannerMethodCardSummary(StrictModel):
     family: NonEmptyStr
     status: NonEmptyStr
     cost_tier: CostTier
+    summary: NonEmptyStr
+    tags: List[NonEmptyStr] = Field(default_factory=list)
+    mechanism: NonEmptyStr
+    prerequisites: List[NonEmptyStr] = Field(default_factory=list)
+    allowed_data: List[NonEmptyStr] = Field(default_factory=list)
+    expected_effect: NonEmptyStr
+    falsifier: NonEmptyStr
+    prohibition_conditions: List[NonEmptyStr] = Field(default_factory=list)
+    implementation_targets: List[str] = Field(default_factory=list)
+    source_path: NonEmptyStr
+
+    @field_validator("implementation_targets")
+    @classmethod
+    def validate_implementation_targets(cls, values: List[str]) -> List[str]:
+        normalized = [normalize_relative_path(value) for value in values]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("implementation_targets must be unique")
+        return normalized
+
+
+class PlannerPlaybookSummary(StrictModel):
+    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    source_path: NonEmptyStr
+    source_sha256: str
+    rule_order: List[NonEmptyStr]
+    family_order: List[NonEmptyStr]
+    method_order: Dict[NonEmptyStr, List[NonEmptyStr]]
+
+    @field_validator("source_sha256")
+    @classmethod
+    def validate_playbook_hash(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("playbook source_sha256 must be lowercase sha256")
+        return value
+
+    @model_validator(mode="after")
+    def validate_executable_control_data(self) -> "PlannerPlaybookSummary":
+        mandatory_order = [
+            "output_rejected",
+            "suspicious_or_compromised",
+            "no_op",
+            "unstable",
+            "promotion_required",
+            "non_public_or_incomplete",
+            "pairwise_gauc_up_ndcg_down",
+            "pairwise_gauc_down_ndcg_up",
+            "pairwise_both_up",
+            "meaningful_no_gain",
+            "trusted_improvement",
+            "trusted_regression",
+        ]
+        if len(self.rule_order) != len(set(self.rule_order)):
+            raise ValueError("playbook rule_order must be unique")
+        if self.rule_order != mandatory_order:
+            raise ValueError("playbook must preserve the mandatory planner rule order")
+        if len(self.family_order) != len(set(self.family_order)):
+            raise ValueError("playbook family_order must be unique")
+        unknown_families = set(self.method_order) - set(self.family_order)
+        if unknown_families:
+            raise ValueError("playbook method_order contains an unordered family")
+        if any(
+            not methods or len(methods) != len(set(methods))
+            for methods in self.method_order.values()
+        ):
+            raise ValueError("playbook method_order entries must be non-empty and unique")
+        if self.method_order.get("objective", [None])[0] != "objective_pairwise_bpr":
+            raise ValueError("objective_pairwise_bpr must be the first objective method")
+        return self
 
 
 class PlannerExperimentSummary(StrictModel):
@@ -1019,8 +1100,13 @@ class PlannerExperimentSummary(StrictModel):
     trust_verdict: Optional[TrustVerdict] = None
     stability: Optional[Stability] = None
     integrity: Optional[Integrity] = None
+    trust_flags: List[NonEmptyStr] = Field(default_factory=list)
     decision: Optional[ExperimentDecisionKind] = None
     highest_completed_fidelity: Optional[Fidelity] = None
+    population: Optional[Population] = None
+    output_accepted: Optional[bool] = None
+    output_checks: Dict[str, CheckStatus] = Field(default_factory=dict)
+    output_violations: List[Violation] = Field(default_factory=list)
     primary_score: Optional[float] = None
     metric_set: Optional[MetricSet] = None
     metric_deltas: Dict[str, float] = Field(default_factory=dict)
@@ -1028,6 +1114,9 @@ class PlannerExperimentSummary(StrictModel):
     parent_delta: Optional[float] = None
     previous_best_delta: Optional[float] = None
     prediction_change: Optional[float] = Field(default=None, ge=0.0)
+    prediction_spearman_vs_parent: Optional[float] = Field(
+        default=None, ge=-1.0, le=1.0
+    )
     child_count: int = Field(default=0, ge=0)
     actual_cost: Optional[CostTier] = None
     parent_eligible: bool = False
@@ -1069,8 +1158,25 @@ class PlannerContext(ContextDocument):
     eligible_frontier: List[PlannerExperimentSummary] = Field(default_factory=list)
     family_history: List[PlannerExperimentSummary] = Field(default_factory=list)
     method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
+    playbook: PlannerPlaybookSummary
+    target_interface_excerpts: Dict[str, NonEmptyStr]
     remaining_budget: PlannerBudgetSummary
     convergence: PlannerConvergenceSummary
+
+    @field_validator("target_interface_excerpts")
+    @classmethod
+    def validate_planner_target_interfaces(
+        cls, values: Dict[str, str]
+    ) -> Dict[str, str]:
+        if not values:
+            raise ValueError("planner target interfaces must not be empty")
+        normalized: Dict[str, str] = {}
+        for path, excerpt in values.items():
+            target = normalize_relative_path(path)
+            if target in normalized:
+                raise ValueError("planner target interface paths must be unique")
+            normalized[target] = excerpt
+        return normalized
 
 
 class CoderContext(ContextDocument):
@@ -1189,6 +1295,8 @@ class RunStartedPayload(StrictModel):
     max_repairs_per_experiment: int = Field(default=2, ge=0)
     max_confirmation_attempts: int = Field(default=2, ge=0)
     seed_schedule: List[int]
+    convergence_epsilon: float = Field(default=0.002, ge=0.0)
+    convergence_patience: int = Field(default=3, gt=0)
 
     @field_validator("config_sha256", "contract_sha256", "protected_paths_sha256")
     @classmethod

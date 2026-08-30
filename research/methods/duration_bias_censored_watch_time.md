@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"duration_bias_censored_watch_time","family":"duration_bias","status":"candidate","tags":["cwm","duration","censoring"],"cost_tier":"high","sources":[]}
+{"schema_version":"1.0","method_id":"duration_bias_censored_watch_time","family":"duration_bias","status":"candidate","tags":["cwm","duration","censoring"],"cost_tier":"high","prerequisites":["duration_features_legal"],"allowed_data":["train_interactions","duration_ms","long_view"],"prohibition_conditions":["duration_signal_not_permitted"],"sources":[]}
 ```
 
 ## Mechanism

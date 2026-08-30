@@ -283,6 +283,46 @@ def _snapshot(repository_root: Path, relative_path: str) -> ProtectedSnapshot:
 
     entries = []
     total_size = 0
+    tracked_files = (
+        None
+        if gitlink is not None
+        else _tracked_files_within(repository_root, normalized)
+    )
+    if tracked_files:
+        # Controller-owned append-only and ignored runtime files (for example,
+        # run ledgers and bytecode) are not present in experiment worktrees.
+        # Freeze the Git-indexed tree here; worktree cleanliness checks reject
+        # both untracked and ignored candidate additions separately.
+        for relative in tracked_files:
+            child = repository_root.joinpath(*relative.split("/"))
+            if child.is_symlink():
+                raise ProtectedManifestError(
+                    "protected tree contains symbolic link: {}".format(relative)
+                )
+            if not child.exists():
+                entries.append(
+                    {
+                        "path": relative,
+                        "sha256": hashlib.sha256(b"").hexdigest(),
+                        "size_bytes": 0,
+                        "state": "missing",
+                    }
+                )
+                continue
+            if not child.is_file():
+                raise ProtectedManifestError(
+                    "tracked protected path is not a regular file: {}".format(relative)
+                )
+            digest, size = _hash_file(child)
+            total_size += size
+            entries.append({"path": relative, "sha256": digest, "size_bytes": size})
+        return ProtectedSnapshot(
+            normalized,
+            "tracked_directory",
+            _hash_json(entries),
+            total_size,
+        )
+
     for directory, directory_names, file_names in os.walk(str(target), followlinks=False):
         directory_names.sort()
         file_names.sort()
@@ -318,6 +358,32 @@ def _snapshot(repository_root: Path, relative_path: str) -> ProtectedSnapshot:
         )
         return ProtectedSnapshot(normalized, "submodule_directory", digest, total_size)
     return ProtectedSnapshot(normalized, "directory", digest, total_size)
+
+
+def _tracked_files_within(
+    repository_root: Path,
+    relative_path: str,
+) -> Optional[Tuple[str, ...]]:
+    encoded = _run_git(
+        repository_root,
+        ("ls-files", "-z", "--", relative_path),
+    )
+    if encoded is None:
+        return None
+    files = []
+    for item in encoded.split(b"\x00"):
+        if not item:
+            continue
+        try:
+            decoded = item.decode("utf-8", errors="strict")
+            normalized = normalize_policy_path(decoded)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ProtectedManifestError(
+                "Git returned an invalid protected path"
+            ) from exc
+        if path_is_within(normalized, relative_path):
+            files.append(normalized)
+    return tuple(sorted(set(files)))
 
 
 def _gitlink_ancestor(repository_root: Path, relative_path: str) -> Optional[_Gitlink]:

@@ -1,12 +1,48 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from tacorank.evaluation.adapter import ordered_row_identity_sha256
 from tacorank.orchestrator.live import (
     _PopulationData,
+    _mount_policies,
     _protected_population_manifests,
     _trae_config_from_mapping,
 )
 from tacorank.schemas import Population
+
+
+def test_mount_policies_expose_pipeline_roots_at_canonical_paths(
+    tmp_path: Path,
+) -> None:
+    contract_root = tmp_path / "contract"
+    contract_root.mkdir()
+    input_roots = {}
+    command_ids = (
+        "baseline_full",
+        "candidate_smoke",
+        "candidate_proxy",
+        "candidate_full",
+        "candidate_final_infer",
+        "clean_reproduce",
+    )
+    for command_id in command_ids:
+        input_root = tmp_path / command_id
+        input_root.mkdir()
+        input_roots[command_id] = input_root
+
+    policies = _mount_policies(
+        SimpleNamespace(data_manifest_sha256="a" * 64),
+        SimpleNamespace(contract_root=contract_root, input_roots=input_roots),
+    )
+
+    assert {policy.command_id for policy in policies} == set(command_ids)
+    for policy in policies:
+        assert tuple(mount.target for mount in policy.mounts) == (
+            "/contracts",
+            "/inputs",
+        )
+        assert policy.mounts[0].source == contract_root.resolve()
+        assert policy.mounts[1].source == input_roots[policy.command_id].resolve()
 
 
 def test_trae_config_normalizes_json_path_and_tuple_values(tmp_path: Path) -> None:

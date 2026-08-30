@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from tacorank.research.portfolio import load_method_cards
+from tacorank.research.playbook import load_improvement_playbook
 
 
 def make_summary(
@@ -18,7 +22,12 @@ def make_summary(
     child_count: int = 0,
     actual_cost: str = "low",
     stability: str = "confirmed",
+    trust_verdict: str = "accepted",
+    integrity: str = "clean",
+    population: str = "public_validation",
+    output_accepted: bool | None = True,
     metric_deltas=None,
+    parent_delta: float | None = 0.003,
     prediction_change: float | None = 1.0,
     method_card_ids=None,
 ):
@@ -28,15 +37,21 @@ def make_summary(
         commit_sha=commit_sha,
         family=family,
         hypothesis_summary=f"Hypothesis for {experiment_id}",
-        trust_verdict="accepted",
+        trust_verdict=trust_verdict,
         stability=stability,
-        integrity="clean",
+        integrity=integrity,
+        trust_flags=[],
         decision=decision,
         highest_completed_fidelity=fidelity,
+        population=population,
+        output_accepted=output_accepted,
+        output_checks={},
+        output_violations=[],
         primary_score=score,
         child_count=child_count,
         actual_cost=actual_cost,
         metric_deltas=metric_deltas or {},
+        parent_delta=parent_delta,
         prediction_change=prediction_change,
         method_card_ids=method_card_ids or [],
         parent_eligible=parent_eligible,
@@ -65,13 +80,42 @@ def planner_context():
             ],
             protected_paths=["evaluate.py", "contract/COMPETITION.md"],
             editable_paths=["solution", "research"],
+            allowed_data=[
+                "train_interactions",
+                "public_validation",
+                "user_id",
+                "video_id",
+                "author_id",
+                "tab",
+                "date",
+                "duration_ms",
+                "long_view",
+                "verified_predictions",
+            ],
+            research_capabilities=[],
+            active_prohibitions=[],
+            data_manifest_sha256="b" * 64,
+            evaluator_sha256="c" * 64,
+            epsilon=0.002,
+            prediction_change_no_op_threshold=0.001,
         ),
         baseline=root,
         current_best=root,
         eligible_frontier=[root],
         family_history=[],
+        playbook=load_improvement_playbook(
+            Path(__file__).parents[2] / "research/CURRENT_RUN_IMPROVEMENT_PLAN.md",
+            source_path="research/CURRENT_RUN_IMPROVEMENT_PLAN.md",
+        ),
         active_lessons=[],
-        method_cards=[SimpleNamespace(method_id="objective_pairwise_bpr")],
+        method_cards=load_method_cards(
+            Path(__file__).parents[2] / "research" / "methods"
+        ).cards,
+        target_interface_excerpts={
+            "solution/candidate.py": (
+                "Required candidate entrypoint: def run(invocation) -> None"
+            )
+        },
         remaining_budget=SimpleNamespace(
             remaining_llm_tokens=10_000,
             remaining_wall_time_seconds=10_000,

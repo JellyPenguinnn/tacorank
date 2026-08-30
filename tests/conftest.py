@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -52,7 +53,17 @@ def repository(tmp_path: Path) -> Path:
     (tmp_path / "PROTECTED_PATHS.md").write_text(
         "# Protected\n\ncontract/\ntests/evaluation/\n", encoding="utf-8"
     )
-    (tmp_path / "research/methods").mkdir(parents=True)
+    source_research = Path(__file__).parents[1] / "research"
+    (tmp_path / "research").mkdir(parents=True)
+    shutil.copy2(
+        source_research / "CURRENT_RUN_IMPROVEMENT_PLAN.md",
+        tmp_path / "research/CURRENT_RUN_IMPROVEMENT_PLAN.md",
+    )
+    shutil.copytree(source_research / "methods", tmp_path / "research/methods")
+    (tmp_path / "solution").mkdir()
+    (tmp_path / "solution/candidate.py").write_text(
+        "def run(invocation):\n    return None\n", encoding="utf-8"
+    )
     (tmp_path / "artifacts").mkdir()
     (tmp_path / "runs").mkdir()
     return tmp_path
@@ -69,7 +80,7 @@ def config(repository: Path) -> RunConfig:
         data_manifest_sha256=sha(b"data"),
         evaluator_sha256=sha(b"evaluator"),
         baseline_commit_sha="b" * 40,
-        research_provider="fake",
+        research_provider="deepseek",
         max_experiments=3,
         seed_schedule=[11, 22, 33, 44],
         context_token_limit=2000,

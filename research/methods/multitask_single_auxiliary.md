@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"multitask_single_auxiliary","family":"multitask","status":"candidate","tags":["multitask","auxiliary"],"cost_tier":"medium","sources":[]}
+{"schema_version":"1.0","method_id":"multitask_single_auxiliary","family":"multitask","status":"candidate","tags":["multitask","auxiliary"],"cost_tier":"medium","prerequisites":["legal_auxiliary_label"],"allowed_data":["train_interactions","long_view","auxiliary_engagement_labels"],"prohibition_conditions":["auxiliary_label_not_permitted"],"sources":[]}
 ```
 
 ## Mechanism

@@ -32,8 +32,9 @@ from tacorank.git.patches import (
     write_artifact,
 )
 from tacorank.git.refs import GitOperationError, require_ancestor, resolve_commit
-from tacorank.git.worktrees import WorktreeManager, WorktreeRecord
 from tacorank.docker_host import normalize_local_docker_host
+from tacorank.git.worktrees import WorktreeManager, WorktreeRecord
+from tacorank.run_layout import experiment_artifact_prefix
 
 from .output_parser import ParsedTrajectory, TrajectoryParseError, parse_trajectory_file
 from .prompts import build_coding_prompt, build_repair_prompt, prompt_sha256
@@ -43,6 +44,12 @@ from .redaction import SecretRedactor
 _REVIEWED_TRAE_SOURCE_REVISION = "e839e559ac61bdd0e057c375dd1dee391fee797d"
 _REVIEWED_TRAE_SOURCE_URL = "https://github.com/bytedance/trae-agent.git"
 _REVIEWED_DOTENV_VERSION = "1.2.2"
+TRAE_DEEPSEEK_REASONING_MARKER = (
+    "TacoRank: force DeepSeek Responses reasoning effort and preserve reasoning items"
+)
+TRAE_DOCKER_EDIT_TOOL_MARKER = (
+    "TacoRank: normalize and shell-quote command-specific edit arguments"
+)
 _PINNED_IMAGE_RE = re.compile(r"^(?:[^\s@]+@)?sha256:([0-9a-f]{64})$")
 _CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _DEFAULT_REVIEWED_TOOLS = (
@@ -169,6 +176,7 @@ class TraeConfig:
     credential_environment_names: Tuple[str, ...] = ()
     credential_environment_aliases: Tuple[Tuple[str, str], ...] = ()
     provider_base_url: Optional[str] = None
+    reasoning_effort: str = "high"
     trae_source_revision: Optional[str] = None
     trae_install_root: Optional[Path] = None
     trae_install_identity_file: Optional[Path] = None
@@ -195,6 +203,35 @@ class TraeConfig:
     max_trajectory_bytes: int = 50 * 1024 * 1024
     max_patch_bytes: int = 10 * 1024 * 1024
     worktree_lease_timeout_seconds: float = 30.0
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any]) -> "TraeConfig":
+        """Normalize a JSON-shaped deployment mapping at the adapter boundary."""
+
+        normalized = dict(values)
+        normalized["command_prefix"] = tuple(normalized["command_prefix"])
+        for key in (
+            "config_file",
+            "docker_executable",
+            "trae_install_root",
+            "trae_install_identity_file",
+            "trae_runtime_root",
+            "python_dotenv_metadata_file",
+        ):
+            if normalized.get(key) is not None:
+                normalized[key] = Path(normalized[key])
+        for key in (
+            "repair_allowed_command_ids",
+            "approved_environment_names",
+            "credential_environment_names",
+        ):
+            if key in normalized:
+                normalized[key] = tuple(normalized[key])
+        if "credential_environment_aliases" in normalized:
+            normalized["credential_environment_aliases"] = tuple(
+                tuple(item) for item in normalized["credential_environment_aliases"]
+            )
+        return cls(**normalized)
 
 
 @dataclass(frozen=True)
@@ -254,7 +291,7 @@ class TraeCodingWorker:
         self._verify_config_file()
 
     def preflight(self) -> None:
-        """Verify all local production capabilities before ledger bootstrap."""
+        """Verify credentials and all local production capabilities."""
 
         missing_credentials = [
             name
@@ -267,6 +304,11 @@ class TraeCodingWorker:
                 "required coding credential environment is missing: "
                 + ", ".join(sorted(missing_credentials)),
             )
+        self.preflight_local()
+
+    def preflight_local(self) -> None:
+        """Verify the pinned Trae and Docker boundary without using credentials."""
+
         self._schema_factories()
         self._verify_config_file()
         self._verify_install_identity()
@@ -457,6 +499,11 @@ class TraeCodingWorker:
         install_identity = self._verify_install_identity()
         runtime_root, runtime_identity = self._verify_runtime_root()
         self._verify_cli_version(runtime_root)
+        artifact_prefix = experiment_artifact_prefix(
+            record.run_id,
+            record.experiment_id,
+            attempt=identity.attempt,
+        )
 
         with tempfile.TemporaryDirectory(prefix="tacorank-trae-") as temporary:
             temporary_root = Path(temporary)
@@ -520,7 +567,6 @@ class TraeCodingWorker:
                     )
                 except TrajectoryParseError as exc:
                     raise CodingWorkerError(exc.code, str(exc)) from exc
-                self._validate_trajectory(parsed, step_limit, token_limit)
                 trajectory_bytes = self._redacted_trajectory_bytes(
                     parsed,
                     prompt,
@@ -529,6 +575,28 @@ class TraeCodingWorker:
                     install_identity=install_identity,
                     runtime_identity=runtime_identity,
                 )
+                try:
+                    self._validate_trajectory(parsed, step_limit, token_limit)
+                except CodingWorkerError as exc:
+                    try:
+                        failure_written = write_artifact(
+                            self.artifact_repository_root,
+                            f"{artifact_prefix}/trae_failure_trajectory.json",
+                            trajectory_bytes,
+                            content_type="application/json",
+                        )
+                    except GitOperationError as artifact_error:
+                        raise CodingWorkerError(
+                            "TRAE_FAILURE_EVIDENCE_WRITE_FAILED",
+                            "validated Trae failure evidence could not be retained",
+                        ) from artifact_error
+                    diagnostic = (exc.output_tail or "").strip()
+                    artifact_note = "diagnostic_artifact=" + failure_written.path
+                    raise CodingWorkerError(
+                        exc.code,
+                        exc.summary,
+                        output_tail=(diagnostic + "\n" + artifact_note).strip(),
+                    ) from exc
             except BaseException as primary_error:
                 try:
                     self._close_isolation(
@@ -582,10 +650,6 @@ class TraeCodingWorker:
         except GitOperationError as exc:
             raise CodingWorkerError(exc.code, str(exc)) from exc
 
-        artifact_prefix = (
-            f"artifacts/{record.run_id}/{record.experiment_id}/"
-            f"attempt_{identity.attempt}"
-        )
         try:
             diff_written = write_artifact(
                 self.artifact_repository_root,
@@ -677,6 +741,7 @@ class TraeCodingWorker:
             "trae_runtime_identity": dict(runtime_identity),
             "provider": self.config.provider,
             "model_id": self.config.model_id,
+            "reasoning_effort": self.config.reasoning_effort,
             "config_sha256": self.config.config_sha256,
             "prompt_sha256": prompt_sha256(prompt),
             "max_steps": parsed.max_steps,
@@ -1274,8 +1339,17 @@ class TraeCodingWorker:
                 f"provider usage {total_tokens} exceeded the {token_limit} token limit",
             )
         if not parsed.success:
+            detail = self.redactor.redact(parsed.final_result or "").strip()
+            detail = "".join(
+                character
+                if character in {"\n", "\t"} or ord(character) >= 32
+                else " "
+                for character in detail
+            )[:2_048]
             raise CodingWorkerError(
-                "TRAE_REPORTED_FAILURE", "Trae trajectory reports an unsuccessful task"
+                "TRAE_REPORTED_FAILURE",
+                "Trae trajectory reports an unsuccessful task",
+                output_tail=detail or None,
             )
 
     def _validate_context_bounds(self, context: Any) -> None:
@@ -1322,6 +1396,14 @@ class TraeCodingWorker:
             value = getattr(config, field)
             if not isinstance(value, str) or not value.strip() or "\x00" in value:
                 raise CodingWorkerError("TRAE_CONFIG_INVALID", f"invalid {field}")
+        if (
+            config.provider_base_url == "https://api.deepseek.com"
+            and config.reasoning_effort != "high"
+        ):
+            raise CodingWorkerError(
+                "TRAE_CONFIG_INVALID",
+                "the reviewed DeepSeek coding path requires high reasoning effort",
+            )
         if (
             not isinstance(config.config_sha256, str)
             or len(config.config_sha256) != 64
@@ -1744,6 +1826,44 @@ class TraeCodingWorker:
                 "TRAE_RUNTIME_IDENTITY_MISMATCH",
                 "Trae Docker tool assets differ from the reviewed manifest",
             )
+        if self.config.provider_base_url == "https://api.deepseek.com":
+            reasoning_client = (
+                root / "trae_agent" / "utils" / "llm_clients" / "openai_client.py"
+            )
+            try:
+                reasoning_source = reasoning_client.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise CodingWorkerError(
+                    "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                    "reviewed DeepSeek Trae client patch is unavailable",
+                ) from exc
+            if (
+                TRAE_DEEPSEEK_REASONING_MARKER not in reasoning_source
+                or 'reasoning={"effort": "high"}' not in reasoning_source
+                or 'output_block.type == "reasoning"' not in reasoning_source
+                or "content += message_content" not in reasoning_source
+            ):
+                raise CodingWorkerError(
+                    "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                    "reviewed DeepSeek reasoning continuity patch is missing",
+                )
+            edit_executor = root / "trae_agent" / "tools" / "docker_tool_executor.py"
+            try:
+                edit_source = edit_executor.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise CodingWorkerError(
+                    "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                    "reviewed DeepSeek edit-tool compatibility patch is unavailable",
+                ) from exc
+            if (
+                TRAE_DOCKER_EDIT_TOOL_MARKER not in edit_source
+                or "command_arguments =" not in edit_source
+                or "shlex.join(cmd_parts)" not in edit_source
+            ):
+                raise CodingWorkerError(
+                    "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                    "reviewed DeepSeek edit-tool compatibility patch is missing",
+                )
         asset_bytes = _trae_runtime_asset_bytes(root)
         if asset_bytes > self.config.docker_agent_tools_size_limit_mb * 1024 * 1024:
             raise CodingWorkerError(
