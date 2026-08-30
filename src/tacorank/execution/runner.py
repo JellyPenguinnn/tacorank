@@ -974,13 +974,44 @@ def _normalized_error_evidence(evidence: str) -> str:
     return normalized[:4096]
 
 
-def _safe_summary(summary: str) -> str:
-    return redact_runtime_output(str(summary)).replace("\x00", "")[:512]
+def _safe_summary(summary: str, limit: int = 512) -> str:
+    return redact_runtime_output(str(summary)).replace("\x00", "")[:limit]
+
+
+# Traceback frames pointing into the candidate's own source. The exception
+# line alone names the error but never where it came from, and the coding
+# worker has no shell to reproduce the failure, so a bare "ValueError: left
+# keys must be sorted" leaves it editing blind until its step budget is gone.
+_CANDIDATE_FRAME_RE = re.compile(
+    r'^\s*File "(?P<path>[^"]*solution[/\\][^"]+)", line (?P<line>\d+), in (?P<symbol>\S+)'
+)
+_TAIL_SUMMARY_LIMIT = 1024
 
 
 def _tail_summary(log_tail: str, fallback: str) -> str:
     lines = [line.strip() for line in log_tail.splitlines() if line.strip()]
-    return _safe_summary(lines[-1] if lines else fallback)
+    if not lines:
+        return _safe_summary(fallback)
+    # Keep the deepest candidate frames so the fault is locatable, then the
+    # final exception line. Only frames inside the candidate's own files are
+    # included: interpreter and third-party frames add length without telling
+    # the worker which of its own lines to change.
+    frames = [
+        "%s:%s in %s" % (
+            match.group("path").replace("\\", "/").rsplit("/solution/", 1)[-1],
+            match.group("line"),
+            match.group("symbol"),
+        )
+        for line in lines
+        for match in (_CANDIDATE_FRAME_RE.match(line),)
+        if match
+    ]
+    if not frames:
+        return _safe_summary(lines[-1], _TAIL_SUMMARY_LIMIT)
+    return _safe_summary(
+        "%s (candidate frames: %s)" % (lines[-1], " <- ".join(frames[-4:])),
+        _TAIL_SUMMARY_LIMIT,
+    )
 
 
 def _enum_value(value: Any) -> Any:

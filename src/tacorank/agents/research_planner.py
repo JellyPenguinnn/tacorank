@@ -67,10 +67,15 @@ class ResearchPlanner:
         output_token_limit: int | None = None,
     ):
         self.provider = provider
-        # Production planning follows one strongest branch at a time.  The
-        # policy remains configurable for tests and offline portfolio analysis,
-        # but the live planner avoids shallow seven-way fan-out.
-        self.policy = policy or SearchPolicy(frontier_limit=1)
+        # Production planning still proposes exactly one experiment per
+        # iteration; the frontier only bounds how many candidate parents the
+        # policy will consider before giving up. At 1 there is no backtracking
+        # fallback: once the strongest branch has no legal method left, the
+        # policy reports NO_ELIGIBLE_METHOD and the run stops, even when a
+        # lower-scoring branch still has one. Keep the default breadth so the
+        # search backtracks instead, which costs no extra experiments while
+        # still avoiding shallow fan-out across every family at once.
+        self.policy = policy or SearchPolicy()
         self.validator = validator or PlanValidator()
         self.convergence_advisor = convergence_advisor or ConvergenceAdvisor()
         self.output_factory = output_factory or _default_output_factory
