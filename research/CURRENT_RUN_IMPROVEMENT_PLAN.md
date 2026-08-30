@@ -95,7 +95,7 @@ Apply these rules from top to bottom. The first matching rule wins.
 | 3 | Stability is `unstable` | Confirm seeds or simplify/regularize the same mechanism. | No new family |
 | 4 | Fidelity is `smoke` or `proxy` | Promote a clear proxy improvement, or one clean result within the symmetric proxy noise band, to one bounded full-fidelity check. Prune only a regression beyond that band. | No parent promotion |
 | 5 | Full public result is trusted and improves the parent by more than `epsilon` | Accept; confirm once if stability is only `single_seed`, then deepen the same family. | Yes |
-| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, and remains within `eta` of the current validation best | Retain it as an exploratory research parent, keep `best_eligible = false`, and continue DFS from that node with a legal independent mechanism. | Yes, exploratory |
+| 6 | Full public result is clean, seed-confirmed, changes predictions meaningfully, and remains within `eta` of the current validation best | Retain it as an exploratory research parent with `best_eligible = false`. Continue from the highest-scoring eligible research node, try one legal same-family refinement, then switch to an independent mechanism only after that refinement is exhausted. | Yes, exploratory |
 | 7 | Full public result is trusted and worse than `-epsilon` | Treat the tested mechanism as falsified under its stated conditions; do not tune it indefinitely. | Yes |
 
 Only a full, verified, clean, seed-confirmed public-validation result may create
@@ -148,7 +148,7 @@ the parent, using the contract's seed/noise tolerance.
 | positive | positive | Broad pair ordering and top-5 placement both improved. | Confirm, then refine the same family before switching. |
 | positive | negative | Broad within-user separation improved but top ranks worsened. | Try top-weighted/listwise or hybrid ranking loss; inspect top-5 errors. |
 | negative | positive | Top-5 placement improved while general positive-negative ordering degraded. | Blend listwise/top-k emphasis with pairwise loss; avoid a pure top-k overfit. |
-| near zero | near zero, predictions changed | Mechanism has little signal at current fidelity. | Move to the next independent family. |
+| near zero | near zero, predictions changed | Mechanism has little signal at current fidelity. | Return to the highest-scoring eligible research path and try one same-family refinement before moving to an independent family. |
 | any | any, predictions barely changed | Terminal null result; it does not establish that the implementation is broken. | Let the tree planner rank one bounded same-mechanism reimplementation against independent mechanisms. |
 | inconsistent across seeds | inconsistent across seeds | Variance dominates estimated gain. | Confirm or simplify; do not promote. |
 
