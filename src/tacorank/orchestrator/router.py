@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import replace
 import re
 from typing import Deque, Optional, Sequence, Tuple
 
 from ..config import RunConfig, VerifiedContract
 from ..coding.redaction import SecretRedactor
 from ..context.builder import ContextBuilder
+from ..evaluation.final_selection import rank_finalists, select_final
 from ..memory.canonical_json import canonical_sha256
 from ..memory.event_store import DuplicateIdempotencyKey, EventStore, LedgerError
 from ..memory.projections import project
@@ -63,6 +65,7 @@ from .finalize import (
     FinalizationError,
     baseline_reproduction_event_id,
     candidate_finalization_plan,
+    finalization_candidates,
 )
 from .state_machine import TransitionError
 from .ports import (
@@ -1533,7 +1536,7 @@ class Harness:
         return output, checked
 
     async def finalize(self) -> object:
-        """Reproduce and select the validation best, then check its submission."""
+        """Select by protected evidence, reproduce, and check the submission."""
 
         events = self.events()
         state = project(events)
@@ -1542,32 +1545,17 @@ class Harness:
         if state.status.value != "stopped":
             raise FinalizationError("finalization requires a stopped run")
 
-        if state.best_experiment_id == "baseline":
-            if self.final_submission_provider is None:
-                raise FinalizationError(
-                    "selected baseline requires a protected final submission provider"
-                )
-            reproduction_event_id = baseline_reproduction_event_id(events, state)
-            submission = await self.final_submission_provider.prepare_baseline()
-            selected = self._append(
-                FinalSelectedPayload(
-                    experiment_id="baseline",
-                    commit_sha=state.best_commit_sha,
-                    reproduction_evaluation_event_id=reproduction_event_id,
-                ),
-                stage="final_selected",
-                experiment_id="baseline",
-                causation_event_id=reproduction_event_id,
+        candidates = finalization_candidates(events, state)
+        finalists = rank_finalists(candidates)
+        if not finalists or finalists[0].experiment_id == "baseline":
+            return await self._finalize_baseline(
+                events, state, causation_event_id=events[-1].event_id
             )
-            self._append(
-                submission,
-                stage="submission_checked",
-                experiment_id="baseline",
-                causation_event_id=selected.event_id,
-            )
-            return self.state()
 
-        plan = candidate_finalization_plan(events, state)
+        preliminary = finalists[0]
+        plan = candidate_finalization_plan(
+            events, state, experiment_id=preliminary.experiment_id
+        )
         stopped_event_id = events[-1].event_id
         _, reproduction_run, reproduction_finished = await self._run_final_execution(
             experiment_id=plan.experiment_id,
@@ -1621,6 +1609,20 @@ class Harness:
         ):
             raise FinalizationError(
                 "clean reproduction did not exactly reproduce the trusted best score"
+            )
+
+        reproduced = replace(preliminary, clean_reproduction_passed=True)
+        baseline_candidate = next(
+            candidate
+            for candidate in candidates
+            if candidate.experiment_id == "baseline"
+        )
+        strict_selection = select_final((baseline_candidate, reproduced))
+        if strict_selection.experiment_id == "baseline":
+            return await self._finalize_baseline(
+                self.events(),
+                self.state(),
+                causation_event_id=reproduction_event.event_id,
             )
 
         final_attempt = plan.next_attempt + 1
@@ -1693,6 +1695,42 @@ class Harness:
             submission,
             stage="submission_checked",
             experiment_id=plan.experiment_id,
+            causation_event_id=selected.event_id,
+        )
+        return self.state()
+
+    async def _finalize_baseline(
+        self,
+        events: Sequence[Event],
+        state: object,
+        *,
+        causation_event_id: str,
+    ) -> object:
+        if self.final_submission_provider is None:
+            raise FinalizationError(
+                "selected baseline requires a protected final submission provider"
+            )
+        reproduction_event_id = baseline_reproduction_event_id(events, state)
+        baseline = next(
+            event
+            for event in events
+            if event.event_type == EventType.BASELINE_VERIFIED
+        )
+        submission = await self.final_submission_provider.prepare_baseline()
+        selected = self._append(
+            FinalSelectedPayload(
+                experiment_id="baseline",
+                commit_sha=baseline.payload.commit_sha,
+                reproduction_evaluation_event_id=reproduction_event_id,
+            ),
+            stage="final_selected",
+            experiment_id="baseline",
+            causation_event_id=causation_event_id,
+        )
+        self._append(
+            submission,
+            stage="submission_checked",
+            experiment_id="baseline",
             causation_event_id=selected.event_id,
         )
         return self.state()

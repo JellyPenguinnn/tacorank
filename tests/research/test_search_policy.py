@@ -161,6 +161,8 @@ def test_campaign_enumerates_all_fifty_slots_before_exhaustion(planner_context):
             "objective": "Adapt objective parameters.",
             "temporal_history": "Adapt temporal parameters.",
         },
+        minimum_family_full_evaluations=25,
+        family_convergence_patience=25,
     )
     history = []
     for slot in range(1, 51):

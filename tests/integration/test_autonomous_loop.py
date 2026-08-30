@@ -17,12 +17,14 @@ from tacorank.schemas import (
     CheckResult,
     CheckStatus,
     EventType,
+    ExperimentDecisionKind,
     PlannerAction,
     PlannerOutput,
     PatchCheckResult,
     SubmissionCheckedPayload,
     Violation,
     ResearchCampaign,
+    TrustVerdict,
 )
 
 
@@ -42,6 +44,18 @@ class SequentialPlanner:
         spec = output.spec.model_copy(
             update={"duplicate_key": "feature_cross:user_item:v%d" % number}
         )
+        if context.research_campaign is not None:
+            campaign = context.research_campaign
+            family = campaign.family_order[0]
+            spec = spec.model_copy(
+                update={
+                    "campaign_id": campaign.campaign_id,
+                    "family": family,
+                    "variant_id": "%s_%02d" % (family, number),
+                    "variant_instruction": campaign.family_directives[family],
+                    "variant_parameters": {"formulation": "bpr"},
+                }
+            )
         return output.model_copy(update={"spec": spec})
 
 
@@ -70,6 +84,73 @@ class NonImprovingEvaluator(FakeEvaluator):
                             )
                         }
                     ),
+                }
+            )
+        return result
+
+
+class NegativeNonImprovingEvaluator(NonImprovingEvaluator):
+    async def evaluate(self, request):
+        result = await super().evaluate(request)
+        if request.fidelity.value == "full":
+            result = result.model_copy(
+                update={
+                    "trust": result.trust.model_copy(
+                        update={"verdict": TrustVerdict.NEGATIVE}
+                    )
+                }
+            )
+        return result
+
+    async def decide(self, result, context):
+        decision = await super().decide(result, context)
+        if result.fidelity.value == "full":
+            decision = decision.model_copy(
+                update={
+                    "decision": ExperimentDecisionKind.REJECT,
+                    "best_eligible": False,
+                    "next_fidelity": None,
+                }
+            )
+        return decision
+
+
+class NegativeAuditEvaluator(FakeEvaluator):
+    async def evaluate(self, request):
+        result = await super().evaluate(request)
+        if request.fidelity.value == "full":
+            result = result.model_copy(
+                update={
+                    "diagnostics": result.diagnostics.model_copy(
+                        update={
+                            "validation_arm_deltas": {
+                                "val_a": 0.02,
+                                "val_b": -0.01,
+                            },
+                            "validation_arm_gap": 0.03,
+                        }
+                    )
+                }
+            )
+        return result
+
+
+class AuditRankingEvaluator(FakeEvaluator):
+    async def evaluate(self, request):
+        result = await super().evaluate(request)
+        if request.fidelity.value == "full":
+            val_b = 0.02 if request.experiment_id == "exp_002" else 0.01
+            result = result.model_copy(
+                update={
+                    "diagnostics": result.diagnostics.model_copy(
+                        update={
+                            "validation_arm_deltas": {
+                                "val_a": 0.02,
+                                "val_b": val_b,
+                            },
+                            "validation_arm_gap": abs(0.02 - val_b),
+                        }
+                    )
                 }
             )
         return result
@@ -176,11 +257,31 @@ def test_outer_loop_uses_memory_and_counts_distinct_terminal_iterations(
     assert harness.events()[-1].event_type == EventType.RUN_STOPPED
 
 
-def test_depth_campaign_runs_past_global_patience_until_its_budget(
+def test_negative_full_results_consume_convergence_patience(
     harness, baseline_evaluation
 ):
     planner = SequentialPlanner(harness.config.baseline_commit_sha)
-    harness.config.max_experiments = 4
+    harness.config.max_experiments = 10
+    harness.planner = planner
+    harness.evaluator = NegativeNonImprovingEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_until_stopped())
+
+    assert state.stop_reason_code == "converged"
+    assert state.experiments_proposed == 3
+    assert state.consecutive_non_improving_full_evaluations == 3
+
+
+def test_depth_campaign_uses_its_own_minimum_and_patience(
+    harness, baseline_evaluation
+):
+    planner = SequentialPlanner(harness.config.baseline_commit_sha)
+    harness.config.max_experiments = 10
     harness.config.research_campaign = ResearchCampaign(
         campaign_id="objective_depth_4",
         family_order=["objective"],
@@ -199,7 +300,7 @@ def test_depth_campaign_runs_past_global_patience_until_its_budget(
 
     state = asyncio.run(harness.run_until_stopped())
 
-    assert state.stop_reason_code == "experiment_budget"
+    assert state.stop_reason_code == "campaign_converged"
     assert state.experiments_proposed == 4
     assert len(planner.contexts) == 4
 
@@ -299,3 +400,56 @@ def test_baseline_best_uses_protected_official_submission(harness, baseline_eval
         if event.event_type == EventType.BASELINE_VERIFIED
     )
     assert final.payload.reproduction_evaluation_event_id == baseline.event_id
+
+
+def test_protected_audit_can_override_public_best_with_baseline(
+    harness, baseline_evaluation
+):
+    runner = FinalAwareFakeRunner(harness.event_store.artifact_store)
+    harness.runner = runner
+    harness.evaluator = NegativeAuditEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.final_submission_provider = FakeBaselineFinalSubmission(
+        harness.event_store.artifact_store, harness.config.run_id
+    )
+    harness.bootstrap(baseline_evaluation)
+    asyncio.run(harness.run_one_experiment())
+    harness.stop(StopDecision(True, "test_complete", "Finish the test search."))
+    request_count = len(runner.requests)
+
+    state = asyncio.run(harness.finalize())
+
+    assert state.best_experiment_id == "exp_001"
+    assert state.final_experiment_id == "baseline"
+    assert len(runner.requests) == request_count
+
+
+def test_protected_audit_can_select_trusted_candidate_beyond_public_best(
+    harness, baseline_evaluation
+):
+    planner = SequentialPlanner(harness.config.baseline_commit_sha)
+    runner = FinalAwareFakeRunner(harness.event_store.artifact_store)
+    harness.planner = planner
+    harness.runner = runner
+    harness.evaluator = AuditRankingEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.bootstrap(baseline_evaluation)
+    asyncio.run(harness.run_one_experiment())
+    asyncio.run(harness.run_one_experiment())
+    harness.stop(StopDecision(True, "test_complete", "Finish the test search."))
+
+    state = asyncio.run(harness.finalize())
+
+    assert state.best_experiment_id == "exp_001"
+    assert state.final_experiment_id == "exp_002"
+    assert [request.command_id for request in runner.requests[-3:]] == [
+        "clean_reproduce",
+        "candidate_final_infer",
+        "submission_check",
+    ]

@@ -307,6 +307,33 @@ def _campaign_choice(
         budget = int(budgets.get(family, 0))
         if len(family_attempted) >= budget:
             continue
+        minimum_depth = int(
+            get_value(campaign, "minimum_family_full_evaluations", 3)
+        )
+        patience = int(get_value(campaign, "family_convergence_patience", 3))
+        full_count = 0
+        pressure = 0
+        for summary in family_attempted:
+            if not (
+                _normalized(get_value(summary, "highest_completed_fidelity", None))
+                == "full"
+                and _normalized(get_value(summary, "population", None))
+                == "public_validation"
+                and _normalized(get_value(summary, "integrity", None)) == "clean"
+                and _normalized(get_value(summary, "trust_verdict", None))
+                in {"accepted", "negative", "inconclusive", "redundant"}
+                and _normalized(get_value(summary, "status", None))
+                in {"accepted", "rejected", "pruned"}
+            ):
+                continue
+            full_count += 1
+            pressure = (
+                0
+                if bool(get_value(summary, "best_eligible", False))
+                else pressure + 1
+            )
+        if full_count >= minimum_depth and pressure >= patience:
+            continue
         if family not in allowed:
             return _blocked(
                 "CAMPAIGN_FAMILY_UNAVAILABLE",
@@ -359,9 +386,25 @@ def _campaign_choice(
             campaign_directive=str(directives.get(family, "")),
         )
 
+    exhausted = all(
+        len(
+            [
+                summary
+                for summary in history
+                if str(get_value(summary, "campaign_id", "")) == campaign_id
+                and str(get_value(summary, "family", "")) == str(family)
+            ]
+        )
+        >= int(budgets.get(str(family), 0))
+        for family in as_list(get_value(campaign, "family_order", None))
+    )
     return _blocked(
-        "CAMPAIGN_EXHAUSTED",
-        "Every configured depth-campaign variant has been attempted.",
+        "CAMPAIGN_EXHAUSTED" if exhausted else "CAMPAIGN_CONVERGED",
+        (
+            "Every campaign family exhausted its frozen budget."
+            if exhausted
+            else "Every campaign family reached its frozen minimum depth and patience."
+        ),
         phase="campaign_depth",
     )
 

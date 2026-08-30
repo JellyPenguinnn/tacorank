@@ -7,6 +7,7 @@ import pytest
 
 from tacorank.context.builder import (
     ContextBuildError,
+    _mentions_protected_validation_arm,
     _planner_parent_metric_deltas,
 )
 from tacorank.context.redaction import redact
@@ -79,7 +80,9 @@ def test_planner_history_preserves_complete_evaluation_evidence(
     assert latest.diagnostic_metrics["spearman_vs_fm_baseline"] == 0.8
     assert latest.diagnostic_metrics["user_rankable_fraction"] == 1.0
     assert latest.trust_flags == []
-    assert latest.diagnostic_metrics["validation_arm_gap"] == 0.01
+    assert "validation_arm_gap" not in latest.diagnostic_metrics
+    assert "val_b_parent_delta" not in latest.diagnostic_metrics
+    assert "val_a_parent_delta" not in latest.diagnostic_metrics
     assert latest.diagnostic_metrics["temporal_delta_slope"] == -0.003
     assert latest.metric_deltas == {
         "gauc": pytest.approx(0.02),
@@ -101,6 +104,14 @@ def test_planner_history_preserves_complete_evaluation_evidence(
         "proxy",
         "full",
     ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["val_b_parent_delta", "Val-B regression", "validation arm gap"],
+)
+def test_planner_redacts_all_protected_validation_arm_spellings(value):
+    assert _mentions_protected_validation_arm(value)
 
 
 def test_planner_metric_deltas_are_authoritative_and_route_safe() -> None:

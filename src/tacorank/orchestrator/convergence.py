@@ -12,6 +12,7 @@ from ..schemas import (
     EventType,
     ExperimentDecisionKind,
     Fidelity,
+    Integrity,
     Population,
     TrustVerdict,
 )
@@ -53,7 +54,14 @@ def convergence_pressure(events: Sequence[Event], config: RunConfig) -> int:
             if result is None or not (
                 result.fidelity == Fidelity.FULL
                 and result.population == Population.PUBLIC_VALIDATION
-                and result.trust.verdict == TrustVerdict.ACCEPTED
+                and result.trust.integrity == Integrity.CLEAN
+                and result.trust.verdict
+                in {
+                    TrustVerdict.ACCEPTED,
+                    TrustVerdict.NEGATIVE,
+                    TrustVerdict.INCONCLUSIVE,
+                    TrustVerdict.REDUNDANT,
+                }
             ):
                 continue
             score = (
@@ -61,12 +69,78 @@ def convergence_pressure(events: Sequence[Event], config: RunConfig) -> int:
                 if result.trust.seed_mean is not None
                 else result.metric_set.primary_score
             )
-            if incumbent is None or score > incumbent + config.convergence_epsilon:
+            if decision.best_eligible and (
+                incumbent is None or score > incumbent + config.convergence_epsilon
+            ):
                 incumbent = score
                 non_improving = 0
             else:
                 non_improving += 1
     return non_improving
+
+
+def campaign_family_pressures(
+    events: Sequence[Event], config: RunConfig
+) -> dict[str, tuple[int, int]]:
+    """Return clean terminal full counts and current pressure per campaign family."""
+
+    campaign = config.research_campaign
+    if campaign is None:
+        return {}
+    specifications = {
+        event.payload.spec.experiment_id: event.payload.spec
+        for event in events
+        if event.event_type == EventType.EXPERIMENT_PROPOSED
+        and event.payload.spec.campaign_id == campaign.campaign_id
+    }
+    evaluations = {
+        event.event_id: event.payload.result
+        for event in events
+        if event.event_type == EventType.EVALUATION_COMPLETED
+    }
+    counts = {family: 0 for family in campaign.family_order}
+    pressures = {family: 0 for family in campaign.family_order}
+    for event in events:
+        if event.event_type != EventType.EXPERIMENT_DECIDED:
+            continue
+        decision = event.payload.decision
+        if decision.decision == ExperimentDecisionKind.PROMOTE:
+            continue
+        spec = specifications.get(decision.experiment_id)
+        result = evaluations.get(decision.evaluation_event_id or "")
+        if spec is None or result is None or not (
+            result.fidelity == Fidelity.FULL
+            and result.population == Population.PUBLIC_VALIDATION
+            and result.trust.integrity == Integrity.CLEAN
+            and result.trust.verdict
+            in {
+                TrustVerdict.ACCEPTED,
+                TrustVerdict.NEGATIVE,
+                TrustVerdict.INCONCLUSIVE,
+                TrustVerdict.REDUNDANT,
+            }
+        ):
+            continue
+        family = spec.family
+        if family not in counts:
+            continue
+        counts[family] += 1
+        pressures[family] = 0 if decision.best_eligible else pressures[family] + 1
+    return {family: (counts[family], pressures[family]) for family in counts}
+
+
+def campaign_converged(events: Sequence[Event], config: RunConfig) -> bool:
+    campaign = config.research_campaign
+    if campaign is None:
+        return False
+    evidence = campaign_family_pressures(events, config)
+    return all(
+        evidence.get(family, (0, 0))[0]
+        >= campaign.minimum_family_full_evaluations
+        and evidence.get(family, (0, 0))[1]
+        >= campaign.family_convergence_patience
+        for family in campaign.family_order
+    )
 
 
 def stop_decision(
@@ -85,8 +159,13 @@ def stop_decision(
     if runtime_stop.stop:
         return runtime_stop
     pressure = convergence_pressure(events, config)
-    # A frozen depth campaign owns its per-family conclusion budget. Global
-    # patience must not terminate it after the first few noisy configurations.
+    if campaign_converged(events, config):
+        return StopDecision(
+            True,
+            "campaign_converged",
+            "Every campaign family reached its frozen minimum depth and "
+            "non-improvement patience.",
+        )
     if config.research_campaign is None and pressure >= config.convergence_patience:
         return StopDecision(
             True,

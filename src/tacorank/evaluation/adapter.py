@@ -538,17 +538,11 @@ class EvaluationService:
                 val_a_delta_ci_upper=(
                     val_a_interval.upper if val_a_interval is not None else None
                 ),
-                val_b_delta=(
-                    request.val_b_delta
-                    if request.val_b_delta is not None
-                    else diagnostic_summary.validation_arm_deltas.get("val_b")
-                ),
-                val_b_delta_ci_lower=(
-                    val_b_interval.lower if val_b_interval is not None else None
-                ),
-                val_b_delta_ci_upper=(
-                    val_b_interval.upper if val_b_interval is not None else None
-                ),
+                # Val-B is protected selection evidence. It is persisted in the
+                # diagnostic artifact but must not influence search trust.
+                val_b_delta=None,
+                val_b_delta_ci_lower=None,
+                val_b_delta_ci_upper=None,
                 delta_correlation=request.delta_correlation,
                 delta_correlation_experiment_id=(
                     request.delta_correlation_experiment_id

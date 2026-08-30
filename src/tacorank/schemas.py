@@ -519,6 +519,8 @@ class ResearchCampaign(StrictModel):
     family_method_card_ids: Dict[NonEmptyStr, List[NonEmptyStr]]
     family_directives: Dict[NonEmptyStr, NonEmptyStr]
     proxy_checkpoint_interval: int = Field(default=3, gt=0)
+    minimum_family_full_evaluations: int = Field(default=3, gt=0)
+    family_convergence_patience: int = Field(default=3, gt=0)
 
     @field_validator("campaign_id")
     @classmethod
@@ -549,6 +551,32 @@ class ResearchCampaign(StrictModel):
     @property
     def experiment_budget(self) -> int:
         return sum(self.family_budgets.values())
+
+
+class HypothesisEvidence(StrictModel):
+    """Machine-checkable evidence and treatment boundary for one hypothesis."""
+
+    observation: NonEmptyStr
+    source_evaluation_event_ids: List[NonEmptyStr] = Field(min_length=1)
+    changed_factors: List[NonEmptyStr] = Field(min_length=1)
+    held_constant: List[NonEmptyStr] = Field(min_length=1)
+    expected_metric_effects: Dict[NonEmptyStr, float] = Field(min_length=1)
+
+    @field_validator(
+        "source_evaluation_event_ids", "changed_factors", "held_constant"
+    )
+    @classmethod
+    def validate_unique_evidence_lists(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("hypothesis evidence lists must not contain duplicates")
+        return values
+
+    @model_validator(mode="after")
+    def validate_treatment_boundary(self) -> "HypothesisEvidence":
+        overlap = set(self.changed_factors).intersection(self.held_constant)
+        if overlap:
+            raise ValueError("changed factors and held constants must be disjoint")
+        return self
 
 
 class ResearchProposal(StrictModel):
@@ -585,6 +613,7 @@ class ResearchProposal(StrictModel):
     # leave this empty.
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+    hypothesis_evidence: Optional[HypothesisEvidence] = None
     duplicate_key: NonEmptyStr
 
     @field_validator("run_id", "experiment_id", "context_id")
@@ -1481,6 +1510,7 @@ class PlannerExperimentSummary(StrictModel):
     commit_sha: NonEmptyStr
     family: Optional[str] = None
     hypothesis_summary: str = ""
+    evaluation_event_id: Optional[NonEmptyStr] = None
     trust_verdict: Optional[TrustVerdict] = None
     stability: Optional[Stability] = None
     integrity: Optional[Integrity] = None

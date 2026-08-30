@@ -88,6 +88,13 @@ Required JSON fields:
   "expected_mechanism": "why the intervention should affect ranking",
   "success_criteria": "quantitative acceptance criterion",
   "falsification_condition": "evidence that rejects the hypothesis",
+  "hypothesis_evidence": {
+    "observation": "measured prior result motivating this treatment",
+    "source_evaluation_event_ids": ["evt_000010"],
+    "changed_factors": ["learning_rate"],
+    "held_constant": ["formulation", "embedding_dim", "epochs"],
+    "expected_metric_effects": {"GAUC": 0.001, "nDCG@5": 0.0}
+  },
   "variant_instruction": "exact distinct method formulation and hyperparameters for a campaign slot",
   "variant_parameters": {"formulation": "bpr", "negative_count": 4},
   "estimated_cost": {
@@ -647,6 +654,42 @@ class DeepSeekResearchProvider:
         evidence = [item for item in supplied_evidence if item in set(source_events)]
         if not evidence:
             evidence = source_events
+        prior_evaluation_ids = {
+            str(get_value(summary, "evaluation_event_id", ""))
+            for summary in as_list(get_value(context, "family_history", None))
+            if get_value(summary, "evaluation_event_id", None)
+        }
+        raw_hypothesis_evidence = raw.get("hypothesis_evidence")
+        hypothesis_evidence = None
+        if isinstance(raw_hypothesis_evidence, Mapping):
+            effects = raw_hypothesis_evidence.get("expected_metric_effects")
+            hypothesis_evidence = {
+                "observation": _text(raw_hypothesis_evidence.get("observation")),
+                "source_evaluation_event_ids": [
+                    str(item)
+                    for item in as_list(
+                        raw_hypothesis_evidence.get(
+                            "source_evaluation_event_ids"
+                        )
+                    )
+                    if str(item) in prior_evaluation_ids
+                ],
+                "changed_factors": [
+                    str(item)
+                    for item in as_list(
+                        raw_hypothesis_evidence.get("changed_factors")
+                    )
+                ],
+                "held_constant": [
+                    str(item)
+                    for item in as_list(
+                        raw_hypothesis_evidence.get("held_constant")
+                    )
+                ],
+                "expected_metric_effects": (
+                    dict(effects) if isinstance(effects, Mapping) else {}
+                ),
+            }
 
         known_cards = {
             str(get_value(card, "method_id", "")): str(get_value(card, "family", ""))
@@ -724,6 +767,7 @@ class DeepSeekResearchProvider:
                 )
             ],
             "evidence_event_ids": evidence,
+            "hypothesis_evidence": hypothesis_evidence,
         }
         normalized["duplicate_key"] = compute_duplicate_key(normalized)
         return normalized

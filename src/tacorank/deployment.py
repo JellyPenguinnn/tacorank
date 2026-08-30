@@ -280,7 +280,7 @@ def setup_live_deployment(
         "max_experiments": campaign_budget,
         "wall_time_limit_seconds": 86400 if research_campaign is not None else 21600,
         "convergence_epsilon": 0.002,
-        "convergence_patience": campaign_budget if research_campaign is not None else 3,
+        "convergence_patience": 3,
         "max_repairs_per_experiment": 2,
         "allowed_runtime_adjustments": {},
         "timeout_profiles": {"standard": 600, "extended": 900},

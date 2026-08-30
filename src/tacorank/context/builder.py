@@ -62,7 +62,13 @@ def _prediction_change_spearman(value: object) -> Optional[float]:
 
 
 def _planner_diagnostic_metrics(result: object) -> Dict[str, float]:
-    values = dict(getattr(result, "diagnostic_metrics", {}) or {})
+    values = {
+        name: value
+        for name, value in dict(
+            getattr(result, "diagnostic_metrics", {}) or {}
+        ).items()
+        if not _mentions_protected_validation_arm(name)
+    }
     diagnostics = getattr(result, "diagnostics", None)
     if diagnostics is None:
         return {name: float(value) for name, value in values.items()}
@@ -71,13 +77,10 @@ def _planner_diagnostic_metrics(result: object) -> Dict[str, float]:
             "train_validation_gap": diagnostics.train_validation_gap,
             "proxy_parent_delta": diagnostics.proxy_parent_delta,
             "proxy_full_delta_gap": diagnostics.proxy_full_delta_gap,
-            "validation_arm_gap": diagnostics.validation_arm_gap,
             "temporal_delta_slope": diagnostics.temporal_delta_slope,
             "gain_concentration_top10pct": diagnostics.gain_concentration_top10pct,
         }
     )
-    for arm, value in diagnostics.validation_arm_deltas.items():
-        values["%s_parent_delta" % arm] = value
     for label, name in (
         ("best_slice_delta", diagnostics.best_slice),
         ("worst_slice_delta", diagnostics.worst_slice),
@@ -87,6 +90,26 @@ def _planner_diagnostic_metrics(result: object) -> Dict[str, float]:
     return {
         name: float(value) for name, value in values.items() if value is not None
     }
+
+
+def _planner_failure_hypotheses(result: object) -> List[str]:
+    diagnostics = getattr(result, "diagnostics", None)
+    if diagnostics is None:
+        return []
+    return _planner_safe_texts(diagnostics.failure_hypotheses)
+
+
+def _mentions_protected_validation_arm(value: object) -> bool:
+    normalized = str(value).lower().replace("-", "_").replace(" ", "_")
+    return "val_b" in normalized or "validation_arm" in normalized
+
+
+def _planner_safe_texts(values: object) -> List[str]:
+    return [
+        str(item)
+        for item in values or []
+        if not _mentions_protected_validation_arm(item)
+    ]
 
 
 def _planner_parent_metric_deltas(
@@ -628,17 +651,26 @@ class ContextBuilder:
                     commit_sha=node.latest_commit_sha or spec.parent_commit_sha,
                     family=spec.family,
                     hypothesis_summary=spec.hypothesis,
+                    evaluation_event_id=(
+                        evaluation_event.event_id if evaluation_event else None
+                    ),
                     trust_verdict=evaluation.trust.verdict if evaluation else None,
                     stability=evaluation.trust.stability if evaluation else None,
                     integrity=evaluation.trust.integrity if evaluation else None,
-                    trust_flags=(list(evaluation.trust.flags) if evaluation else []),
+                    trust_flags=(
+                        _planner_safe_texts(evaluation.trust.flags)
+                        if evaluation
+                        else []
+                    ),
                     failure_hypotheses=(
-                        list(evaluation.diagnostics.failure_hypotheses)
+                        _planner_failure_hypotheses(evaluation)
                         if evaluation
                         else []
                     ),
                     diagnostic_limitations=(
-                        list(evaluation.diagnostics.limitations) if evaluation else []
+                        _planner_safe_texts(evaluation.diagnostics.limitations)
+                        if evaluation
+                        else []
                     ),
                     diagnostic_best_slice=(
                         evaluation.diagnostics.best_slice if evaluation else None

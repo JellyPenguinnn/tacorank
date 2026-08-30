@@ -17,6 +17,7 @@ from ..schemas import (
     EventType,
     ExperimentDecisionKind,
     Fidelity,
+    Integrity,
     LessonStatus,
     RecoveryAction,
     RunOutcome,
@@ -199,10 +200,21 @@ def project(events: Iterable[Event]) -> RunState:
                     decision.fidelity_completed == Fidelity.FULL
                     and node.metric_set is not None
                     and node.trust is not None
-                    and node.trust.verdict == TrustVerdict.ACCEPTED
+                    and node.trust.integrity == Integrity.CLEAN
+                    and node.trust.verdict
+                    in {
+                        TrustVerdict.ACCEPTED,
+                        TrustVerdict.NEGATIVE,
+                        TrustVerdict.INCONCLUSIVE,
+                        TrustVerdict.REDUNDANT,
+                    }
                 ):
-                    score = node.metric_set.primary_score
-                    if (
+                    score = (
+                        node.trust.seed_mean
+                        if node.trust.seed_mean is not None
+                        else node.metric_set.primary_score
+                    )
+                    if decision.best_eligible and (
                         convergence_incumbent is None
                         or score > convergence_incumbent + state.convergence_epsilon
                     ):

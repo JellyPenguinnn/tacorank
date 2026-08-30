@@ -424,6 +424,77 @@ class PlanValidator:
             errors.append("INVALID_EVIDENCE_EVENT_ID")
         if not evidence_events.issubset(source_events):
             errors.append("EVIDENCE_OUTSIDE_CONTEXT")
+        history = as_list(get_value(context, "family_history", None))
+        hypothesis_evidence = get_value(spec, "hypothesis_evidence", None)
+        if history and hypothesis_evidence is None:
+            errors.append("HYPOTHESIS_EVIDENCE_REQUIRED_AFTER_FIRST_EXPERIMENT")
+        if hypothesis_evidence is not None:
+            cited_evaluations = set(
+                map(
+                    str,
+                    as_list(
+                        get_value(
+                            hypothesis_evidence,
+                            "source_evaluation_event_ids",
+                            None,
+                        )
+                    ),
+                )
+            )
+            prior_evaluations = {
+                str(get_value(summary, "evaluation_event_id", ""))
+                for summary in history
+                if get_value(summary, "evaluation_event_id", None)
+            }
+            if not cited_evaluations:
+                errors.append("HYPOTHESIS_EVALUATION_EVIDENCE_REQUIRED")
+            if not cited_evaluations.issubset(prior_evaluations):
+                errors.append("HYPOTHESIS_EVIDENCE_NOT_PRIOR_EVALUATION")
+            if not cited_evaluations.issubset(evidence_events):
+                errors.append("HYPOTHESIS_EVIDENCE_NOT_DECLARED")
+            changed = set(
+                map(
+                    str,
+                    as_list(get_value(hypothesis_evidence, "changed_factors", None)),
+                )
+            )
+            held = set(
+                map(
+                    str,
+                    as_list(get_value(hypothesis_evidence, "held_constant", None)),
+                )
+            )
+            if not changed or not held:
+                errors.append("HYPOTHESIS_TREATMENT_BOUNDARY_REQUIRED")
+            if changed.intersection(held):
+                errors.append("HYPOTHESIS_TREATMENT_BOUNDARY_OVERLAP")
+            if get_value(spec, "campaign_id", None):
+                parameter_names = set(
+                    map(
+                        str,
+                        (get_value(spec, "variant_parameters", None) or {}).keys(),
+                    )
+                )
+                if changed != parameter_names:
+                    errors.append("CAMPAIGN_CHANGED_FACTORS_MISMATCH")
+            effects = get_value(
+                hypothesis_evidence, "expected_metric_effects", None
+            ) or {}
+            baseline_metric_set = get_value(
+                get_value(context, "baseline", None), "metric_set", None
+            )
+            allowed_metrics = set(
+                map(
+                    str,
+                    (
+                        get_value(baseline_metric_set, "metrics", None) or {}
+                    ).keys(),
+                )
+            )
+            if not effects:
+                errors.append("EXPECTED_METRIC_EFFECT_REQUIRED")
+            elif allowed_metrics and not set(map(str, effects)).issubset(allowed_metrics):
+                errors.append("EXPECTED_METRIC_EFFECT_UNKNOWN")
 
         narrative_fields = (
             "hypothesis",

@@ -37,11 +37,45 @@ def make_spec(planner_context, **overrides):
     return spec
 
 
+def add_prior_hypothesis_evidence(planner_context, latest, spec):
+    latest.evaluation_event_id = "evt_000010"
+    planner_context.source_event_ids.append("evt_000010")
+    spec.evidence_event_ids = ["evt_000010"]
+    spec.hypothesis_evidence = SimpleNamespace(
+        observation="The prior evaluation exposed a controlled metric tradeoff.",
+        source_evaluation_event_ids=["evt_000010"],
+        changed_factors=["objective"],
+        held_constant=["validation_split", "seed"],
+        expected_metric_effects={"GAUC": 0.002},
+    )
+    return spec
+
+
 def test_validator_accepts_contract_compatible_plan(planner_context):
     result = PlanValidator().validate(make_spec(planner_context), planner_context)
 
     assert result.accepted
     assert result.errors == ()
+
+
+def test_validator_requires_exact_prior_evaluation_evidence_after_first_result(
+    planner_context,
+):
+    latest = SimpleNamespace(
+        experiment_id="exp_0001",
+        evaluation_event_id="evt_000010",
+        family="objective",
+    )
+    planner_context.family_history = [latest]
+    planner_context.source_event_ids.append("evt_000010")
+    spec = make_spec(planner_context, experiment_id="exp_0002")
+
+    missing = PlanValidator().validate(spec, planner_context)
+    assert "HYPOTHESIS_EVIDENCE_REQUIRED_AFTER_FIRST_EXPERIMENT" in missing.errors
+
+    add_prior_hypothesis_evidence(planner_context, latest, spec)
+    accepted = PlanValidator().validate(spec, planner_context)
+    assert accepted.accepted, accepted.errors
 
 
 def test_validator_accepts_distinct_agent_chosen_campaign_variant(planner_context):
@@ -122,6 +156,7 @@ def test_validator_allows_policy_authorized_soft_refinement(planner_context):
         change_summary="Add one listwise refinement.",
         method_card_ids=["objective_listwise_user_softmax"],
     )
+    add_prior_hypothesis_evidence(planner_context, latest, spec)
 
     result = PlanValidator().validate(spec, planner_context, choice=choice)
 
@@ -175,6 +210,7 @@ def test_validator_accepts_soft_component_for_bounded_ensemble(planner_context):
             cost_tier="low",
         ),
     )
+    add_prior_hypothesis_evidence(planner_context, latest, spec)
 
     result = PlanValidator().validate(spec, planner_context, choice=choice)
 
