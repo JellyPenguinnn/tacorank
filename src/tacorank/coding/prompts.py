@@ -305,8 +305,11 @@ def build_repair_prompt(
     )
     target_files = _validated_paths(spec_document.get("target_files"), "target_files")
     decision_document = _json_document(decision, "recovery_decision")
-    if decision_document.get("action") != "trae_repair":
-        raise PromptContractError("recovery decision is not a trae_repair action")
+    if decision_document.get("action") not in {
+        "trae_repair",
+        "restart_from_trusted_parent",
+    }:
+        raise PromptContractError("recovery decision is not a code-repair action")
     if decision_document.get("run_id", run_id) != run_id or decision_document.get(
         "experiment_id", experiment_id
     ) != experiment_id:

@@ -271,7 +271,7 @@ def test_repair_prompt_preserves_original_hypothesis_and_exact_failure() -> None
     assert "confirm that the proposed fix explains the supplied evidence" in prompt
     assert '"max_provider_tokens": 40' in prompt
 
-    with pytest.raises(PromptContractError, match="not a trae_repair"):
+    with pytest.raises(PromptContractError, match="not a code-repair action"):
         build_repair_prompt(
             context,
             {"action": "retry_same_commit"},
@@ -392,6 +392,23 @@ def test_gate_a_repair_has_explicitly_absent_receipt() -> None:
     )
     assert "- accepted_patch_receipt_id: null" in prompt
     assert "receipt-none" not in prompt
+
+    restart_prompt = build_repair_prompt(
+        context,
+        {
+            "action": "restart_from_trusted_parent",
+            "run_id": "run1",
+            "experiment_id": "exp1",
+            "repair_attempt": 2,
+            "instructions": "restart from the trusted parent",
+        },
+        step_limit=3,
+        token_limit=40,
+        wall_time_limit_seconds=8,
+        allowed_command_ids=("candidate_smoke",),
+    )
+    assert '"action": "restart_from_trusted_parent"' in restart_prompt
+    assert "- accepted_patch_receipt_id: null" in restart_prompt
 
 
 def test_post_acceptance_repair_requires_receipt() -> None:
