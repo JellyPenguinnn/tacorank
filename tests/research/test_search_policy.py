@@ -232,7 +232,7 @@ def test_campaign_enumerates_all_fifty_slots_before_exhaustion(planner_context):
     assert exhausted.reason_code == "CAMPAIGN_EXHAUSTED"
 
 
-def test_feature_first_campaign_selects_history_affinity_immediately(
+def test_adaptive_campaign_starts_with_objective_screening(
     planner_context,
 ):
     planner_context.contract_summary.allowed_families = [
@@ -253,12 +253,15 @@ def test_feature_first_campaign_selects_history_affinity_immediately(
         ["strict_temporal_cutoff", "history_affinity_features_legal"]
     )
     planner_context.research_campaign = SimpleNamespace(
-        campaign_id="objective_temporal_features_50_v2",
-        family_order=["features", "objective", "temporal_history"],
-        family_budgets={"features": 20, "objective": 15, "temporal_history": 15},
+        campaign_id="objective_temporal_features_50_v3",
+        family_order=["objective", "temporal_history", "features"],
+        family_budgets={"objective": 27, "temporal_history": 15, "features": 8},
         family_method_card_ids={
             "features": ["features_history_affinity"],
-            "objective": ["objective_pairwise_bpr"],
+            "objective": [
+                "objective_pairwise_bpr",
+                "objective_listwise_user_softmax",
+            ],
             "temporal_history": ["temporal_history_compact"],
         },
         family_directives={
@@ -266,16 +269,110 @@ def test_feature_first_campaign_selects_history_affinity_immediately(
             "objective": "Adapt objective parameters.",
             "temporal_history": "Adapt temporal parameters.",
         },
-        minimum_family_full_evaluations=15,
-        family_convergence_patience=15,
+        minimum_family_full_evaluations=5,
+        family_convergence_patience=5,
     )
 
     choice = SearchPolicy().choose(planner_context)
 
     assert choice.action == "propose"
-    assert choice.family == "features"
-    assert choice.method_card_id == "features_history_affinity"
-    assert choice.variant_id == "features_01"
+    assert choice.family == "objective"
+    assert choice.allowed_method_card_ids == ("objective_pairwise_bpr",)
+    assert choice.variant_id == "objective_01"
+
+
+def test_adaptive_campaign_advances_after_five_non_improving_full_trials(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = [
+        "objective",
+        "temporal_history",
+        "features",
+    ]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="objective_temporal_features_50_v3",
+        family_order=["objective", "temporal_history", "features"],
+        family_budgets={"objective": 27, "temporal_history": 15, "features": 8},
+        family_method_card_ids={
+            "objective": ["objective_pairwise_bpr"],
+            "temporal_history": ["temporal_history_compact"],
+            "features": ["features_history_affinity"],
+        },
+        family_directives={
+            "objective": "Adapt objective parameters.",
+            "temporal_history": "Adapt temporal parameters.",
+            "features": "Adapt point-in-time history affinity.",
+        },
+        minimum_family_full_evaluations=5,
+        family_convergence_patience=5,
+    )
+    history = []
+    for slot in range(1, 6):
+        summary = make_summary(
+            "exp_%03d" % slot,
+            family="objective",
+            decision="reject",
+            parent_eligible=False,
+            best_eligible=False,
+            method_card_ids=["objective_pairwise_bpr"],
+        )
+        summary.status = "rejected"
+        summary.campaign_id = "objective_temporal_features_50_v3"
+        summary.variant_id = "objective_%02d" % slot
+        history.append(summary)
+    planner_context.family_history = history
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "propose"
+    assert choice.family == "temporal_history"
+    assert choice.variant_id == "temporal_history_01"
+
+
+def test_adaptive_campaign_improvement_resets_family_patience(planner_context):
+    planner_context.contract_summary.allowed_families = [
+        "objective",
+        "temporal_history",
+        "features",
+    ]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="objective_temporal_features_50_v3",
+        family_order=["objective", "temporal_history", "features"],
+        family_budgets={"objective": 27, "temporal_history": 15, "features": 8},
+        family_method_card_ids={
+            "objective": ["objective_pairwise_bpr"],
+            "temporal_history": ["temporal_history_compact"],
+            "features": ["features_history_affinity"],
+        },
+        family_directives={
+            "objective": "Adapt objective parameters.",
+            "temporal_history": "Adapt temporal parameters.",
+            "features": "Adapt point-in-time history affinity.",
+        },
+        minimum_family_full_evaluations=5,
+        family_convergence_patience=5,
+    )
+    history = []
+    for slot in range(1, 7):
+        summary = make_summary(
+            "exp_%03d" % slot,
+            family="objective",
+            decision="accept" if slot == 2 else "reject",
+            parent_eligible=slot == 2,
+            best_eligible=slot == 2,
+            method_card_ids=["objective_pairwise_bpr"],
+        )
+        summary.status = "accepted" if slot == 2 else "rejected"
+        summary.campaign_id = "objective_temporal_features_50_v3"
+        summary.variant_id = "objective_%02d" % slot
+        history.append(summary)
+    planner_context.family_history = history
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "propose"
+    assert choice.family == "objective"
+    assert choice.variant_id == "objective_07"
 
 
 def test_clean_evaluator_baseline_does_not_imply_executable_parent_parity(

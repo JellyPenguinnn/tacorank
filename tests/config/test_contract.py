@@ -15,15 +15,16 @@ def test_objective_temporal_feature_campaign_has_exact_fifty_slot_budget():
         json.loads(path.read_text(encoding="utf-8"))
     )
 
-    assert campaign.family_order == ["features", "objective", "temporal_history"]
+    assert campaign.campaign_id == "objective_temporal_features_50_v3"
+    assert campaign.family_order == ["objective", "temporal_history", "features"]
     assert campaign.family_budgets == {
-        "features": 20,
-        "objective": 15,
+        "objective": 27,
         "temporal_history": 15,
+        "features": 8,
     }
     assert campaign.experiment_budget == 50
-    assert campaign.minimum_family_full_evaluations == 15
-    assert campaign.family_convergence_patience == 15
+    assert campaign.minimum_family_full_evaluations == 5
+    assert campaign.family_convergence_patience == 5
     assert campaign.family_method_card_ids["objective"] == [
         "objective_pairwise_bpr",
         "objective_listwise_user_softmax",

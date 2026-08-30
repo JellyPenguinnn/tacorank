@@ -1,17 +1,17 @@
 {
-  "campaign_id": "objective_temporal_features_50_v2",
+  "campaign_id": "objective_temporal_features_50_v3",
   "family_order": [
-    "features",
     "objective",
-    "temporal_history"
+    "temporal_history",
+    "features"
   ],
   "family_budgets": {
-    "features": 20,
-    "objective": 15,
-    "temporal_history": 15
+    "objective": 27,
+    "temporal_history": 15,
+    "features": 8
   },
-  "minimum_family_full_evaluations": 15,
-  "family_convergence_patience": 15,
+  "minimum_family_full_evaluations": 5,
+  "family_convergence_patience": 5,
   "family_method_card_ids": {
     "objective": [
       "objective_pairwise_bpr",
