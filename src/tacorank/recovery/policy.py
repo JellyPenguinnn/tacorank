@@ -91,6 +91,14 @@ class RecoveryManager:
                     {},
                 )
 
+        if getattr(context, "failure_stage", None) == "coding":
+            return (
+                "abandon",
+                "CODING_WORKER_FAILURE",
+                "Abandon: the coding worker did not produce a valid patch candidate.",
+                {},
+            )
+
         adjustment = select_runtime_adjustment(failure.failure_class, context)
         if failure.failure_class in {"oom", "numerical_error", "timeout"} and adjustment is not None:
             return (

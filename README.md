@@ -144,7 +144,88 @@ export DEEPSEEK_API_KEY='your-key'
   --live-config .tacorank/deployment/live-adapters.json
 ```
 
-If Python 3.12 or Docker is not on `PATH`, pass canonical executables with `--python312` and `--docker`. If the data is already present, omit `--download-data` and use `--data-dir` when needed. Setup requires a clean tracked checkout because the generated Docker image, Git baseline, contract, and protected manifest must all describe the same commit.
+If Python 3.12 or Docker is not on `PATH`, pass canonical executables with `--python312` and `--docker`. If the data is already present, omit `--download-data` and use `--data-dir` when needed. Setup requires a clean tracked checkout because the generated Docker image, Git baseline, contract, and protected manifest must all describe the same commit. The generated files are hash-bound to that exact `HEAD`; after committing source changes, generate a new deployment (or remove only the old generated deployment/runtime directories) before running preflight again.
+
+### Windows PowerShell
+
+Run PowerShell from the repository root. Docker Desktop must be running with
+Linux containers enabled (the WSL2 backend is recommended). WSL integration is
+needed only when running these commands from a WSL shell. The explicit
+executable paths avoid PowerShell/PATH ambiguity:
+
+```powershell
+cd C:\nus\techjam\tacorank
+
+git submodule update --init --recursive
+
+if (-not (Test-Path .venv\Scripts\python.exe)) {
+    py -3.12 -m venv .venv
+}
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
+
+$env:DEEPSEEK_API_KEY = "your-key"
+$python312 = (py -3.12 -c "import sys; print(sys.executable)").Trim()
+$docker = (Get-Command docker.exe -ErrorAction Stop).Path
+
+# Keep --download-data for the first setup (or when KuaiRand-Pure/data is incomplete).
+.\.venv\Scripts\tacorank.exe setup-live `
+    --download-data `
+    --python312 $python312 `
+    --docker $docker
+
+.\.venv\Scripts\tacorank.exe preflight `
+    --config .tacorank\deployment\run-config.json `
+    --live-config .tacorank\deployment\live-adapters.json
+
+.\.venv\Scripts\tacorank.exe run `
+    --config .tacorank\deployment\run-config.json `
+    --live-config .tacorank\deployment\live-adapters.json
+```
+
+The backtick is PowerShell's line-continuation character. Do not type the
+backslash before it. Omit `--download-data` when the data is already complete.
+Run `setup-live` only once for a deployment directory; if one already exists,
+choose new `--deployment-dir` and `--runtime-dir` values. Each setup creates a
+new hash-bound deployment. Native Windows uses Docker
+Desktop's local `npipe://` endpoint; keep Docker Desktop in Linux-container
+mode (the WSL2 backend is recommended).
+
+### macOS
+
+Run from a clean checkout with Docker Desktop running:
+
+```bash
+cd /path/to/tacorank
+git submodule update --init --recursive
+
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pip install --no-deps -e .
+
+export DEEPSEEK_API_KEY='your-key'
+PYTHON312="$(command -v python3.12)"
+DOCKER="$(command -v docker)"
+
+# Include --download-data only when KuaiRand-Pure/data is not already complete.
+.venv/bin/tacorank setup-live --download-data \
+  --python312 "$PYTHON312" \
+  --docker "$DOCKER"
+
+.venv/bin/tacorank preflight \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
+
+.venv/bin/tacorank run \
+  --config .tacorank/deployment/run-config.json \
+  --live-config .tacorank/deployment/live-adapters.json
+```
+
+On Apple Silicon, Docker Desktop should use its default Linux/ARM64 engine;
+the pinned runtime image must be available for the selected Docker
+architecture. If the data directory is already complete, omit
+`--download-data`. Do not run `setup-live` twice against the same deployment
+directory. macOS uses Docker Desktop's local Unix socket.
 
 Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, pinned Trae install/config/runtime, credential presence and DeepSeek model access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
 
@@ -158,7 +239,7 @@ tacorank rebuild-views --run-id run_001 --repository-root .
 tacorank finalize --run-id run_001 --repository-root .
 ```
 
-Production never falls back to fake adapters. Deterministic fakes remain behind the explicit test-only flag. `resume` currently validates/repairs the ledger tail and reports the recovery phase without restarting adapter execution. `finalize` still refuses to fabricate success because standalone clean reproduction/final selection is not implemented yet.
+Production never falls back to fake adapters. Deterministic fakes remain behind the explicit test-only flag. The production command is intentionally quiet while work is running and prints a final JSON status; inspect `runs/<run-id>/STATUS.md`, `SUMMARY.md`, and `events.jsonl` for the recorded outcome. `resume` currently validates/repairs the ledger tail and reports the recovery phase without restarting adapter execution. `finalize` still refuses to fabricate success because standalone clean reproduction/final selection is not implemented yet.
 
 ## Core guarantees
 

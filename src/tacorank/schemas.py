@@ -711,6 +711,40 @@ class RunResult(StrictModel):
         return self
 
 
+class AdapterFailureResult(StrictModel):
+    """A typed failure raised at an orchestrator adapter boundary.
+
+    Adapter failures are distinct from process results: no execution or gate
+    result exists yet, but the failure still needs durable evidence so the
+    recovery policy can make a bounded decision.
+    """
+
+    run_id: NonEmptyStr
+    experiment_id: NonEmptyStr
+    attempt: int = Field(ge=1)
+    failure_stage: Literal[
+        "coding", "patch_gate", "execution", "output_gate", "evaluation", "recovery"
+    ]
+    outcome: RunOutcome
+    error_class: NonEmptyStr
+    error_fingerprint: str
+    error_summary: NonEmptyStr
+    resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
+
+    @field_validator("error_fingerprint")
+    @classmethod
+    def validate_error_fingerprint(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("error_fingerprint must be lowercase sha256")
+        return value
+
+    @model_validator(mode="after")
+    def validate_failure(self) -> "AdapterFailureResult":
+        if self.outcome in (RunOutcome.SUCCESS, RunOutcome.CANCELLED):
+            raise ValueError("adapter failure must have a failed outcome")
+        return self
+
+
 class OutputCheckResult(StrictModel):
     run_id: NonEmptyStr
     experiment_id: NonEmptyStr
@@ -1085,6 +1119,9 @@ class RecoveryPolicyContext(StrictModel):
     original_experiment_spec: ExperimentSpec
     current_patch_commit_sha: NonEmptyStr
     failure_event_id: NonEmptyStr
+    failure_stage: Literal[
+        "coding", "patch_gate", "execution", "output_gate", "evaluation", "recovery"
+    ] = "execution"
     attempt_history: List[Dict[str, Any]] = Field(default_factory=list)
     repair_attempts_used: int = Field(ge=0)
     max_repair_attempts: int = Field(ge=0, le=2)
@@ -1126,6 +1163,7 @@ class EventType(str, Enum):
     PATCH_CHECKED = "patch.checked"
     EXECUTION_STARTED = "execution.started"
     EXECUTION_FINISHED = "execution.finished"
+    ADAPTER_FAILED = "adapter.failed"
     RECOVERY_DECIDED = "recovery.decided"
     OUTPUT_CHECKED = "output.checked"
     EVALUATION_COMPLETED = "evaluation.completed"
@@ -1232,6 +1270,11 @@ class ExecutionFinishedPayload(StrictModel):
     result: RunResult
 
 
+class AdapterFailedPayload(StrictModel):
+    type: Literal["adapter.failed"] = "adapter.failed"
+    result: AdapterFailureResult
+
+
 class RecoveryDecidedPayload(StrictModel):
     type: Literal["recovery.decided"] = "recovery.decided"
     decision: RecoveryDecision
@@ -1318,6 +1361,7 @@ EventPayload = Annotated[
         PatchCheckedPayload,
         ExecutionStartedPayload,
         ExecutionFinishedPayload,
+        AdapterFailedPayload,
         RecoveryDecidedPayload,
         OutputCheckedPayload,
         EvaluationCompletedPayload,
@@ -1344,6 +1388,7 @@ EVENT_PAYLOAD_MODELS: Mapping[EventType, Type[StrictModel]] = {
     EventType.PATCH_CHECKED: PatchCheckedPayload,
     EventType.EXECUTION_STARTED: ExecutionStartedPayload,
     EventType.EXECUTION_FINISHED: ExecutionFinishedPayload,
+    EventType.ADAPTER_FAILED: AdapterFailedPayload,
     EventType.RECOVERY_DECIDED: RecoveryDecidedPayload,
     EventType.OUTPUT_CHECKED: OutputCheckedPayload,
     EventType.EVALUATION_COMPLETED: EvaluationCompletedPayload,

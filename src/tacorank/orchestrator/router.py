@@ -8,10 +8,12 @@ from typing import Deque, Optional, Sequence, Tuple
 from ..config import RunConfig, VerifiedContract
 from ..context.builder import ContextBuilder
 from ..memory.canonical_json import canonical_sha256
-from ..memory.event_store import DuplicateIdempotencyKey, EventStore
+from ..memory.event_store import DuplicateIdempotencyKey, EventStore, LedgerError
 from ..memory.projections import project
-from ..recovery.fingerprints import fingerprint_result
+from ..recovery.fingerprints import fingerprint_failure, fingerprint_result, normalize_text
 from ..schemas import (
+    AdapterFailedPayload,
+    AdapterFailureResult,
     BaselineVerifiedPayload,
     BestUpdatedPayload,
     ContextCreatedPayload,
@@ -20,6 +22,7 @@ from ..schemas import (
     EvaluationDecisionContext,
     EvaluationRequest,
     Event,
+    EventType,
     ExperimentDecidedPayload,
     ExperimentDecision,
     ExperimentDecisionKind,
@@ -45,6 +48,7 @@ from ..schemas import (
     TrustVerdict,
 )
 from .convergence import StopDecision, runtime_budget_decision, stop_decision
+from .state_machine import TransitionError
 from .ports import (
     CodingWorker,
     Evaluator,
@@ -324,6 +328,51 @@ class Harness:
             if name == "timeout_profile" and value not in self.config.timeout_profiles:
                 raise OrchestrationError("timeout profile is not frozen")
 
+    def _record_adapter_failure(
+        self,
+        *,
+        experiment_id: str,
+        attempt: int,
+        stage: str,
+        error: Exception,
+        causation_event_id: Optional[str] = None,
+    ) -> Event:
+        """Persist a safe, typed adapter exception for policy-driven recovery."""
+
+        if stage not in {
+            "coding", "patch_gate", "execution", "output_gate", "evaluation", "recovery"
+        }:
+            raise OrchestrationError("unknown adapter failure stage")
+        outcome = {
+            "coding": RunOutcome.CODE_ERROR,
+            "patch_gate": RunOutcome.CODE_ERROR,
+            "execution": RunOutcome.INFRASTRUCTURE_ERROR,
+            "output_gate": RunOutcome.INTERFACE_ERROR,
+            "evaluation": RunOutcome.INFRASTRUCTURE_ERROR,
+            "recovery": RunOutcome.INFRASTRUCTURE_ERROR,
+        }[stage]
+        error_class = str(getattr(error, "code", None) or type(error).__name__).strip()
+        summary = str(getattr(error, "summary", None) or str(error)).strip()
+        safe_summary = normalize_text(summary)[:800] or error_class
+        result = AdapterFailureResult(
+            run_id=self.config.run_id,
+            experiment_id=experiment_id,
+            attempt=max(1, int(attempt)),
+            failure_stage=stage,
+            outcome=outcome,
+            error_class=error_class,
+            error_fingerprint=fingerprint_failure(error_class, safe_summary),
+            error_summary=safe_summary,
+        )
+        return self._append(
+            AdapterFailedPayload(result=result),
+            stage="adapter_failed_%s" % stage,
+            experiment_id=experiment_id,
+            attempt=result.attempt,
+            causation_event_id=causation_event_id,
+            resource_delta=result.resource_delta,
+        )
+
     async def _recover(
         self,
         failure_event: Event,
@@ -350,8 +399,13 @@ class Harness:
                 run_id=self.config.run_id,
                 experiment_id=experiment_id,
                 original_experiment_spec=self._experiment_spec(experiment_id),
-                current_patch_commit_sha=node.latest_commit_sha,
+                current_patch_commit_sha=node.latest_commit_sha or node.base_commit_sha,
                 failure_event_id=failure_event.event_id,
+                failure_stage=getattr(
+                    getattr(failed_value, "failure_stage", None), "value", None
+                )
+                or getattr(failed_value, "failure_stage", None)
+                or "execution",
                 attempt_history=self._attempt_history(
                     experiment_id, failure_event.event_id
                 ),
@@ -433,7 +487,113 @@ class Harness:
         )
         return candidate, check, check_event
 
+    def _adapter_failure_stage(self, experiment_id: str) -> str:
+        """Infer the boundary whose adapter was running when an exception escaped."""
+
+        for event in reversed(self.events()):
+            if event.event_type == EventType.RECOVERY_DECIDED:
+                if event.payload.decision.experiment_id == experiment_id:
+                    return "coding"
+            elif event.event_type == EventType.PATCH_CREATED:
+                if event.payload.candidate.experiment_id == experiment_id:
+                    return "patch_gate"
+            elif event.event_type == EventType.EXECUTION_STARTED:
+                if event.payload.request.experiment_id == experiment_id:
+                    return "execution"
+            elif event.event_type == EventType.EXECUTION_FINISHED:
+                if event.payload.result.experiment_id == experiment_id:
+                    return "output_gate"
+            elif event.event_type == EventType.OUTPUT_CHECKED:
+                if event.payload.result.experiment_id == experiment_id:
+                    return "evaluation"
+            elif event.event_type == EventType.EVALUATION_COMPLETED:
+                if event.payload.result.experiment_id == experiment_id:
+                    return "evaluation"
+            elif event.event_type == EventType.CONTEXT_CREATED:
+                if (
+                    event.payload.context.role in ("coder", "recovery")
+                    and event.payload.context.experiment_id == experiment_id
+                ):
+                    return (
+                        "recovery"
+                        if event.payload.context.role == "recovery"
+                        else "coding"
+                    )
+        return "recovery"
+
+    async def _handle_unexpected_adapter_failure(self, error: Exception) -> object:
+        """Turn an escaped adapter exception into evidence and a bounded decision.
+
+        Ledger/schema failures are not repair inputs. They are stopped fail-closed
+        so a broken control plane cannot be handed to a coding worker.
+        """
+
+        if isinstance(error, (LedgerError, TransitionError, OrchestrationError, AssertionError)):
+            self.stop(
+                StopDecision(
+                    True,
+                    "RECOVERY_CONTROL_PLANE_FAILURE",
+                    "The recovery control plane failed; the run was stopped fail-closed.",
+                )
+            )
+            return self.state()
+        state = self.state()
+        experiment_id = state.active_experiment_id
+        if not experiment_id or experiment_id not in state.experiments:
+            self.stop(
+                StopDecision(
+                    True,
+                    "ORCHESTRATOR_ADAPTER_FAILURE",
+                    "The orchestration adapter failed before an experiment could be recovered.",
+                )
+            )
+            return self.state()
+        stage = self._adapter_failure_stage(experiment_id)
+        last_event = self.events()[-1]
+        failure_event = self._record_adapter_failure(
+            experiment_id=experiment_id,
+            attempt=max(1, state.active_attempt),
+            stage=stage,
+            error=error,
+            causation_event_id=last_event.event_id,
+        )
+        action, _ = await self._recover(
+            failure_event,
+            failure_event.payload.result,
+            experiment_id,
+        )
+        # An exception means the normal continuation point is unknown. Even
+        # when policy records a repair/retry action, stop rather than guessing
+        # which side effects completed. Resume can inspect the durable evidence.
+        self.stop(
+            StopDecision(
+                True,
+                "ADAPTER_FAILURE_%s" % action.value.upper(),
+                "The %s adapter failed; recovery recorded %s and the run was stopped safely."
+                % (stage, action.value),
+            )
+        )
+        return self.state()
+
     async def run_one_experiment(self) -> object:
+        try:
+            return await self._run_one_experiment()
+        except Exception as error:
+            try:
+                return await self._handle_unexpected_adapter_failure(error)
+            except Exception:
+                # A second failure while recording/recovering is a control
+                # plane failure. Do not recurse or hand it to a coding worker.
+                self.stop(
+                    StopDecision(
+                        True,
+                        "RECOVERY_CONTROL_PLANE_FAILURE",
+                        "Recovery could not safely record an adapter failure; the run was stopped.",
+                    )
+                )
+                return self.state()
+
+    async def _run_one_experiment(self) -> object:
         events = self.events()
         stop = stop_decision(project(events), events, self.config)
         if stop.stop:
@@ -477,7 +637,27 @@ class Harness:
             attempt=1,
             causation_event_id=proposal_event.event_id,
         )
-        patch = await self.coding_worker.create_patch(coder_context, spec)
+        try:
+            patch = await self.coding_worker.create_patch(coder_context, spec)
+        except Exception as error:
+            failure_event = self._record_adapter_failure(
+                experiment_id=spec.experiment_id,
+                attempt=1,
+                stage="coding",
+                error=error,
+                causation_event_id=coder_context_event.event_id,
+            )
+            await self._recover(
+                failure_event, failure_event.payload.result, spec.experiment_id
+            )
+            self.stop(
+                StopDecision(
+                    True,
+                    "CODING_WORKER_FAILURE",
+                    "The coding worker failed before producing an initial patch.",
+                )
+            )
+            return self.state()
         patch = patch.__class__.model_validate(
             {
                 **patch.model_dump(mode="json"),
@@ -493,15 +673,43 @@ class Harness:
             resource_delta=patch.resource_delta,
         )
 
-        patch_check = await self.patch_gate.check(patch)
-        patch_check_event = self._append(
-            PatchCheckedPayload(result=patch_check),
-            stage="patch_checked",
-            experiment_id=spec.experiment_id,
-            attempt=patch.attempt,
-            causation_event_id=patch_event.event_id,
-            resource_delta=patch_check.resource_delta,
-        )
+        patch_check_event = None
+        try:
+            patch_check = await self.patch_gate.check(patch)
+        except Exception as error:
+            failure_event = self._record_adapter_failure(
+                experiment_id=spec.experiment_id,
+                attempt=patch.attempt,
+                stage="patch_gate",
+                error=error,
+                causation_event_id=patch_event.event_id,
+            )
+            action, recovery = await self._recover(
+                failure_event, failure_event.payload.result, spec.experiment_id
+            )
+            if action == RecoveryAction.TRAE_REPAIR:
+                patch, patch_check, patch_check_event = await self._execute_code_repair(
+                    recovery, proposal_event.event_id
+                )
+            else:
+                self.stop(
+                    StopDecision(
+                        True,
+                        "PATCH_GATE_FAILURE",
+                        "The patch gate adapter failed; recovery recorded %s and the run was stopped safely."
+                        % action.value,
+                    )
+                )
+                return self.state()
+        if patch_check_event is None:
+            patch_check_event = self._append(
+                PatchCheckedPayload(result=patch_check),
+                stage="patch_checked",
+                experiment_id=spec.experiment_id,
+                attempt=patch.attempt,
+                causation_event_id=patch_event.event_id,
+                resource_delta=patch_check.resource_delta,
+            )
         while not patch_check.accepted:
             action, recovery = await self._recover(
                 patch_check_event, patch_check, spec.experiment_id
@@ -569,7 +777,60 @@ class Harness:
                 ),
             )
             next_execution_cause = None
-            result = await self.runner.run(request, self.health_observer)
+            try:
+                result = await self.runner.run(request, self.health_observer)
+            except Exception as error:
+                failure_event = self._record_adapter_failure(
+                    experiment_id=spec.experiment_id,
+                    attempt=attempt,
+                    stage="execution",
+                    error=error,
+                    causation_event_id=started.event_id,
+                )
+                action, recovery = await self._recover(
+                    failure_event,
+                    failure_event.payload.result,
+                    spec.experiment_id,
+                )
+                decision, _, decision_event = recovery
+                if action in (
+                    RecoveryAction.RETRY_SAME_COMMIT,
+                    RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING,
+                ):
+                    self._validate_runtime_adjustments(decision.runtime_adjustments)
+                    runtime_settings.update(decision.runtime_adjustments)
+                    next_request_template = request
+                    if "timeout_profile" in decision.runtime_adjustments:
+                        next_request_template = request.model_copy(
+                            update={
+                                "timeout_seconds": self.config.timeout_profiles[
+                                    decision.runtime_adjustments["timeout_profile"]
+                                ]
+                            }
+                        )
+                    next_execution_cause = decision_event.event_id
+                    stage_queue.appendleft(fidelity)
+                    continue
+                if action == RecoveryAction.TRAE_REPAIR:
+                    while action == RecoveryAction.TRAE_REPAIR:
+                        patch, patch_check, patch_check_event = (
+                            await self._execute_code_repair(
+                                recovery, proposal_event.event_id
+                            )
+                        )
+                        if patch_check.accepted:
+                            next_request_template = request
+                            next_execution_cause = patch_check_event.event_id
+                            stage_queue.appendleft(fidelity)
+                            break
+                        action, recovery = await self._recover(
+                            patch_check_event,
+                            patch_check,
+                            spec.experiment_id,
+                        )
+                    if patch_check.accepted:
+                        continue
+                return self.state()
             finished = self._append(
                 ExecutionFinishedPayload(result=result),
                 stage="execution_finished_%s" % fidelity.value,
@@ -622,7 +883,33 @@ class Harness:
                         continue
                 return self.state()
 
-            output = await self.output_gate.check(result)
+            try:
+                output = await self.output_gate.check(result)
+            except Exception as error:
+                failure_event = self._record_adapter_failure(
+                    experiment_id=spec.experiment_id,
+                    attempt=attempt,
+                    stage="output_gate",
+                    error=error,
+                    causation_event_id=finished.event_id,
+                )
+                action, recovery = await self._recover(
+                    failure_event,
+                    failure_event.payload.result,
+                    spec.experiment_id,
+                )
+                if action == RecoveryAction.TRAE_REPAIR:
+                    patch, patch_check, patch_check_event = (
+                        await self._execute_code_repair(
+                            recovery, proposal_event.event_id
+                        )
+                    )
+                    if patch_check.accepted:
+                        next_request_template = request
+                        next_execution_cause = patch_check_event.event_id
+                        stage_queue.appendleft(fidelity)
+                        continue
+                return self.state()
             output_event = self._append(
                 OutputCheckedPayload(result=output),
                 stage="output_checked_%s" % fidelity.value,
@@ -713,7 +1000,52 @@ class Harness:
                     else None
                 ),
             )
-            evaluation = await self.evaluator.evaluate(evaluation_request)
+            try:
+                evaluation = await self.evaluator.evaluate(evaluation_request)
+            except Exception as error:
+                failure_event = self._record_adapter_failure(
+                    experiment_id=spec.experiment_id,
+                    attempt=attempt,
+                    stage="evaluation",
+                    error=error,
+                    causation_event_id=output_event.event_id,
+                )
+                action, recovery = await self._recover(
+                    failure_event,
+                    failure_event.payload.result,
+                    spec.experiment_id,
+                )
+                decision, _, decision_event = recovery
+                if action in (
+                    RecoveryAction.RETRY_SAME_COMMIT,
+                    RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING,
+                ):
+                    self._validate_runtime_adjustments(decision.runtime_adjustments)
+                    runtime_settings.update(decision.runtime_adjustments)
+                    next_request_template = request
+                    if "timeout_profile" in decision.runtime_adjustments:
+                        next_request_template = request.model_copy(
+                            update={
+                                "timeout_seconds": self.config.timeout_profiles[
+                                    decision.runtime_adjustments["timeout_profile"]
+                                ]
+                            }
+                        )
+                    next_execution_cause = decision_event.event_id
+                    stage_queue.appendleft(fidelity)
+                    continue
+                if action == RecoveryAction.TRAE_REPAIR:
+                    patch, patch_check, patch_check_event = (
+                        await self._execute_code_repair(
+                            recovery, proposal_event.event_id
+                        )
+                    )
+                    if patch_check.accepted:
+                        next_request_template = request
+                        next_execution_cause = patch_check_event.event_id
+                        stage_queue.appendleft(fidelity)
+                        continue
+                return self.state()
             self.config.validate_metric_set(evaluation.metric_set)
             evaluation_event = self._append(
                 EvaluationCompletedPayload(result=evaluation),
@@ -753,7 +1085,52 @@ class Harness:
                 parent_score=best[self.config.primary_metric_name],
                 previous_best_score=best[self.config.primary_metric_name],
             )
-            decision = await self.evaluator.decide(evaluation, decision_context)
+            try:
+                decision = await self.evaluator.decide(evaluation, decision_context)
+            except Exception as error:
+                failure_event = self._record_adapter_failure(
+                    experiment_id=spec.experiment_id,
+                    attempt=attempt,
+                    stage="evaluation",
+                    error=error,
+                    causation_event_id=evaluation_event.event_id,
+                )
+                action, recovery = await self._recover(
+                    failure_event,
+                    failure_event.payload.result,
+                    spec.experiment_id,
+                )
+                decision, _, decision_event = recovery
+                if action in (
+                    RecoveryAction.RETRY_SAME_COMMIT,
+                    RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING,
+                ):
+                    self._validate_runtime_adjustments(decision.runtime_adjustments)
+                    runtime_settings.update(decision.runtime_adjustments)
+                    next_request_template = request
+                    if "timeout_profile" in decision.runtime_adjustments:
+                        next_request_template = request.model_copy(
+                            update={
+                                "timeout_seconds": self.config.timeout_profiles[
+                                    decision.runtime_adjustments["timeout_profile"]
+                                ]
+                            }
+                        )
+                    next_execution_cause = decision_event.event_id
+                    stage_queue.appendleft(fidelity)
+                    continue
+                if action == RecoveryAction.TRAE_REPAIR:
+                    patch, patch_check, patch_check_event = (
+                        await self._execute_code_repair(
+                            recovery, proposal_event.event_id
+                        )
+                    )
+                    if patch_check.accepted:
+                        next_request_template = request
+                        next_execution_cause = patch_check_event.event_id
+                        stage_queue.appendleft(fidelity)
+                        continue
+                return self.state()
             decision = decision.__class__.model_validate(
                 {
                     **decision.model_dump(mode="json"),

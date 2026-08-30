@@ -10,7 +10,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Dict, Iterable, Mapping, Optional, Tuple
 
@@ -584,7 +584,11 @@ def _validate_relative_path(value: str, label: str) -> None:
 def _validate_container_executable(value: str) -> None:
     if "\\" in value or "\x00" in value:
         raise CommandPolicyError("container executable contains an invalid character")
-    path = Path(value)
+    # Container paths use the image's POSIX namespace even when the
+    # controller itself runs on Windows.  Do not validate them with
+    # ``Path``: on Windows ``Path('/usr/local/bin/python3')`` is not an
+    # absolute path, although it is valid inside the Linux container.
+    path = PurePosixPath(value)
     if (
         not path.is_absolute()
         or any(part in {"", ".", ".."} for part in path.parts)

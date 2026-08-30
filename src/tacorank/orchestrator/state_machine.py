@@ -63,6 +63,10 @@ def _latest_recoverable_failure(events: List[Event], experiment_id: str) -> Opti
             result = event.payload.result
             if result.experiment_id == experiment_id and result.outcome != RunOutcome.SUCCESS:
                 return event
+        elif event.event_type == EventType.ADAPTER_FAILED:
+            result = event.payload.result
+            if result.experiment_id == experiment_id:
+                return event
         elif event.event_type == EventType.OUTPUT_CHECKED:
             result = event.payload.result
             if result.experiment_id == experiment_id and not result.accepted:
@@ -245,6 +249,35 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             (request.attempt, request.fidelity, request.patch_commit_sha)
             == (result.attempt, result.fidelity, result.patch_commit_sha),
             "execution result identity mismatch",
+        )
+    elif event_type == EventType.ADAPTER_FAILED:
+        result = payload.result
+        node = state.experiments.get(result.experiment_id)
+        _require(node is not None, "adapter failure has unknown experiment")
+        _require(
+            node.status
+            in (
+                ExperimentStatus.PROPOSED,
+                ExperimentStatus.PATCH_READY,
+                ExperimentStatus.RUNNING,
+                ExperimentStatus.OUTPUT_READY,
+                ExperimentStatus.OUTPUT_VERIFIED,
+                ExperimentStatus.EVALUATED,
+                ExperimentStatus.RECOVERING,
+            ),
+            "adapter failure is not legal in the current experiment state",
+        )
+        expected_states = {
+            "coding": (ExperimentStatus.PROPOSED, ExperimentStatus.RECOVERING),
+            "patch_gate": (ExperimentStatus.PATCH_READY,),
+            "execution": (ExperimentStatus.RUNNING,),
+            "output_gate": (ExperimentStatus.OUTPUT_READY,),
+            "evaluation": (ExperimentStatus.OUTPUT_VERIFIED, ExperimentStatus.EVALUATED),
+            "recovery": (ExperimentStatus.RECOVERING,),
+        }
+        _require(
+            node.status in expected_states[result.failure_stage],
+            "adapter failure stage does not match experiment state",
         )
     elif event_type == EventType.RECOVERY_DECIDED:
         decision = payload.decision

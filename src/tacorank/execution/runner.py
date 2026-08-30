@@ -811,7 +811,10 @@ def _normalize_exit(
         )
     if exit_code in {-getattr(signal, "SIGXCPU", signal.SIGTERM)}:
         return "timeout", "CPU_TIMEOUT", "CPU-time limit exceeded"
-    if exit_code in {-signal.SIGKILL, -signal.SIGTERM}:
+    # Windows does not expose SIGKILL; a forcibly terminated child is still
+    # represented as a timeout/termination outcome by the runner.
+    sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+    if exit_code in {-sigkill, -signal.SIGTERM}:
         return (
             "infrastructure_error",
             "UNEXPECTED_PROCESS_SIGNAL",

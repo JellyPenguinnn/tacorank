@@ -686,7 +686,9 @@ class ContextBuilder:
             ),
             None,
         )
-        if failure_event.event_type == EventType.PATCH_CHECKED:
+        if failure_event.event_type == EventType.PATCH_CHECKED or getattr(
+            failed_value, "failure_stage", None
+        ) == "patch_gate":
             # A Gate-A rejection has no accepted receipt for the rejected
             # commit.  Supplying an older receipt would authorize the wrong
             # bytes and the real repair prompt correctly rejects it.
@@ -704,7 +706,7 @@ class ContextBuilder:
                     {
                         "experiment_id": experiment_id,
                         "original_hypothesis": node.hypothesis,
-                        "accepted_patch_commit": node.latest_commit_sha,
+                        "accepted_patch_commit": node.latest_commit_sha or node.base_commit_sha,
                         "remaining_repair_budget": remaining_repair_budget,
                         "hypothesis_drift": "forbidden",
                         "allowed_output": "RecoveryDecision or repaired PatchCandidate",
@@ -746,7 +748,7 @@ class ContextBuilder:
             context_fields={
                 "repair_attempt": repair_attempt,
                 "original_experiment_spec": spec_event.payload.spec,
-                "current_patch_commit_sha": node.latest_commit_sha,
+                "current_patch_commit_sha": node.latest_commit_sha or node.base_commit_sha,
                 "accepted_patch_receipt_id": (
                     accepted_patch.receipt_id if accepted_patch is not None else None
                 ),
