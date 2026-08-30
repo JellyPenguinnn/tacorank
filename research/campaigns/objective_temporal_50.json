@@ -8,8 +8,8 @@
     "objective": 25,
     "temporal_history": 25
   },
-  "minimum_family_full_evaluations": 5,
-  "family_convergence_patience": 4,
+  "minimum_family_full_evaluations": 25,
+  "family_convergence_patience": 25,
   "family_method_card_ids": {
     "objective": [
       "objective_pairwise_bpr",

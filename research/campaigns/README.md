@@ -9,6 +9,11 @@ a distinct formulation, and its hyperparameters. The exact choice is stored as
 `variant_instruction` plus a canonical `variant_parameters` signature in the
 experiment specification and shown in generated reports.
 
+This is an exploratory depth campaign: its per-family minimum and patience are
+both equal to the 25-slot family budget, so the generic three-result convergence
+signal does not end the campaign. Standard non-campaign runs retain the frozen
+epsilon/patience stop and six-hour wall-clock ceiling.
+
 The deterministic controller still owns family order, budgets, parent
 eligibility, recovery, execution, evaluation, duplicate rejection, and final
 selection. Campaign duplicate identity uses the selected method card and
