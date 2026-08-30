@@ -11,7 +11,7 @@ import csv
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from typing import Iterable, Sequence, Tuple
+from typing import Iterable, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -59,7 +59,7 @@ class ScoringRow:
     duration_ms: float
 
 
-FeatureRow = TrainingRow | ScoringRow
+FeatureRow = Union[TrainingRow, ScoringRow]
 
 
 def read_training_rows(path: Path) -> list[TrainingRow]:

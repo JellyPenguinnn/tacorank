@@ -13,6 +13,7 @@ from solution.inference import (
     write_predictions_exclusive,
 )
 from solution.model import FactorizationMachine
+from solution.train import fit_pointwise
 
 
 def _write_views(root: Path) -> tuple[Path, Path]:
@@ -52,6 +53,21 @@ def test_candidate_scaffold_is_deterministic_and_keeps_unknown_slots(
 
     assert np.array_equal(first.predict(score_features), second.predict(score_features))
     assert score_features[1, 0] == encoder.unknown_ids[0] + encoder.offsets[0]
+
+
+def test_training_orchestrator_respects_fidelity_and_seed(tmp_path: Path) -> None:
+    train_path, score_path = _write_views(tmp_path)
+    scoring_rows = read_scoring_rows(score_path)
+
+    first = fit_pointwise(train_path, fidelity="smoke", seed=23)
+    second = fit_pointwise(train_path, fidelity="smoke", seed=23)
+    first_scores = first.model.predict(first.encoder.transform(scoring_rows))
+    second_scores = second.model.predict(second.encoder.transform(scoring_rows))
+
+    assert first.training_rows == first.available_rows == 3
+    assert first.coverage_fraction == 1.0
+    assert first.epochs == 1
+    assert np.array_equal(first_scores, second_scores)
 
 
 def test_inference_helpers_authenticate_parent_and_bound_only_residual(

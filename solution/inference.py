@@ -87,7 +87,9 @@ def write_predictions_exclusive(
             writer = csv.writer(handle)
             writer.writerow(("row_id", "user_id", "video_id", "score"))
             for row, score in zip(rows, values):
-                writer.writerow((row.row_id, row.user_id, row.video_id, repr(float(score))))
+                writer.writerow(
+                    (row.row_id, row.user_id, row.video_id, repr(float(score)))
+                )
             handle.flush()
             os.fsync(handle.fileno())
     finally:
