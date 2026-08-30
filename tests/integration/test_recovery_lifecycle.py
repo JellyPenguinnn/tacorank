@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from tacorank.memory.replay import replay
+from tacorank.coding.trae_adapter import CodingWorkerError
 from tacorank.orchestrator.fakes import FakeCodingWorker, FakeExecutionRunner
 from tacorank.orchestrator.state import ExperimentStatus
 from tacorank.recovery.policy import RecoveryManager
@@ -36,6 +37,22 @@ class FailingRepairWorker(RepairingCodingWorker):
     async def repair_patch(self, context, decision):
         self.repair_calls.append((context, decision))
         raise RuntimeError("TRAE_REPORTED_FAILURE: trajectory was unsuccessful")
+
+
+class TransientInitialCodingWorker(FakeCodingWorker):
+    def __init__(self, artifacts):
+        super().__init__(artifacts)
+        self.calls = 0
+
+    async def create_patch(self, context, spec):
+        self.calls += 1
+        if self.calls == 1:
+            raise CodingWorkerError(
+                "TRAE_LAUNCH_FAILED",
+                "failed to launch Trae",
+                output_tail="authorization=sk-test-secret\nlaunch failed",
+            )
+        return await super().create_patch(context, spec)
 
 
 class FailOnceRunner(FakeExecutionRunner):
@@ -195,6 +212,37 @@ def test_trae_exception_is_recorded_and_stops_fail_closed(
     assert decisions[-1].action == RecoveryAction.ABANDON
     assert state.status.value == "stopped"
     assert replay(events).status.value == "stopped"
+
+
+def test_transient_initial_coding_failure_retries_and_persists_redacted_tail(
+    harness, baseline_evaluation
+):
+    worker = TransientInitialCodingWorker(harness.event_store.artifact_store)
+    harness.coding_worker = worker
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert worker.calls == 2
+    assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
+    events = harness.events()
+    failure = next(
+        event for event in events if event.event_type == EventType.ADAPTER_FAILED
+    )
+    assert failure.payload.result.diagnostic_artifact is not None
+    diagnostic = failure.payload.result.diagnostic_artifact
+    content = (harness.config.repository_root / diagnostic.path).read_text(
+        encoding="utf-8"
+    )
+    assert "sk-test-secret" not in content
+    assert "[REDACTED]" in content
+    decision = next(
+        event.payload.decision
+        for event in events
+        if event.event_type == EventType.RECOVERY_DECIDED
+    )
+    assert decision.action == RecoveryAction.RETRY_SAME_COMMIT
 
 
 def test_real_recovery_allows_only_one_same_commit_retry_across_fingerprints(

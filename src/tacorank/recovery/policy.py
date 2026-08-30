@@ -92,6 +92,13 @@ class RecoveryManager:
                 )
 
         if getattr(context, "failure_stage", None) == "coding":
+            if failure.transient_coding_failure and int(context.same_commit_retries_used) < 1:
+                return (
+                    "retry_same_commit",
+                    "TRANSIENT_CODING_RETRY",
+                    "Retry the coding worker once; no candidate side effects were produced.",
+                    {},
+                )
             return (
                 "abandon",
                 "CODING_WORKER_FAILURE",

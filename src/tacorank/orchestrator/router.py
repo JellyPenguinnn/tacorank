@@ -6,6 +6,7 @@ from collections import deque
 from typing import Deque, Optional, Sequence, Tuple
 
 from ..config import RunConfig, VerifiedContract
+from ..coding.redaction import SecretRedactor
 from ..context.builder import ContextBuilder
 from ..memory.canonical_json import canonical_sha256
 from ..memory.event_store import DuplicateIdempotencyKey, EventStore, LedgerError
@@ -77,6 +78,15 @@ from .ports import (
 
 class OrchestrationError(RuntimeError):
     pass
+
+
+class ResumablePlanningError(OrchestrationError):
+    """Provider output is invalid, but the durable planning checkpoint is safe.
+
+    This is deliberately distinct from control-plane failures.  Callers can
+    replace the planner and resume from the persisted ``planner_context``
+    without marking the run stopped or fabricating a recovery event.
+    """
 
 
 class Harness:
@@ -381,6 +391,31 @@ class Harness:
         error_class = str(getattr(error, "code", None) or type(error).__name__).strip()
         summary = str(getattr(error, "summary", None) or str(error)).strip()
         safe_summary = normalize_text(summary)[:800] or error_class
+        diagnostic_artifact = None
+        output_tail = getattr(error, "output_tail", None)
+        artifact_store = getattr(self.event_store, "artifact_store", None)
+        if output_tail and artifact_store is not None:
+            try:
+                safe_tail = SecretRedactor().redact(str(output_tail))[-64 * 1024:]
+                digest = canonical_sha256(safe_tail)
+                diagnostic_artifact = artifact_store.write(
+                    artifact_id="trae-failure-%s" % digest[:24],
+                    kind=ArtifactKind.LOG,
+                    relative_path=(
+                        "artifacts/%s/%s/attempt_%d/trae-failure-%s.log"
+                        % (
+                            self.config.run_id,
+                            experiment_id,
+                            max(1, int(attempt)),
+                            digest[:24],
+                        )
+                    ),
+                    content=(safe_tail.rstrip() + "\n").encode("utf-8"),
+                    content_type="text/plain; charset=utf-8",
+                )
+            except Exception:
+                # Failure evidence must not mask the original adapter error.
+                diagnostic_artifact = None
         result = AdapterFailureResult(
             run_id=self.config.run_id,
             experiment_id=experiment_id,
@@ -390,6 +425,7 @@ class Harness:
             error_class=error_class,
             error_fingerprint=fingerprint_failure(error_class, safe_summary),
             error_summary=safe_summary,
+            diagnostic_artifact=diagnostic_artifact,
         )
         return self._append(
             AdapterFailedPayload(result=result),
@@ -607,6 +643,12 @@ class Harness:
     async def run_one_experiment(self) -> object:
         try:
             return await self._run_one_experiment()
+        except ResumablePlanningError:
+            # Invalid provider output is an expected, operator-resumable
+            # boundary.  Preserve the planning checkpoint and let the caller
+            # inspect/replace the provider instead of converting it into a
+            # stopped run.
+            raise
         except Exception as error:
             try:
                 return await self._handle_unexpected_adapter_failure(error)
@@ -645,7 +687,7 @@ class Harness:
             )
             if planner_output.action == PlannerAction.BLOCKED:
                 if planner_output.reason_code == "INVALID_PROVIDER_PLAN":
-                    raise OrchestrationError(
+                    raise ResumablePlanningError(
                         "research provider failed bounded plan validation; "
                         "resume from the persisted planner checkpoint"
                     )
@@ -653,8 +695,9 @@ class Harness:
             else:
                 decision = self.deterministic_stop()
                 if not decision.stop:
-                    raise OrchestrationError(
-                        "planner stop recommendation is advisory and no frozen stop rule matched"
+                    raise ResumablePlanningError(
+                        "planner stop recommendation is invalid and no frozen stop rule matched; "
+                        "resume from the persisted planner checkpoint"
                     )
             self.stop(decision)
             return self.state()
@@ -662,7 +705,10 @@ class Harness:
         spec = planner_output.spec
         assert spec is not None
         if spec.context_id != planner_context.context_id:
-            raise OrchestrationError("planner proposal cites a different context")
+            raise ResumablePlanningError(
+                "planner proposal cites a different context; "
+                "resume from the persisted planner checkpoint"
+            )
         proposal_event = self._append(
             ExperimentProposedPayload(spec=spec),
             stage="proposed",
@@ -690,17 +736,30 @@ class Harness:
                 error=error,
                 causation_event_id=coder_context_event.event_id,
             )
-            await self._recover(
+            action, _recovery = await self._recover(
                 failure_event, failure_event.payload.result, spec.experiment_id
             )
-            self.stop(
-                StopDecision(
-                    True,
-                    "CODING_WORKER_FAILURE",
-                    "The coding worker failed before producing an initial patch.",
+            if action == RecoveryAction.RETRY_SAME_COMMIT:
+                # No candidate or repository side effect exists yet. The
+                # policy permits one narrowly bounded retry for transient
+                # launch/provider failures; a second failure reaches the
+                # outer fail-closed handler and is abandoned.
+                patch = await self.coding_worker.create_patch(coder_context, spec)
+                patch = patch.__class__.model_validate(
+                    {
+                        **patch.model_dump(mode="json"),
+                        "experiment_spec_event_id": proposal_event.event_id,
+                    }
                 )
-            )
-            return self.state()
+            else:
+                self.stop(
+                    StopDecision(
+                        True,
+                        "CODING_WORKER_FAILURE",
+                        "The coding worker failed before producing an initial patch.",
+                    )
+                )
+                return self.state()
         patch = patch.__class__.model_validate(
             {
                 **patch.model_dump(mode="json"),

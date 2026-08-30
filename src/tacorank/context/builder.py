@@ -262,6 +262,8 @@ class ContextBuilder:
 
         artifact = getattr(failed_value, "log_artifact", None)
         if artifact is None:
+            artifact = getattr(failed_value, "diagnostic_artifact", None)
+        if artifact is None:
             return fallback[-4_000:]
         try:
             self.artifact_store.verify(artifact)

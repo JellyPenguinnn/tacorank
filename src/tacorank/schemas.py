@@ -741,6 +741,7 @@ class AdapterFailureResult(StrictModel):
     error_class: NonEmptyStr
     error_fingerprint: str
     error_summary: NonEmptyStr
+    diagnostic_artifact: Optional[ArtifactRef] = None
     resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
 
     @field_validator("error_fingerprint")

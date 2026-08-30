@@ -198,8 +198,29 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         candidate = payload.candidate
         _require(candidate.experiment_id in state.experiments, "patch has unknown experiment")
         node = state.experiments[candidate.experiment_id]
+        retrying_initial_coder = False
+        if node.status == ExperimentStatus.READY_TO_RUN:
+            latest_recovery = _last_for_experiment(
+                events, EventType.RECOVERY_DECIDED, candidate.experiment_id
+            )
+            latest_failure = _latest_recoverable_failure(
+                events, candidate.experiment_id
+            )
+            retrying_initial_coder = bool(
+                latest_recovery is not None
+                and latest_recovery.payload.decision.action
+                == RecoveryAction.RETRY_SAME_COMMIT
+                and latest_failure is not None
+                and getattr(
+                    latest_failure.payload.result, "failure_stage", None
+                )
+                == "coding"
+            )
         _require(
-            node.status in (ExperimentStatus.PROPOSED, ExperimentStatus.RECOVERING),
+            node.status in (
+                ExperimentStatus.PROPOSED,
+                ExperimentStatus.RECOVERING,
+            ) or retrying_initial_coder,
             "patch is not legal in the current experiment state",
         )
         proposed = _last_for_experiment(
