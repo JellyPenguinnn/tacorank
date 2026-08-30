@@ -28,6 +28,7 @@ from .coding import (
 )
 from .docker_host import normalize_local_docker_host
 from .evaluation.proxy import split_validation_indices
+from .schemas import ResearchCampaign
 
 
 TRAE_SOURCE_REVISION = "e839e559ac61bdd0e057c375dd1dee391fee797d"
@@ -149,6 +150,7 @@ def setup_live_deployment(
     docker_executable: Path,
     run_id: str,
     download_data: bool,
+    research_campaign_path: Path | None = None,
 ) -> Mapping[str, Any]:
     """Build an exact production deployment and return its generated paths."""
 
@@ -160,6 +162,7 @@ def setup_live_deployment(
     docker_host = _discover_docker_host(docker, root)
     _require_python312(python)
     _require_clean_tracked_checkout(root)
+    research_campaign = _load_research_campaign(root, research_campaign_path)
     _run(
         ("git", "submodule", "update", "--init", "--recursive"),
         cwd=root,
@@ -252,6 +255,9 @@ def setup_live_deployment(
         "allowed_dependency_changes": [],
     }
     _write_json_exclusive(live_path, live_payload)
+    campaign_budget = (
+        research_campaign.experiment_budget if research_campaign is not None else 50
+    )
     run_payload = {
         "schema_version": "1.0",
         "run_id": run_id,
@@ -265,20 +271,23 @@ def setup_live_deployment(
         "data_manifest_sha256": _sha256_file(manifest_path),
         "evaluator_sha256": evaluator_hash,
         "baseline_commit_sha": baseline_commit,
-        "max_experiments": 50,
-        "wall_time_limit_seconds": 21600,
+        "max_experiments": campaign_budget,
+        "wall_time_limit_seconds": 86400 if research_campaign is not None else 21600,
         "convergence_epsilon": 0.002,
-        "convergence_patience": 3,
+        "convergence_patience": campaign_budget if research_campaign is not None else 3,
         "max_repairs_per_experiment": 2,
         "allowed_runtime_adjustments": {},
         "timeout_profiles": {"standard": 600, "extended": 900},
         "max_confirmation_attempts": 2,
         "seed_schedule": [11, 22, 33, 44, 55],
-        "context_token_limit": 6000,
+        "context_token_limit": 12000 if research_campaign is not None else 6000,
         "adapter_mode": "live",
         "live_adapter_config_sha256": _sha256_file(live_path),
         "editable_roots": ["solution"],
-        "allowed_research_families": [
+        "allowed_research_families": (
+            list(research_campaign.family_order)
+            if research_campaign is not None
+            else [
             "objective",
             "temporal_history",
             "multitask",
@@ -289,7 +298,8 @@ def setup_live_deployment(
             "ensemble",
             "evaluation",
             "other",
-        ],
+            ]
+        ),
         "allowed_research_data": [
             "train_interactions",
             "public_validation",
@@ -308,6 +318,11 @@ def setup_live_deployment(
             "verified_best_prediction",
         ],
         "active_research_prohibitions": [],
+        "research_campaign": (
+            research_campaign.model_dump(mode="json")
+            if research_campaign is not None
+            else None
+        ),
         "prediction_change_no_op_threshold": 0.001,
         "target_interface_excerpts": {
             "solution/candidate.py": (
@@ -354,7 +369,30 @@ def setup_live_deployment(
         "data_manifest": str(manifest_path),
         "runtime": str(runtime),
         "docker_image": image,
+        "research_campaign": (
+            research_campaign.campaign_id if research_campaign is not None else None
+        ),
     }
+
+
+def _load_research_campaign(
+    root: Path, path: Path | None
+) -> ResearchCampaign | None:
+    if path is None:
+        return None
+    candidate = path if path.is_absolute() else root / path
+    if candidate.is_symlink() or not candidate.is_file():
+        raise DeploymentError("research campaign must be a regular repository file")
+    resolved = candidate.resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as error:
+        raise DeploymentError("research campaign must be inside repository_root") from error
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+        return ResearchCampaign.model_validate(payload)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise DeploymentError("research campaign is invalid: %s" % error) from error
 
 
 def _prepare_trae_runtime(

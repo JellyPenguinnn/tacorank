@@ -161,6 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
     setup_live.add_argument("--docker", type=Path)
     setup_live.add_argument("--run-id", default="run_001")
     setup_live.add_argument("--download-data", action="store_true")
+    setup_live.add_argument(
+        "--research-campaign",
+        type=Path,
+        help="frozen ordered depth-campaign JSON inside the repository",
+    )
 
     setup_trae = commands.add_parser(
         "setup-trae",
@@ -247,6 +252,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 docker_executable=docker,
                 run_id=args.run_id,
                 download_data=args.download_data,
+                research_campaign_path=args.research_campaign,
             )
             print(json.dumps(result, sort_keys=True))
             return 0

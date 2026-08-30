@@ -1,8 +1,56 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from tacorank.config import ContractError, RunConfig, verify_contract
+from tacorank.schemas import ResearchCampaign
+
+
+def test_objective_temporal_campaign_has_exact_fifty_slot_budget():
+    path = Path(__file__).parents[2] / "research/campaigns/objective_temporal_50.json"
+    campaign = ResearchCampaign.model_validate(
+        json.loads(path.read_text(encoding="utf-8"))
+    )
+
+    assert campaign.family_order == ["objective", "temporal_history"]
+    assert campaign.family_budgets == {"objective": 25, "temporal_history": 25}
+    assert campaign.experiment_budget == 50
+    assert campaign.family_method_card_ids["objective"] == [
+        "objective_pairwise_bpr",
+        "objective_listwise_user_softmax",
+    ]
+
+
+def test_run_config_requires_patience_and_budget_to_cover_campaign(config):
+    payload = config.model_dump(mode="python")
+    payload.update(
+        max_experiments=4,
+        convergence_patience=4,
+        research_campaign={
+            "campaign_id": "test_campaign",
+            "family_order": ["objective", "temporal_history"],
+            "family_budgets": {"objective": 2, "temporal_history": 2},
+            "family_method_card_ids": {
+                "objective": ["objective_pairwise_bpr"],
+                "temporal_history": ["temporal_history_compact"],
+            },
+            "family_directives": {
+                "objective": "Adapt objective trials.",
+                "temporal_history": "Adapt temporal trials.",
+            },
+        },
+    )
+
+    parsed = RunConfig.model_validate(payload)
+    assert parsed.research_campaign is not None
+    assert parsed.research_campaign.experiment_budget == 4
+
+    payload["convergence_patience"] = 3
+    with pytest.raises(ValueError, match="convergence_patience"):
+        RunConfig.model_validate(payload)
 
 
 def test_blank_contract_is_a_hard_stop(config, repository):

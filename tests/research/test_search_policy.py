@@ -17,6 +17,98 @@ def test_policy_probes_untried_high_value_family_from_baseline(planner_context):
     assert choice.method_card_id == "objective_pairwise_bpr"
 
 
+def test_campaign_exhausts_first_family_before_second(planner_context):
+    planner_context.contract_summary.allowed_families = [
+        "objective",
+        "temporal_history",
+    ]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="depth_test",
+        family_order=["objective", "temporal_history"],
+        family_budgets={"objective": 2, "temporal_history": 2},
+        family_method_card_ids={
+            "objective": ["objective_pairwise_bpr"],
+            "temporal_history": ["temporal_history_compact"],
+        },
+        family_directives={
+            "objective": "Adapt objective experiments from prior evidence.",
+            "temporal_history": "Adapt history experiments from prior evidence.",
+        },
+    )
+
+    first = SearchPolicy().choose(planner_context)
+    assert first.phase == "campaign_depth"
+    assert first.variant_id == "objective_01"
+
+    attempted = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        decision="reject",
+        parent_eligible=False,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    attempted.status = "rejected"
+    attempted.campaign_id = "depth_test"
+    attempted.variant_id = "objective_01"
+    planner_context.family_history = [attempted]
+
+    second = SearchPolicy().choose(planner_context)
+    assert second.variant_id == "objective_02"
+    assert second.family == "objective"
+
+    attempted_two = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        decision="reject",
+        parent_eligible=False,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    attempted_two.status = "rejected"
+    attempted_two.campaign_id = "depth_test"
+    attempted_two.variant_id = "objective_02"
+    planner_context.family_history.append(attempted_two)
+
+    third = SearchPolicy().choose(planner_context)
+    assert third.variant_id == "temporal_history_01"
+    assert third.family == "temporal_history"
+
+
+def test_campaign_exposes_all_currently_eligible_methods_to_agent(planner_context):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="adaptive_depth",
+        family_order=["objective"],
+        family_budgets={"objective": 25},
+        family_method_card_ids={
+            "objective": [
+                "objective_pairwise_bpr",
+                "objective_listwise_user_softmax",
+            ]
+        },
+        family_directives={"objective": "Adapt from prior evidence."},
+    )
+    prior = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    prior.campaign_id = "adaptive_depth"
+    prior.variant_id = "objective_01"
+    planner_context.family_history = [prior]
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.variant_id == "objective_02"
+    assert choice.method_card_id is None
+    assert choice.allowed_method_card_ids == (
+        "objective_pairwise_bpr",
+        "objective_listwise_user_softmax",
+    )
+
+
 def test_clean_evaluator_baseline_does_not_imply_executable_parent_parity(
     planner_context,
 ):

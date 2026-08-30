@@ -177,6 +177,81 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert provider.resource_delta.token_measurement == TokenMeasurement.PROVIDER
 
 
+def test_deepseek_provider_binds_campaign_variant(planner_context):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = {
+        "campaign_id": "depth_test",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 2},
+        "family_method_card_ids": {
+            "objective": ["objective_pairwise_bpr"],
+        },
+        "family_directives": {
+            "objective": "Adapt the next objective from prior evidence.",
+        },
+    }
+    objective_history = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    objective_history.campaign_id = "depth_test"
+    objective_history.variant_id = "objective_00"
+    objective_history.variant_instruction = "Use one negative per positive."
+    temporal_history = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0000",
+        family="temporal_history",
+        method_card_ids=["temporal_history_compact"],
+    )
+    temporal_history.campaign_id = "other_campaign"
+    temporal_history.variant_id = "temporal_history_01"
+    temporal_history.variant_instruction = "Use a seven-day author history."
+    planner_context.family_history = [temporal_history, objective_history]
+    calls = []
+
+    def transport(url, headers, payload, timeout):
+        calls.append(payload)
+        return response(
+            candidate(
+                variant_instruction="Use four uniform negatives per positive.",
+                variant_parameters={
+                    "formulation": "bpr",
+                    "negative_sampling": "uniform",
+                    "negative_count": 4,
+                },
+            )
+        )
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(
+            ProviderRequest(context=planner_context, policy_choice=choice)
+        )
+    )
+
+    assert result["campaign_id"] == "depth_test"
+    assert result["variant_id"] == "objective_02"
+    assert result["variant_instruction"] == (
+        "Use four uniform negatives per positive."
+    )
+    assert result["variant_parameters"] == {
+        "formulation": "bpr",
+        "negative_sampling": "uniform",
+        "negative_count": 4,
+    }
+    prompt = json.loads(calls[0]["messages"][1]["content"])
+    assert [item["family"] for item in prompt["context"]["family_history"]] == [
+        "objective"
+    ]
+    assert prompt["policy"]["variant_id"] == "objective_02"
+    assert prompt["policy"]["campaign_directive"] == (
+        "Adapt the next objective from prior evidence."
+    )
+
+
 def test_deepseek_provider_preserves_policy_owned_ensemble_components(
     planner_context,
 ):

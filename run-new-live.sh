@@ -8,6 +8,7 @@
 # Optional environment:
 #   TACORANK_PYTHON312  Absolute path to Python 3.12.
 #   TACORANK_DOCKER     Absolute path to the Docker executable.
+#   TACORANK_RESEARCH_CAMPAIGN  Repository-relative depth-campaign JSON.
 
 set -eu
 
@@ -151,6 +152,12 @@ live_config="$deployment_dir/live-adapters.json"
 printf '%s\n' "Starting new TacoRank live run: $run_id"
 printf '%s\n' "Repository: $repo_root"
 
+set --
+if [ -n "${TACORANK_RESEARCH_CAMPAIGN:-}" ]; then
+    set -- --research-campaign "$TACORANK_RESEARCH_CAMPAIGN"
+    printf '%s\n' "Research campaign: $TACORANK_RESEARCH_CAMPAIGN"
+fi
+
 "$tacorank" setup-live \
     --repository-root "$repo_root" \
     --deployment-dir "$deployment_dir" \
@@ -159,7 +166,8 @@ printf '%s\n' "Repository: $repo_root"
     --python312 "$python312" \
     --docker "$docker_executable" \
     --run-id "$run_id" \
-    --download-data
+    --download-data \
+    "$@"
 
 # Setup must not normally write into the official submodule, but repeat the
 # narrow bytecode cleanup before live preflight so a Python import cannot poison

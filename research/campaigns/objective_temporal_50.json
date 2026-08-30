@@ -1,0 +1,24 @@
+{
+  "campaign_id": "objective_temporal_50_v1",
+  "family_order": [
+    "objective",
+    "temporal_history"
+  ],
+  "family_budgets": {
+    "objective": 25,
+    "temporal_history": 25
+  },
+  "family_method_card_ids": {
+    "objective": [
+      "objective_pairwise_bpr",
+      "objective_listwise_user_softmax"
+    ],
+    "temporal_history": [
+      "temporal_history_compact"
+    ]
+  },
+  "family_directives": {
+    "objective": "Investigate ranking-objective formulations in depth. Use the prior campaign results to choose a distinct next pairwise, listwise, or hybrid formulation and its sampling, weighting, capacity, regularization, and optimization hyperparameters. Prefer a targeted refinement of promising evidence or a falsifying alternative to a failed hypothesis; do not repeat a prior design.",
+    "temporal_history": "Investigate strictly past user-history modeling in depth. Use the prior campaign results to choose a distinct next representation, entity affinity, sequence horizon, recency weighting, positive-negative evidence treatment, shrinkage, residual scale, and related hyperparameters. Prefer a targeted refinement of promising evidence or a falsifying alternative to a failed hypothesis; do not repeat a prior design."
+  }
+}

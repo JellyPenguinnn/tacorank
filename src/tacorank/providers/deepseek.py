@@ -41,6 +41,13 @@ tests, private labels, or unavailable data. Use only the selected method card's
 allowed_data after its prerequisites and prohibition checks pass, and only evidence
 event IDs present in the supplied context.
 
+When the policy includes a campaign slot, its variant_id, family directive, and allowed
+method cards are authoritative. Use prior family_history metrics and failures to choose
+the next distinct formulation and hyperparameters. Record that complete scientific
+choice in variant_instruction; do not repeat an earlier campaign design.
+Also return variant_parameters as a flat JSON object containing formulation and every
+material configuration choice. Use stable snake_case keys and scalar values only.
+
 You are intentionally code-blind. Do not name or infer repository paths, source files,
 modules, classes, functions, entrypoints, commands, patches, implementation interfaces,
 or pipeline stages. Do not prescribe how the coding worker should edit the system.
@@ -71,6 +78,8 @@ Required JSON fields:
   "expected_mechanism": "why the intervention should affect ranking",
   "success_criteria": "quantitative acceptance criterion",
   "falsification_condition": "evidence that rejects the hypothesis",
+  "variant_instruction": "exact distinct method formulation and hyperparameters for a campaign slot",
+  "variant_parameters": {"formulation": "bpr", "negative_count": 4},
   "estimated_cost": {
     "llm_tokens_upper_bound": 0,
     "wall_time_seconds_upper_bound": 0,
@@ -114,6 +123,23 @@ def _text(value: Any) -> str:
     if isinstance(value, (dict, list, tuple)):
         return json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"))
     return str(value).strip()
+
+
+def _variant_parameters(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    result: Dict[str, Any] = {}
+    for key, item in value.items():
+        name = str(key).strip()
+        if not name or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name):
+            continue
+        if isinstance(item, str):
+            item = item.strip()
+            if not item:
+                continue
+        if isinstance(item, (str, bool, int, float)):
+            result[name] = item
+    return result
 
 
 _IMPLEMENTATION_REFERENCE_RE = re.compile(
@@ -195,6 +221,8 @@ def _research_summary(value: Any) -> Dict[str, Any]:
         "stability",
         "integrity",
         "trust_flags",
+        "failure_hypotheses",
+        "diagnostic_limitations",
         "decision",
         "decision_reason_code",
         "highest_completed_fidelity",
@@ -216,6 +244,10 @@ def _research_summary(value: Any) -> Dict[str, Any]:
         "parent_eligible",
         "best_eligible",
         "status",
+        "campaign_id",
+        "variant_id",
+        "variant_instruction",
+        "variant_parameters",
         "method_card_ids",
         "component_experiment_ids",
     )
@@ -275,6 +307,8 @@ def _research_candidate(value: Any) -> Dict[str, Any]:
         "success_criteria",
         "falsification_condition",
         "estimated_cost",
+        "variant_instruction",
+        "variant_parameters",
         "method_card_ids",
         "evidence_event_ids",
     )
@@ -396,7 +430,16 @@ class DeepSeekResearchProvider:
                 "DeepSeek model is not available to this API key: %s" % self.model
             )
 
-    def _context_payload(self, context: Any) -> Dict[str, Any]:
+    def _context_payload(
+        self, context: Any, *, selected_family: Optional[str] = None
+    ) -> Dict[str, Any]:
+        family_history = as_list(get_value(context, "family_history", []))
+        if get_value(context, "research_campaign", None) is not None and selected_family:
+            family_history = [
+                item
+                for item in family_history
+                if str(get_value(item, "family", "")) == selected_family
+            ]
         return {
             "schema_version": get_value(context, "schema_version", "1.0"),
             "context_id": get_value(context, "context_id", None),
@@ -423,7 +466,7 @@ class DeepSeekResearchProvider:
             ),
             "family_history": [
                 _research_summary(item)
-                for item in as_list(get_value(context, "family_history", []))
+                for item in family_history
             ],
             "active_lessons": [
                 _research_lesson(item)
@@ -455,6 +498,12 @@ class DeepSeekResearchProvider:
             "family": get_value(choice, "family", None),
             "cost_tier": get_value(choice, "cost_tier", None),
             "required_method_card_id": get_value(choice, "method_card_id", None),
+            "allowed_method_card_ids": _jsonable(
+                get_value(choice, "allowed_method_card_ids", ())
+            ),
+            "campaign_id": get_value(choice, "campaign_id", None),
+            "variant_id": get_value(choice, "variant_id", None),
+            "campaign_directive": get_value(choice, "campaign_directive", None),
             "component_experiment_ids": _jsonable(
                 get_value(choice, "component_experiment_ids", ())
             ),
@@ -462,7 +511,10 @@ class DeepSeekResearchProvider:
         payload: Dict[str, Any] = {
             "task": "Produce one JSON experiment candidate for the authoritative policy.",
             "policy": policy,
-            "context": self._context_payload(request.context),
+            "context": self._context_payload(
+                request.context,
+                selected_family=str(get_value(choice, "family", "")),
+            ),
         }
         if validation_errors:
             payload["repair"] = {
@@ -566,10 +618,17 @@ class DeepSeekResearchProvider:
         else:
             requested_cards = [str(item) for item in as_list(raw.get("method_card_ids"))]
             family = str(get_value(choice, "family", ""))
+            allowed_cards = {
+                str(item)
+                for item in as_list(
+                    get_value(choice, "allowed_method_card_ids", None)
+                )
+            }
             method_ids = [
                 item
                 for item in requested_cards
                 if item in known_cards and known_cards[item] == family
+                and (not allowed_cards or item in allowed_cards)
             ]
 
         cost = raw.get("estimated_cost")
@@ -600,6 +659,18 @@ class DeepSeekResearchProvider:
                 ),
                 "cost_tier": str(get_value(choice, "cost_tier", "medium")),
             },
+            "campaign_id": get_value(choice, "campaign_id", None),
+            "variant_id": get_value(choice, "variant_id", None),
+            "variant_instruction": (
+                _text(raw.get("variant_instruction"))
+                if get_value(choice, "campaign_id", None)
+                else None
+            ),
+            "variant_parameters": (
+                _variant_parameters(raw.get("variant_parameters"))
+                if get_value(choice, "campaign_id", None)
+                else {}
+            ),
             "method_card_ids": method_ids,
             "component_experiment_ids": [
                 str(item)

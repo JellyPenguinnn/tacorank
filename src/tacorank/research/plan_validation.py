@@ -152,6 +152,42 @@ class PlanValidator:
                 errors.append("PARENT_POLICY_MISMATCH")
             if get_value(choice, "family", None) and family != get_value(choice, "family"):
                 errors.append("FAMILY_POLICY_MISMATCH")
+            for field, code in (
+                ("campaign_id", "CAMPAIGN_POLICY_MISMATCH"),
+                ("variant_id", "VARIANT_POLICY_MISMATCH"),
+            ):
+                if get_value(spec, field, None) != get_value(choice, field, None):
+                    errors.append(code)
+
+        campaign = get_value(context, "research_campaign", None)
+        campaign_id = get_value(spec, "campaign_id", None)
+        variant_id = get_value(spec, "variant_id", None)
+        if campaign is None:
+            if campaign_id is not None or variant_id is not None:
+                errors.append("UNCONFIGURED_CAMPAIGN_VARIANT")
+        else:
+            if campaign_id != get_value(campaign, "campaign_id", None):
+                errors.append("CAMPAIGN_CONTEXT_MISMATCH")
+            if not _nonempty(get_value(spec, "variant_instruction", None)):
+                errors.append("CAMPAIGN_VARIANT_INSTRUCTION_REQUIRED")
+            variant_parameters = get_value(spec, "variant_parameters", None)
+            if (
+                not isinstance(variant_parameters, dict)
+                or not _nonempty(variant_parameters.get("formulation"))
+            ):
+                errors.append("CAMPAIGN_VARIANT_PARAMETERS_REQUIRED")
+            campaign_methods = get_value(
+                campaign, "family_method_card_ids", None
+            ) or {}
+            allowed_campaign_methods = {
+                str(item) for item in as_list(campaign_methods.get(family, ()))
+            }
+            proposed_campaign_methods = {
+                str(item)
+                for item in as_list(get_value(spec, "method_card_ids", None))
+            }
+            if not proposed_campaign_methods.issubset(allowed_campaign_methods):
+                errors.append("VARIANT_METHOD_MISMATCH")
 
         graph = GraphView.from_context(context)
         parent_id = get_value(spec, "parent_experiment_id", None)
@@ -296,6 +332,18 @@ class PlanValidator:
         required_method_id = get_value(choice, "method_card_id", None)
         if required_method_id and method_ids != {str(required_method_id)}:
             errors.append("METHOD_POLICY_MISMATCH")
+        allowed_method_ids = {
+            str(item)
+            for item in as_list(
+                get_value(choice, "allowed_method_card_ids", None)
+                if choice is not None
+                else None
+            )
+        }
+        if allowed_method_ids and (
+            len(raw_method_ids) != 1 or not method_ids.issubset(allowed_method_ids)
+        ):
+            errors.append("METHOD_POLICY_MISMATCH")
         cards = method_card_map(context)
         if not cards:
             errors.append("CONTEXT_METHOD_CARDS_MISSING")
@@ -317,8 +365,14 @@ class PlanValidator:
 
         text = " ".join(
             str(get_value(spec, field, ""))
-            for field in ("hypothesis", "change_summary", "expected_mechanism", "falsification_condition")
-        ).lower()
+            for field in (
+                "hypothesis",
+                "change_summary",
+                "expected_mechanism",
+                "falsification_condition",
+                "variant_instruction",
+            )
+        ).lower() + " " + str(get_value(spec, "variant_parameters", "")).lower()
         if any(pattern in text for pattern in HIDDEN_PATTERNS):
             errors.append("HIDDEN_TEST_REFERENCE")
         if CODE_DETAIL_PATTERN.search(text):

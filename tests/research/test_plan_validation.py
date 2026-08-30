@@ -44,6 +44,43 @@ def test_validator_accepts_contract_compatible_plan(planner_context):
     assert result.errors == ()
 
 
+def test_validator_accepts_distinct_agent_chosen_campaign_variant(planner_context):
+    from tacorank.research.search_policy import SearchPolicy
+
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = {
+        "campaign_id": "adaptive_depth",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 25},
+        "family_method_card_ids": {
+            "objective": [
+                "objective_pairwise_bpr",
+                "objective_listwise_user_softmax",
+            ]
+        },
+        "family_directives": {"objective": "Adapt from prior evidence."},
+    }
+    choice = SearchPolicy().choose(planner_context)
+    spec = make_spec(
+        planner_context,
+        campaign_id=choice.campaign_id,
+        variant_id=choice.variant_id,
+        variant_instruction=(
+            "Use BPR with four deterministic negatives per positive and "
+            "learning rate 0.02."
+        ),
+        variant_parameters={
+            "formulation": "bpr",
+            "negative_count": 4,
+            "learning_rate": 0.02,
+        },
+    )
+
+    result = PlanValidator().validate(spec, planner_context, choice=choice)
+
+    assert result.accepted, result.errors
+
+
 def test_validator_allows_policy_authorized_soft_refinement(planner_context):
     from tacorank.research.search_policy import SearchPolicy
 

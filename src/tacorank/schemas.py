@@ -510,6 +510,46 @@ class LessonCandidate(StrictModel):
         )
 
 
+class ResearchCampaign(StrictModel):
+    """Frozen ordered family campaign embedded in the hash-bound run config."""
+
+    campaign_id: NonEmptyStr
+    family_order: List[NonEmptyStr]
+    family_budgets: Dict[NonEmptyStr, int]
+    family_method_card_ids: Dict[NonEmptyStr, List[NonEmptyStr]]
+    family_directives: Dict[NonEmptyStr, NonEmptyStr]
+
+    @field_validator("campaign_id")
+    @classmethod
+    def validate_campaign_id(cls, value: str) -> str:
+        return _validate_id(value, "campaign_id")
+
+    @model_validator(mode="after")
+    def validate_campaign(self) -> "ResearchCampaign":
+        if not self.family_order or len(self.family_order) != len(set(self.family_order)):
+            raise ValueError("campaign family_order must be non-empty and unique")
+        if set(self.family_budgets) != set(self.family_order):
+            raise ValueError("campaign family_budgets must exactly match family_order")
+        if any(value <= 0 for value in self.family_budgets.values()):
+            raise ValueError("campaign family budgets must be positive")
+        if set(self.family_method_card_ids) != set(self.family_order):
+            raise ValueError(
+                "campaign family_method_card_ids must exactly match family_order"
+            )
+        if set(self.family_directives) != set(self.family_order):
+            raise ValueError("campaign family_directives must exactly match family_order")
+        if any(
+            not methods or len(methods) != len(set(methods))
+            for methods in self.family_method_card_ids.values()
+        ):
+            raise ValueError("campaign method-card lists must be non-empty and unique")
+        return self
+
+    @property
+    def experiment_budget(self) -> int:
+        return sum(self.family_budgets.values())
+
+
 class ResearchProposal(StrictModel):
     """Code-blind research recommendation produced by Person 1.
 
@@ -531,6 +571,12 @@ class ResearchProposal(StrictModel):
     success_criteria: NonEmptyStr
     falsification_condition: NonEmptyStr
     estimated_cost: CostEstimate
+    campaign_id: Optional[NonEmptyStr] = None
+    variant_id: Optional[NonEmptyStr] = None
+    variant_instruction: Optional[NonEmptyStr] = None
+    variant_parameters: Dict[
+        NonEmptyStr, Union[bool, int, float, NonEmptyStr]
+    ] = Field(default_factory=dict)
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
     # Ensemble proposals retain one canonical Git parent and identify any
     # additional clean component experiments explicitly.  Non-ensemble plans
@@ -548,6 +594,30 @@ class ResearchProposal(StrictModel):
     @classmethod
     def validate_optional_id(cls, value: Optional[str]) -> Optional[str]:
         return None if value is None else _validate_id(value, "parent_experiment_id")
+
+    @field_validator("campaign_id", "variant_id")
+    @classmethod
+    def validate_optional_campaign_ids(
+        cls, value: Optional[str], info: Any
+    ) -> Optional[str]:
+        return None if value is None else _validate_id(value, info.field_name)
+
+    @model_validator(mode="after")
+    def validate_campaign_variant(self) -> "ResearchProposal":
+        fields = (self.campaign_id, self.variant_id, self.variant_instruction)
+        if any(value is not None for value in fields) and not all(
+            value is not None for value in fields
+        ):
+            raise ValueError("campaign proposal fields must be supplied together")
+        if self.campaign_id is None and self.variant_parameters:
+            raise ValueError("non-campaign proposals cannot supply variant parameters")
+        if self.campaign_id is not None and (
+            not self.variant_parameters or "formulation" not in self.variant_parameters
+        ):
+            raise ValueError(
+                "campaign proposals require variant parameters with a formulation"
+            )
+        return self
 
     @field_validator("component_experiment_ids")
     @classmethod
@@ -1382,6 +1452,12 @@ class PlannerExperimentSummary(StrictModel):
     best_eligible: bool = False
     status: NonEmptyStr
     duplicate_key: str = ""
+    campaign_id: Optional[NonEmptyStr] = None
+    variant_id: Optional[NonEmptyStr] = None
+    variant_instruction: Optional[NonEmptyStr] = None
+    variant_parameters: Dict[
+        NonEmptyStr, Union[bool, int, float, NonEmptyStr]
+    ] = Field(default_factory=dict)
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)
@@ -1442,6 +1518,7 @@ class PlannerContext(ContextDocument):
     active_lessons: List[PlannerLessonSummary] = Field(default_factory=list)
     method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
     playbook: PlannerPlaybookSummary
+    research_campaign: Optional[ResearchCampaign] = None
     # Retained as an empty, backward-compatible field so historical schema-v1
     # ledgers still replay. New planner contexts never carry implementation
     # interfaces; those belong exclusively to the coder boundary.

@@ -680,6 +680,10 @@ class ContextBuilder:
                     best_eligible=bool(decision and decision.best_eligible),
                     status=node.status.value,
                     duplicate_key=spec.duplicate_key,
+                    campaign_id=spec.campaign_id,
+                    variant_id=spec.variant_id,
+                    variant_instruction=spec.variant_instruction,
+                    variant_parameters=dict(spec.variant_parameters),
                     method_card_ids=list(spec.method_card_ids),
                     component_experiment_ids=list(spec.component_experiment_ids),
                     supporting_event_ids=support,
@@ -811,6 +815,7 @@ class ContextBuilder:
                     for family, methods in playbook.method_order.items()
                 },
             ),
+            "research_campaign": self.config.research_campaign,
             "target_interface_excerpts": {},
             "data_profile": data_profile,
             "remaining_budget": PlannerBudgetSummary(

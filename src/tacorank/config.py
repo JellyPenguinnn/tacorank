@@ -14,6 +14,7 @@ from pydantic import Field, field_validator, model_validator
 from .schemas import (
     MetricSet,
     NonEmptyStr,
+    ResearchCampaign,
     SHA256_RE,
     StrictModel,
     _validate_runtime_mapping,
@@ -96,6 +97,7 @@ class RunConfig(StrictModel):
     )
     research_capabilities: List[NonEmptyStr] = Field(default_factory=list)
     active_research_prohibitions: List[NonEmptyStr] = Field(default_factory=list)
+    research_campaign: Optional[ResearchCampaign] = None
     prediction_change_no_op_threshold: float = Field(default=0.001, ge=0.0, le=1.0)
     target_interface_excerpts: Dict[str, str] = Field(
         default_factory=lambda: dict(DEFAULT_TARGET_INTERFACE_EXCERPTS)
@@ -167,6 +169,17 @@ class RunConfig(StrictModel):
             raise ValueError("allowed_research_families must not be empty")
         if not self.allowed_research_data:
             raise ValueError("allowed_research_data must not be empty")
+        if self.research_campaign is not None:
+            campaign = self.research_campaign
+            unknown = set(campaign.family_order) - set(self.allowed_research_families)
+            if unknown:
+                raise ValueError("campaign contains a research family not allowed by the run")
+            if campaign.experiment_budget > self.max_experiments:
+                raise ValueError("campaign experiment budget exceeds max_experiments")
+            if self.convergence_patience < campaign.experiment_budget:
+                raise ValueError(
+                    "campaign runs require convergence_patience to cover every campaign slot"
+                )
         return self
 
     @field_validator("target_interface_excerpts")

@@ -301,6 +301,11 @@ def _render_lesson(lesson_id: str, record: dict) -> str:
 
 def render_summary(events: Sequence[Event]) -> str:
     state = project(events)
+    specifications = {
+        event.payload.spec.experiment_id: event.payload.spec
+        for event in events
+        if event.payload.type == "experiment.proposed"
+    }
     adapter_failures = [
         event.payload.result
         for event in events
@@ -315,15 +320,21 @@ def render_summary(events: Sequence[Event]) -> str:
         "",
         "# TacoRank run summary",
         "",
-        "| Experiment | Family | Status | Fidelity | Primary | Commit |",
-        "| --- | --- | --- | --- | ---: | --- |",
+        "| Experiment | Family | Campaign variant | Status | Fidelity | Primary | Commit |",
+        "| --- | --- | --- | --- | --- | ---: | --- |",
     ]
     for node in sorted(state.experiments.values(), key=lambda item: item.experiment_id):
         lines.append(
-            "| %s | %s | %s | %s | %s | %s |"
+            "| %s | %s | %s | %s | %s | %s | %s |"
             % (
                 node.experiment_id,
                 node.family,
+                (
+                    specifications[node.experiment_id].variant_id
+                    if node.experiment_id in specifications
+                    and specifications[node.experiment_id].variant_id
+                    else "—"
+                ),
                 node.status.value,
                 node.highest_fidelity.value if node.highest_fidelity else "—",
                 (
@@ -334,6 +345,55 @@ def render_summary(events: Sequence[Event]) -> str:
                 node.latest_commit_sha or "—",
             )
         )
+    campaign_specs = [
+        spec for spec in specifications.values() if spec.campaign_id is not None
+    ]
+    if campaign_specs:
+        family_order = list(dict.fromkeys(spec.family for spec in campaign_specs))
+        lines.extend(
+            (
+                "",
+                "## Campaign comparison",
+                "",
+                "| Family | Attempted | Full evaluations | Best experiment | Best primary | Baseline delta |",
+                "| --- | ---: | ---: | --- | ---: | ---: |",
+            )
+        )
+        for family in family_order:
+            family_nodes = [
+                state.experiments[spec.experiment_id]
+                for spec in campaign_specs
+                if spec.family == family and spec.experiment_id in state.experiments
+            ]
+            full_nodes = [
+                node
+                for node in family_nodes
+                if node.highest_fidelity is not None
+                and node.highest_fidelity.value == "full"
+                and node.metric_set is not None
+            ]
+            best = max(
+                full_nodes,
+                key=lambda node: node.metric_set.primary_score,
+                default=None,
+            )
+            best_score = best.metric_set.primary_score if best is not None else None
+            baseline_delta = (
+                best_score - state.baseline_primary_score
+                if best_score is not None and state.baseline_primary_score is not None
+                else None
+            )
+            lines.append(
+                "| %s | %d | %d | %s | %s | %s |"
+                % (
+                    family,
+                    len(family_nodes),
+                    len(full_nodes),
+                    best.experiment_id if best is not None else "—",
+                    "%.8f" % best_score if best_score is not None else "—",
+                    "%+.8f" % baseline_delta if baseline_delta is not None else "—",
+                )
+            )
     latest_evaluations = {}
     for event in events:
         if event.payload.type == "evaluation.completed":
@@ -514,6 +574,10 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                 "success_criteria": spec.success_criteria,
                 "falsification_condition": spec.falsification_condition,
                 "method_card_ids": list(spec.method_card_ids),
+                "campaign_id": spec.campaign_id,
+                "variant_id": spec.variant_id,
+                "variant_instruction": spec.variant_instruction,
+                "variant_parameters": dict(spec.variant_parameters),
                 "base_commit_sha": node.base_commit_sha,
                 "latest_commit_sha": node.latest_commit_sha,
                 "status": node.status.value,
@@ -638,6 +702,8 @@ def _render_experiment(node: dict, events: Sequence[Event]) -> str:
             ", ".join("`%s`" % item for item in node["method_card_ids"])
             or "none"
         ),
+        "- Campaign: `%s`" % (node.get("campaign_id") or "none"),
+        "- Variant: `%s`" % (node.get("variant_id") or "none"),
         "",
         "## Hypothesis",
         "",
@@ -645,6 +711,18 @@ def _render_experiment(node: dict, events: Sequence[Event]) -> str:
     ]
     if node.get("expected_mechanism"):
         lines.extend(("", "## Expected mechanism", "", node["expected_mechanism"]))
+    if node.get("variant_instruction"):
+        lines.extend(
+            ("", "## Campaign configuration", "", node["variant_instruction"])
+        )
+        lines.extend(
+            (
+                "",
+                "```json",
+                json.dumps(node["variant_parameters"], sort_keys=True),
+                "```",
+            )
+        )
     if metric_set is not None:
         lines.extend(
             (
