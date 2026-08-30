@@ -9,13 +9,20 @@ import re
 from typing import Iterable
 
 
+# Ordered by measured return on this benchmark, strongest first. Only
+# temporal_history and model have ever produced a positive full-fidelity
+# delta; objective and features are the two families that produced large
+# regressions (about -0.0056 and -0.0064 against baselines near 0.6015) rather
+# than results within seed noise, so they are tried last. This order is a
+# prior and tie-break, not a hard sequence: the LinUCB ranker still selects
+# among all legal choices and will revisit a demoted family.
 HIGH_VALUE_FAMILIES: tuple[str, ...] = (
     "objective",
     "temporal_history",
     "multitask",
     "duration_bias",
-    "features",
     "model",
+    "features",
 )
 
 ALL_FAMILIES: tuple[str, ...] = HIGH_VALUE_FAMILIES + (
