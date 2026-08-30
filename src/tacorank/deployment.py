@@ -28,6 +28,11 @@ from .coding import (
 )
 from .docker_host import normalize_local_docker_host
 from .evaluation.proxy import split_validation_indices
+from .feature_materialization import (
+    HISTORY_FEATURE_COLUMNS,
+    SCORE_FEATURE_COLUMNS,
+    materialize_history_features,
+)
 from .schemas import ResearchCampaign
 
 
@@ -252,6 +257,9 @@ def setup_live_deployment(
             "tab",
             "duration_ms",
             "long_view",
+            "row_id",
+            "time_ms",
+            *HISTORY_FEATURE_COLUMNS,
         ],
         "protected_columns": ["label"],
         "hidden_path_tokens": ["hidden_labels", "final_labels", "test_labels"],
@@ -316,14 +324,21 @@ def setup_live_deployment(
             "date",
             "duration_ms",
             "long_view",
+            "time_ms",
+            "hourmin",
+            "item_tags",
+            "upload_date",
+            "point_in_time_history_features",
             "verified_predictions",
         ],
         "research_capabilities": [
             "baseline_parity",
             "objective_data_frame_verified",
+            "history_affinity_features_legal",
+            "strict_temporal_cutoff",
             "verified_best_prediction",
         ],
-        "active_research_prohibitions": [],
+        "active_research_prohibitions": ["static_feature_expansion"],
         "research_campaign": (
             research_campaign.model_dump(mode="json")
             if research_campaign is not None
@@ -336,12 +351,18 @@ def setup_live_deployment(
                 "Edit only scalar values in CONFIG, set family to the ExperimentSpec "
                 "family, and copy the approved variant_parameters exactly. "
                 "Supported formulation values are "
-                "pointwise, bpr, listwise, and temporal_history. Bounds: "
+                "pointwise, bpr, listwise, temporal_history, and history_affinity. "
+                "history_affinity consumes only the setup-generated, hash-bound "
+                "point-in-time history feature views; it must not add raw static "
+                "CWM fields or current-row outcomes. Bounds: "
                 "embedding_dim integer 2..32; learning_rate 1e-5..0.2; epochs "
                 "1..8; negative_count integer 1..16; l2 0..0.1; residual_scale "
                 "0..0.5; max_train_rows integer 1000..250000; "
                 "history_decay_days 1..180; history_shrinkage 0..1000; "
                 "listwise_strategy must be full_observed. The "
+                "history_affinity formulation additionally requires "
+                "history_shrinkage >=5, l2 >=1e-6, epochs <=5, and "
+                "residual_scale <=0.2 to bound overfitting. The "
                 "controller-owned stable scaffold preserves the official FM parent, "
                 "trains the requested residual, and records diagnostics. Do not edit "
                 "candidate.py or research_scaffold.py during configuration trials."
@@ -575,6 +596,13 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     common.mkdir(mode=0o700)
     train_path = common / "train.csv"
     _write_train(train_path, train)
+    feature_materialization = materialize_history_features(
+        data_directory=data,
+        official_train=train,
+        official_valid=valid,
+        official_test=test,
+        output_directory=common / "history-features",
+    )
     command_directories = {
         "candidate_smoke": views / "candidate-smoke",
         "candidate_proxy": views / "candidate-proxy",
@@ -596,11 +624,42 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     for command_id, directory in command_directories.items():
         directory.mkdir(mode=0o700)
         os.link(train_path, directory / "train.csv")
+        history_train = directory / "history_train.csv"
+        os.link(feature_materialization["files"]["train"], history_train)
         rows, indices = index_sets[command_id]
         selected: Iterable[Sequence[Any]] = rows
         if indices is not None:
             selected = (rows[index] for index in indices)
         _write_score(directory / "score.csv", selected)
+        score_feature_source = feature_materialization["files"][
+            "test" if command_id == "candidate_final_infer" else "valid"
+        ]
+        history_score = directory / "history_score.csv"
+        if indices is None:
+            os.link(score_feature_source, history_score)
+        else:
+            _write_history_feature_subset(history_score, score_feature_source, indices)
+        _write_json_exclusive(
+            directory / "history-feature-manifest.json",
+            {
+                "schema_version": feature_materialization["schema_version"],
+                "train_file": "history_train.csv",
+                "train_sha256": _sha256_file(history_train),
+                "score_file": "history_score.csv",
+                "score_sha256": _sha256_file(history_score),
+                "train_columns": feature_materialization["train_columns"],
+                "score_columns": feature_materialization["score_columns"],
+                "feature_columns": feature_materialization["feature_columns"],
+                "cutoff_time_ms": feature_materialization["cutoff_time_ms"],
+                "cutoff_date": feature_materialization["cutoff_date"],
+                "history_update_policy": feature_materialization[
+                    "history_update_policy"
+                ],
+                "static_feature_policy": feature_materialization[
+                    "static_feature_policy"
+                ],
+            },
+        )
         fm_view = directory / "fm_baseline_predictions.csv"
         _copy_exclusive(fm_prediction_sources[command_id], fm_view)
         _write_text_exclusive(
@@ -819,6 +878,25 @@ def _write_prediction_subset(
         for row_id, source_index in enumerate(indices):
             user_id, video_id, score = rows[source_index]
             writer.writerow((row_id, user_id, video_id, score))
+
+
+def _write_history_feature_subset(
+    path: Path, source: Path, indices: Sequence[int]
+) -> None:
+    with source.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, strict=True)
+        if tuple(reader.fieldnames or ()) != SCORE_FEATURE_COLUMNS:
+            raise DeploymentError("history score features have an invalid header")
+        rows = list(reader)
+    with _exclusive_csv(path) as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(SCORE_FEATURE_COLUMNS))
+        writer.writeheader()
+        for row_id, source_index in enumerate(indices):
+            if source_index < 0 or source_index >= len(rows):
+                raise DeploymentError("history feature subset index is invalid")
+            row = dict(rows[source_index])
+            row["row_id"] = str(row_id)
+            writer.writerow(row)
 
 
 def _trae_yaml() -> str:

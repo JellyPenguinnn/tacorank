@@ -32,7 +32,10 @@ DEFAULT_METHOD_ORDER = {
     "temporal_history": ("temporal_history_compact",),
     "multitask": ("multitask_single_auxiliary",),
     "duration_bias": ("duration_bias_censored_watch_time",),
-    "features": ("temporal_drift_past_only",),
+    "features": (
+        "features_history_affinity",
+        "temporal_drift_past_only",
+    ),
     "model": ("model_compact_ranker",),
     "ensemble": (
         "ensemble_diverse_residual_candidate",

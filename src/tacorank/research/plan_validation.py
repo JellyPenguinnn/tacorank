@@ -61,6 +61,7 @@ def _variant_parameter_errors(family: str, values: Any) -> list[str]:
     allowed_formulations = {
         "objective": {"pointwise", "bpr", "listwise"},
         "temporal_history": {"temporal_history"},
+        "features": {"history_affinity"},
     }.get(family, set())
     errors = []
     if formulation not in allowed_formulations:
@@ -83,6 +84,31 @@ def _variant_parameter_errors(family: str, values: Any) -> list[str]:
             errors.append("INVALID_VARIANT_PARAMETER_TYPE")
         elif not lower <= float(value) <= upper:
             errors.append("VARIANT_PARAMETER_OUT_OF_RANGE")
+    if family == "features":
+        shrinkage = values.get("history_shrinkage")
+        regularization = values.get("l2")
+        epochs = values.get("epochs")
+        residual_scale = values.get("residual_scale")
+        if (
+            isinstance(shrinkage, (int, float))
+            and not isinstance(shrinkage, bool)
+            and float(shrinkage) < 5.0
+        ):
+            errors.append("FEATURE_REGULARIZATION_REQUIRED")
+        if (
+            isinstance(regularization, (int, float))
+            and not isinstance(regularization, bool)
+            and float(regularization) < 1e-6
+        ):
+            errors.append("FEATURE_REGULARIZATION_REQUIRED")
+        if isinstance(epochs, int) and not isinstance(epochs, bool) and epochs > 5:
+            errors.append("FEATURE_COMPLEXITY_LIMIT_EXCEEDED")
+        if (
+            isinstance(residual_scale, (int, float))
+            and not isinstance(residual_scale, bool)
+            and float(residual_scale) > 0.2
+        ):
+            errors.append("FEATURE_COMPLEXITY_LIMIT_EXCEEDED")
     return errors
 
 

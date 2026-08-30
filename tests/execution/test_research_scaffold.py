@@ -11,10 +11,12 @@ import pytest
 
 from solution.experiment_config import CONFIG
 from solution.research_scaffold import (
+    HISTORY_RAW_COLUMNS,
     _listwise_rows,
     _pairwise_rows,
     run_experiment,
     self_test,
+    validate_config,
 )
 
 
@@ -66,6 +68,71 @@ def _run(tmp_path: Path, root: Path, formulation: str, suffix: str) -> Path:
     return output
 
 
+def _write_history_inputs(root: Path) -> None:
+    rows = []
+    for index, (user, video, label) in enumerate(
+        (("1", "10", 1), ("1", "11", 0), ("2", "12", 1), ("2", "13", 0))
+    ):
+        rows.append(
+            {
+                "row_id": str(index),
+                "date": "20220401",
+                "time_ms": str(1000 + index),
+                "user_id": user,
+                "video_id": video,
+                "history_exposure": str(index),
+                "global_positive_rate": "0.5",
+                "tag_exposure": "4",
+                "tag_positive": "3" if label else "1",
+                "tag_coverage": "1",
+                "tag_positive_age_days": "1",
+                "author_exposure": "2",
+                "author_positive": str(label),
+                "author_positive_age_days": "2" if label else "-1",
+                "duration_exposure": "4",
+                "duration_positive": "2",
+                "tab_exposure": "4",
+                "tab_positive": "2",
+                "hour_sin": "0",
+                "hour_cos": "1",
+                "weekday_sin": "0.5",
+                "weekday_cos": "-0.5",
+                "log_duration_scaled": "0.6",
+                "item_age_scaled": "0.1",
+                "duration_bucket": "le_18s",
+                "long_view": str(label),
+            }
+        )
+    train = root / "history_train.csv"
+    with train.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=[*HISTORY_RAW_COLUMNS, "long_view"]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    score = root / "history_score.csv"
+    with score.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(HISTORY_RAW_COLUMNS))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row[key] for key in HISTORY_RAW_COLUMNS})
+    manifest = {
+        "schema_version": "1.0",
+        "train_file": "history_train.csv",
+        "train_sha256": hashlib.sha256(train.read_bytes()).hexdigest(),
+        "score_file": "history_score.csv",
+        "score_sha256": hashlib.sha256(score.read_bytes()).hexdigest(),
+        "train_columns": [*HISTORY_RAW_COLUMNS, "long_view"],
+        "score_columns": list(HISTORY_RAW_COLUMNS),
+        "feature_columns": [],
+        "history_update_policy": "emit_before_update_train_frozen_for_score",
+        "static_feature_policy": "candidate_conditioned_context_only",
+    }
+    (root / "history-feature-manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+
 def test_passthrough_reproduces_frozen_parent_bytes(tmp_path: Path) -> None:
     root = _input_root(tmp_path)
     output = _run(tmp_path, root, "passthrough", "first")
@@ -94,6 +161,50 @@ def test_trainable_formulations_are_finite_and_deterministic(
     )
     assert diagnostics["train_rows"] == 4
     assert diagnostics["gradient_norm"] >= 0
+
+
+def test_history_affinity_is_hash_bound_regularized_and_deterministic(
+    tmp_path: Path,
+) -> None:
+    root = _input_root(tmp_path)
+    _write_history_inputs(root)
+
+    first = _run(tmp_path, root, "history_affinity", "first")
+    second = _run(tmp_path, root, "history_affinity", "second")
+
+    assert first.read_bytes() == second.read_bytes()
+    diagnostics = json.loads(
+        first.with_name("training-diagnostics.json").read_text(encoding="utf-8")
+    )
+    assert diagnostics["implementation_id"] == "features_history_affinity_v1"
+    assert diagnostics["training_semantics"]["point_in_time_features"] is True
+    assert diagnostics["training_semantics"]["raw_id_features"] is False
+    assert diagnostics["training_semantics"]["feature_count"] == 18
+    assert diagnostics["interaction_coverage"] == 0.75
+
+
+def test_history_affinity_rejects_tampered_feature_file(tmp_path: Path) -> None:
+    root = _input_root(tmp_path)
+    _write_history_inputs(root)
+    with (root / "history_score.csv").open("a", encoding="utf-8") as handle:
+        handle.write("tampered\n")
+
+    with pytest.raises(ValueError, match="history feature identity is invalid"):
+        _run(tmp_path, root, "history_affinity", "first")
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"history_shrinkage": 0.0}, "shrinkage"),
+        ({"l2": 0.0}, "regularization"),
+        ({"epochs": 6}, "5 epochs"),
+        ({"residual_scale": 0.25}, "residual_scale"),
+    ],
+)
+def test_history_affinity_enforces_overfit_bounds(override, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        validate_config({**CONFIG, "formulation": "history_affinity", **override})
 
 
 def test_scaffold_gradient_and_negative_sampling_checks() -> None:

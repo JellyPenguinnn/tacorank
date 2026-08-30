@@ -25,6 +25,7 @@ METHOD_FORMULATIONS = {
     "objective_pairwise_bpr": "bpr",
     "objective_listwise_user_softmax": "listwise",
     "temporal_history_compact": "temporal_history",
+    "features_history_affinity": "history_affinity",
 }
 
 

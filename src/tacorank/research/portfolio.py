@@ -135,6 +135,63 @@ def default_portfolio() -> ExperimentPortfolio:
                 ),
             ),
             MethodCard(
+                method_id="features_history_affinity",
+                family="features",
+                summary=(
+                    "Use candidate-conditioned point-in-time history affinities."
+                ),
+                tags=("history", "affinity", "point-in-time", "regularized"),
+                cost_tier="medium",
+                mechanism=(
+                    "Fit a bounded regularized residual over tag, author, duration, "
+                    "and request-context affinities from strictly earlier events."
+                ),
+                prerequisites=(
+                    "baseline_parity",
+                    "strict_temporal_cutoff",
+                    "history_affinity_features_legal",
+                ),
+                allowed_data=(
+                    "train_interactions",
+                    "date",
+                    "time_ms",
+                    "hourmin",
+                    "user_id",
+                    "video_id",
+                    "author_id",
+                    "tab",
+                    "duration_ms",
+                    "long_view",
+                    "item_tags",
+                    "upload_date",
+                    "point_in_time_history_features",
+                ),
+                expected_effect=(
+                    "Improve within-user ordering through candidate-dependent "
+                    "history matches without raw-ID memorization."
+                ),
+                falsifier=(
+                    "No stable full-evaluation gain or a gain confined to one "
+                    "date/history cohort."
+                ),
+                prohibition_conditions=(
+                    "future_aggregate_required",
+                ),
+                implementation_targets=("solution/research_scaffold.py",),
+                configuration_target="solution/experiment_config.py",
+                capability_status="verified",
+                implementation_id="features_history_affinity_v1",
+                active_parameters=(
+                    "formulation",
+                    "learning_rate",
+                    "epochs",
+                    "l2",
+                    "residual_scale",
+                    "max_train_rows",
+                    "history_shrinkage",
+                ),
+            ),
+            MethodCard(
                 method_id="model_compact_ranker",
                 family="model",
                 summary="Try a compact alternative ranker after objective/data-frame validation.",

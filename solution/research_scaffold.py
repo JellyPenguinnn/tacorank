@@ -16,7 +16,14 @@ import zlib
 
 
 FEATURES = ("user_id", "video_id", "author_id", "tab", "duration_ms")
-FORMULATIONS = {"passthrough", "pointwise", "bpr", "listwise", "temporal_history"}
+FORMULATIONS = {
+    "passthrough",
+    "pointwise",
+    "bpr",
+    "listwise",
+    "temporal_history",
+    "history_affinity",
+}
 HASH_DIMENSION = 1 << 16
 IMPLEMENTATION_IDS = {
     "passthrough": "baseline_passthrough_v1",
@@ -24,6 +31,7 @@ IMPLEMENTATION_IDS = {
     "bpr": "objective_bpr_v2",
     "listwise": "objective_listwise_full_v2",
     "temporal_history": "temporal_history_compact_v1",
+    "history_affinity": "features_history_affinity_v1",
 }
 ACTIVE_PARAMETERS = {
     "passthrough": ("formulation",),
@@ -43,10 +51,43 @@ ACTIVE_PARAMETERS = {
         "formulation", "residual_scale", "max_train_rows",
         "history_decay_days", "history_shrinkage",
     ),
+    "history_affinity": (
+        "formulation", "learning_rate", "epochs", "l2", "residual_scale",
+        "max_train_rows", "history_shrinkage",
+    ),
 }
 PredictionRow = Tuple[int, str, str, float]
 TrainingRow = Tuple[Tuple[str, ...], str, int, float]
 ListwiseGroup = Tuple[Tuple[int, ...], Tuple[float, ...]]
+FeatureTrainingRow = Tuple[Tuple[float, ...], float]
+HISTORY_FEATURE_NAMES = (
+    "tag_affinity",
+    "tag_coverage",
+    "tag_recent_positive",
+    "author_affinity",
+    "author_recent_positive",
+    "duration_affinity",
+    "tab_affinity",
+    "history_strength",
+    "hour_sin",
+    "hour_cos",
+    "weekday_sin",
+    "weekday_cos",
+    "log_duration_scaled",
+    "item_age_scaled",
+    "duration_le_7s",
+    "duration_le_18s",
+    "duration_le_60s",
+    "duration_gt_60s",
+)
+HISTORY_RAW_COLUMNS = (
+    "row_id", "date", "time_ms", "user_id", "video_id", "history_exposure",
+    "global_positive_rate", "tag_exposure", "tag_positive", "tag_coverage",
+    "tag_positive_age_days", "author_exposure", "author_positive",
+    "author_positive_age_days", "duration_exposure", "duration_positive",
+    "tab_exposure", "tab_positive", "hour_sin", "hour_cos", "weekday_sin",
+    "weekday_cos", "log_duration_scaled", "item_age_scaled", "duration_bucket",
+)
 
 
 def run_experiment(invocation: Any, raw_config: Mapping[str, Any]) -> None:
@@ -58,6 +99,33 @@ def run_experiment(invocation: Any, raw_config: Mapping[str, Any]) -> None:
         _exclusive_copy(parent_path, invocation.output_path)
         diagnostics = _empty_diagnostics(
             formulation, getattr(invocation, "seed", 0)
+        )
+        _attach_execution_receipt(diagnostics, config)
+        _write_diagnostics(invocation.output_path, diagnostics)
+        return
+
+    if formulation == "history_affinity":
+        history_train, history_score = _validated_history_inputs(
+            invocation.input_root
+        )
+        train = _load_history_training(
+            history_train,
+            str(invocation.fidelity),
+            config,
+        )
+        model, diagnostics = _fit_history_affinity(train, config, int(invocation.seed or 0))
+        prediction_stats = _write_history_predictions(
+            invocation.output_path,
+            history_score,
+            parent_path,
+            model,
+            config,
+        )
+        diagnostics.update(
+            formulation=formulation,
+            seed=int(invocation.seed or 0),
+            train_rows=len(train),
+            **prediction_stats,
         )
         _attach_execution_receipt(diagnostics, config)
         _write_diagnostics(invocation.output_path, diagnostics)
@@ -111,6 +179,15 @@ def validate_config(raw: Mapping[str, Any]) -> Dict[str, Any]:
         numeric = float(value)
         if not math.isfinite(numeric) or not lower <= numeric <= upper:
             raise ValueError("%s must be in [%g, %g]" % (key, lower, upper))
+    if config["formulation"] == "history_affinity":
+        if float(config["history_shrinkage"]) < 5.0:
+            raise ValueError("history_affinity requires shrinkage >= 5")
+        if float(config["l2"]) < 1e-6:
+            raise ValueError("history_affinity requires positive regularization")
+        if int(config["epochs"]) > 5:
+            raise ValueError("history_affinity is limited to 5 epochs")
+        if float(config["residual_scale"]) > 0.2:
+            raise ValueError("history_affinity residual_scale must be <= 0.2")
     return config
 
 
@@ -155,6 +232,155 @@ def _load_training(
     if not rows:
         raise ValueError("train.csv is empty")
     return [row for _, row in sorted(rows)]
+
+
+def _load_history_training(
+    path: Path, fidelity: str, config: Mapping[str, Any]
+) -> List[FeatureTrainingRow]:
+    limits = {
+        "smoke": 20_000,
+        "proxy": 100_000,
+        "full": int(config["max_train_rows"]),
+        "final": int(config["max_train_rows"]),
+    }
+    limit = min(limits.get(fidelity, limits["full"]), int(config["max_train_rows"]))
+    representative = fidelity in {"full", "final"}
+    rng = random.Random(0xA771)
+    rows: List[Tuple[int, FeatureTrainingRow]] = []
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, strict=True)
+        expected = HISTORY_RAW_COLUMNS + ("long_view",)
+        if tuple(reader.fieldnames or ()) != expected:
+            raise ValueError("history_train.csv has an invalid header")
+        for row_index, row in enumerate(reader):
+            label = _finite_float(row["long_view"], "long_view")
+            if label not in (0.0, 1.0):
+                raise ValueError("history training labels must be binary")
+            if representative and len(rows) >= limit:
+                replacement = rng.randrange(row_index + 1)
+                if replacement >= limit:
+                    continue
+            parsed = (_history_vector(row, config), label)
+            if representative and len(rows) >= limit:
+                rows[replacement] = (row_index, parsed)
+            else:
+                rows.append((row_index, parsed))
+            if not representative and len(rows) >= limit:
+                break
+    if not rows:
+        raise ValueError("history_train.csv is empty")
+    return [row for _, row in sorted(rows)]
+
+
+def _history_vector(
+    row: Mapping[str, str], config: Mapping[str, Any]
+) -> Tuple[float, ...]:
+    prior = _bounded_float(row["global_positive_rate"], 0.0, 1.0, "global rate")
+    shrinkage = float(config["history_shrinkage"])
+
+    def affinity(prefix: str) -> float:
+        exposure = _nonnegative_float(row[prefix + "_exposure"], prefix + " exposure")
+        positive = _nonnegative_float(row[prefix + "_positive"], prefix + " positive")
+        if positive > exposure + 1e-9:
+            raise ValueError(prefix + " positives exceed exposures")
+        denominator = exposure + shrinkage
+        if denominator == 0.0:
+            return 0.0
+        return (positive + shrinkage * prior) / denominator - prior
+
+    def recency(name: str) -> float:
+        age = _finite_float(row[name], name)
+        return 0.0 if age < 0.0 else math.exp(-min(age, 3650.0) / 14.0)
+
+    history_exposure = _nonnegative_float(row["history_exposure"], "history exposure")
+    history_strength = min(1.0, math.log1p(history_exposure) / math.log1p(200.0))
+    bucket = str(row["duration_bucket"])
+    buckets = ("le_7s", "le_18s", "le_60s", "gt_60s")
+    if bucket not in buckets:
+        raise ValueError("history duration bucket is invalid")
+    values = (
+        affinity("tag"),
+        _bounded_float(row["tag_coverage"], 0.0, 1.0, "tag coverage"),
+        recency("tag_positive_age_days"),
+        affinity("author"),
+        recency("author_positive_age_days"),
+        affinity("duration"),
+        affinity("tab"),
+        history_strength,
+        _bounded_float(row["hour_sin"], -1.0, 1.0, "hour sine"),
+        _bounded_float(row["hour_cos"], -1.0, 1.0, "hour cosine"),
+        _bounded_float(row["weekday_sin"], -1.0, 1.0, "weekday sine"),
+        _bounded_float(row["weekday_cos"], -1.0, 1.0, "weekday cosine"),
+        _bounded_float(row["log_duration_scaled"], 0.0, 1.0, "log duration"),
+        _bounded_float(row["item_age_scaled"], 0.0, 1.0, "item age"),
+        *(1.0 if bucket == candidate else 0.0 for candidate in buckets),
+    )
+    if len(values) != len(HISTORY_FEATURE_NAMES):
+        raise ValueError("history feature vector has the wrong dimension")
+    return tuple(values)
+
+
+def _fit_history_affinity(
+    train: Sequence[FeatureTrainingRow],
+    config: Mapping[str, Any],
+    seed: int,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    rng = random.Random(seed)
+    weights = [0.0 for _ in HISTORY_FEATURE_NAMES]
+    bias = 0.0
+    learning_rate = float(config["learning_rate"])
+    l2 = float(config["l2"])
+    losses: List[float] = []
+    gradient_norms: List[float] = []
+    for _ in range(int(config["epochs"])):
+        order = list(range(len(train)))
+        rng.shuffle(order)
+        loss_total = 0.0
+        squared_gradient = 0.0
+        gradient_count = 0
+        for row_index in order:
+            features, label = train[row_index]
+            score = bias + sum(
+                weight * value for weight, value in zip(weights, features)
+            )
+            probability = 1.0 / (
+                1.0 + math.exp(-max(-30.0, min(30.0, score)))
+            )
+            coefficient = probability - label
+            loss_total += _softplus(score) - label * score
+            for index, value in enumerate(features):
+                gradient = coefficient * value + l2 * weights[index]
+                weights[index] -= learning_rate * gradient
+                squared_gradient += gradient * gradient
+                gradient_count += 1
+            bias -= learning_rate * coefficient
+            squared_gradient += coefficient * coefficient
+            gradient_count += 1
+        losses.append(loss_total / len(train))
+        gradient_norms.append(math.sqrt(squared_gradient / max(1, gradient_count)))
+    tag_coverage = sum(row[0][1] for row in train) / len(train)
+    history_coverage = sum(row[0][7] > 0.0 for row in train) / len(train)
+    diagnostics = {
+        "loss_curve": losses,
+        "loss_start": losses[0],
+        "loss_end": losses[-1],
+        "pairwise_accuracy": 0.0,
+        "gradient_norm": gradient_norms[-1],
+        "feature_names": list(HISTORY_FEATURE_NAMES),
+        "feature_weights": {
+            name: weights[index] for index, name in enumerate(HISTORY_FEATURE_NAMES)
+        },
+        "training_semantics": {
+            "feature_count": len(HISTORY_FEATURE_NAMES),
+            "regularized_linear_residual": True,
+            "raw_id_features": False,
+            "static_user_features": False,
+            "tag_coverage_mean": tag_coverage,
+            "history_coverage": history_coverage,
+            "point_in_time_features": True,
+        },
+    }
+    return {"kind": "history_affinity", "weights": weights, "bias": bias}, diagnostics
 
 
 def _fit(
@@ -553,6 +779,87 @@ def _write_model_predictions(
     }
 
 
+def _write_history_predictions(
+    output_path: Path,
+    feature_path: Path,
+    parent_path: Path,
+    model: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> Dict[str, float]:
+    descriptor = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    residual_sum = 0.0
+    residual_square_sum = 0.0
+    covered = 0
+    count = 0
+    try:
+        with feature_path.open(newline="", encoding="utf-8") as feature_handle, parent_path.open(
+            newline="", encoding="utf-8"
+        ) as parent_handle, os.fdopen(
+            descriptor, "w", newline="", encoding="utf-8"
+        ) as output:
+            descriptor = -1
+            feature_rows = csv.DictReader(feature_handle, strict=True)
+            parent_rows = csv.DictReader(parent_handle, strict=True)
+            if tuple(feature_rows.fieldnames or ()) != HISTORY_RAW_COLUMNS:
+                raise ValueError("history_score.csv has an invalid header")
+            if list(parent_rows.fieldnames or ()) != [
+                "row_id", "user_id", "video_id", "score"
+            ]:
+                raise ValueError("frozen FM predictions have an invalid header")
+            writer = csv.writer(output, lineterminator="\n")
+            writer.writerow(("row_id", "user_id", "video_id", "score"))
+            sentinel = object()
+            while True:
+                feature_row = next(feature_rows, sentinel)
+                parent_row = next(parent_rows, sentinel)
+                if feature_row is sentinel and parent_row is sentinel:
+                    break
+                if feature_row is sentinel or parent_row is sentinel:
+                    raise ValueError("history features have the wrong row count")
+                if (
+                    int(feature_row["row_id"]) != count
+                    or int(parent_row["row_id"]) != count
+                    or feature_row["user_id"] != parent_row["user_id"]
+                    or feature_row["video_id"] != parent_row["video_id"]
+                ):
+                    raise ValueError("history features do not align with frozen FM")
+                features = _history_vector(feature_row, config)
+                raw = float(model["bias"]) + sum(
+                    weight * value
+                    for weight, value in zip(model["weights"], features)
+                )
+                residual = math.tanh(raw)
+                value = float(parent_row["score"]) + float(
+                    config["residual_scale"]
+                ) * residual
+                if not math.isfinite(value):
+                    raise ValueError("candidate produced non-finite predictions")
+                writer.writerow(
+                    (
+                        count,
+                        feature_row["user_id"],
+                        feature_row["video_id"],
+                        "%.17g" % value,
+                    )
+                )
+                residual_sum += residual
+                residual_square_sum += residual * residual
+                covered += int(_finite_float(feature_row["history_exposure"], "history") > 0)
+                count += 1
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if count == 0:
+        raise ValueError("history score population is empty")
+    mean = residual_sum / count
+    variance = max(0.0, residual_square_sum / count - mean * mean)
+    return {
+        "interaction_coverage": covered / count,
+        "residual_mean": mean,
+        "residual_std": math.sqrt(variance),
+    }
+
+
 def self_test() -> None:
     """Check determinism, user-bounded sampling, and the BPR gradient."""
 
@@ -612,6 +919,60 @@ def _date_ordinal(value: str) -> int:
         return datetime.strptime(str(value), "%Y%m%d").date().toordinal()
     except ValueError as error:
         raise ValueError("date must use YYYYMMDD") from error
+
+
+def _validated_history_inputs(input_root: Path) -> Tuple[Path, Path]:
+    manifest_path = _regular_file(input_root / "history-feature-manifest.json")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("history feature manifest is invalid") from error
+    required = {
+        "schema_version": "1.0",
+        "train_file": "history_train.csv",
+        "score_file": "history_score.csv",
+        "history_update_policy": "emit_before_update_train_frozen_for_score",
+        "static_feature_policy": "candidate_conditioned_context_only",
+    }
+    if any(manifest.get(key) != value for key, value in required.items()):
+        raise ValueError("history feature manifest policy is invalid")
+    if tuple(manifest.get("train_columns", ())) != HISTORY_RAW_COLUMNS + (
+        "long_view",
+    ):
+        raise ValueError("history feature train schema is invalid")
+    if tuple(manifest.get("score_columns", ())) != HISTORY_RAW_COLUMNS:
+        raise ValueError("history feature score schema is invalid")
+    train = _regular_file(input_root / "history_train.csv")
+    score = _regular_file(input_root / "history_score.csv")
+    for path, key in ((train, "train_sha256"), (score, "score_sha256")):
+        digest = str(manifest.get(key, ""))
+        if not _is_sha256(digest) or _sha256_file(path) != digest:
+            raise ValueError("history feature identity is invalid")
+    return train, score
+
+
+def _finite_float(value: Any, name: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(name + " must be numeric") from error
+    if not math.isfinite(result):
+        raise ValueError(name + " must be finite")
+    return result
+
+
+def _bounded_float(value: Any, lower: float, upper: float, name: str) -> float:
+    result = _finite_float(value, name)
+    if not lower - 1e-9 <= result <= upper + 1e-9:
+        raise ValueError(name + " is outside its reviewed bounds")
+    return max(lower, min(upper, result))
+
+
+def _nonnegative_float(value: Any, name: str) -> float:
+    result = _finite_float(value, name)
+    if result < 0.0:
+        raise ValueError(name + " must be non-negative")
+    return result
 
 
 def _validated_inputs(input_root: Path) -> Tuple[Path, Path]:
