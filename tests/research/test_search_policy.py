@@ -179,6 +179,30 @@ def test_playbook_blocks_unbranchable_results(
     assert choice.reason_code == reason_code
 
 
+def test_playbook_branches_after_terminal_proxy_prune(planner_context):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        parent_eligible=False,
+        trust_verdict="negative",
+        stability="not_applicable",
+        parent_delta=-0.09,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "EARLY_FIDELITY_REJECTED"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.family == "temporal_history"
+    assert choice.method_card_id == "temporal_history_compact"
+
+
 @pytest.mark.parametrize(
     ("metric_deltas", "reason_code"),
     [

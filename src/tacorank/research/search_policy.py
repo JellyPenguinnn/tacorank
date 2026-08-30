@@ -302,6 +302,7 @@ def _playbook_choice(
     ) or 0.0
     prediction_change = _number(get_value(latest, "prediction_change", None))
     parent_delta = _number(get_value(latest, "parent_delta", None))
+    decision = _normalized(get_value(latest, "decision", None))
     gauc_delta = _metric_delta(latest, "gauc")
     ndcg_delta = _metric_delta(latest, "ndcg@5", "ndcg")
     family = str(get_value(latest, "family", ""))
@@ -362,6 +363,20 @@ def _playbook_choice(
                 "Only a completed public-validation result may drive a research branch.",
             )
         if rule == "promotion_required" and fidelity in {"smoke", "proxy"}:
+            if decision in {"prune", "reject"}:
+                return _next_independent_choice(
+                    context,
+                    eligible,
+                    allowed,
+                    family,
+                    reason_code="EARLY_FIDELITY_REJECTED",
+                    reason=(
+                        "The latest mechanism was terminally rejected before full "
+                        "evaluation; move to the next independent method."
+                    ),
+                ) or _blocked(
+                    "NO_ELIGIBLE_METHOD", "No independent eligible method remains."
+                )
             return _blocked(
                 "FIDELITY_PROMOTION_REQUIRED",
                 "A smoke or proxy result must be promoted or rejected before branching.",
