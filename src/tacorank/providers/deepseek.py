@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, is_dataclass
-from enum import Enum
 import json
 import logging
 import re
 import ssl
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -16,11 +16,11 @@ from urllib.request import Request, urlopen
 import certifi
 from pydantic import BaseModel
 
+from ..research.code_blind import redact_implementation_references
 from ..research.duplicate_detection import compute_duplicate_key
 from ..research.graph_view import as_list, get_value
 from ..schemas import ResourceDelta, TokenMeasurement
 from .research_provider import ProviderError, ProviderRequest
-
 
 logger = logging.getLogger(__name__)
 
@@ -120,24 +120,8 @@ def _text(value: Any) -> str:
     return str(value).strip()
 
 
-_IMPLEMENTATION_REFERENCE_RE = re.compile(
-    r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|"
-    r"\b[A-Za-z0-9_.-]+\.(?:py|pyi|js|ts|tsx|java|go|rs|cpp|cc|c|h)\b|"
-    r"\b(?:entrypoint|function name|class name|source file)\b",
-    flags=re.IGNORECASE,
-)
-
-
 def _code_blind(value: Any) -> Any:
-    if isinstance(value, str):
-        return _IMPLEMENTATION_REFERENCE_RE.sub(
-            "[implementation detail withheld]", value
-        )
-    if isinstance(value, Mapping):
-        return {str(key): _code_blind(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_code_blind(item) for item in value]
-    return value
+    return redact_implementation_references(value)
 
 
 def _nonnegative_int(value: Any, default: int) -> int:
@@ -285,6 +269,21 @@ def _research_candidate(value: Any) -> Dict[str, Any]:
     return _code_blind(
         {field: _jsonable(get_value(value, field, None)) for field in fields}
     )
+
+
+def _repair_instruction(validation_errors: tuple[str, ...]) -> str:
+    instructions = [
+        "Correct every validation error and return one complete replacement "
+        "JSON object."
+    ]
+    if "CODE_SPECIFIC_PLAN_FORBIDDEN" in validation_errors:
+        instructions.append(
+            "Remove repository paths, source-file names or extensions, entrypoints, "
+            "function or class names, line references, commands, and editing steps. "
+            "Restate the proposal only as a scientific hypothesis, intervention, "
+            "ranking mechanism, success criterion, and falsification condition."
+        )
+    return " ".join(instructions)
 
 
 def _default_transport(
@@ -472,7 +471,7 @@ class DeepSeekResearchProvider:
             payload["repair"] = {
                 "validation_errors": list(validation_errors),
                 "previous_candidate": _research_candidate(self._last_candidate),
-                "instruction": "Correct every error and return one complete replacement JSON object.",
+                "instruction": _repair_instruction(validation_errors),
             }
         return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 

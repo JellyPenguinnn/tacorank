@@ -7,9 +7,9 @@ from urllib.error import HTTPError
 
 import pytest
 
-from tacorank.providers import deepseek as deepseek_module
 from tacorank.agents.research_planner import ResearchPlanner
 from tacorank.cli import _planner_for
+from tacorank.providers import deepseek as deepseek_module
 from tacorank.providers.deepseek import DeepSeekResearchProvider
 from tacorank.providers.research_provider import ProviderError, ProviderRequest
 from tacorank.research.duplicate_detection import compute_duplicate_key
@@ -284,7 +284,14 @@ def test_deepseek_provider_discards_unsolicited_implementation_details(
 def test_research_planner_repairs_code_specific_narrative(planner_context):
     responses = [
         response(candidate(change_summary="Edit solution/candidate.py.")),
-        response(candidate()),
+        response(
+            candidate(
+                change_summary=(
+                    "Compare positive/negative preference ordering for user/item "
+                    "ranking."
+                )
+            )
+        ),
     ]
     requests = []
 
@@ -308,6 +315,7 @@ def test_research_planner_repairs_code_specific_narrative(planner_context):
         "validation_errors"
     ]
     assert "solution/candidate.py" not in json.dumps(repair_prompt)
+    assert "Remove repository paths" in repair_prompt["repair"]["instruction"]
 
 
 def test_deepseek_provider_rejects_truncated_completion(planner_context):

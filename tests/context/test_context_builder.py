@@ -138,7 +138,9 @@ def test_planner_context_separates_active_lessons_from_experiment_history(
     harness.bootstrap(baseline_evaluation)
     asyncio.run(harness.run_one_experiment())
 
-    context = harness.context_builder.build_planner(harness.events())
+    context = harness.context_builder.build_planner(
+        harness.events(), max_tokens=3_000
+    )
 
     assert len(context.family_history) == 1
     assert len(context.active_lessons) == 1

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from collections import Counter
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Type, TypeVar
 
@@ -18,6 +17,11 @@ from ..memory.retrieval import (
 )
 from ..recovery.classifier import classify_failure
 from ..recovery.fingerprints import fingerprint_result
+from ..research.code_blind import redact_implementation_references
+from ..research.eda import PlannerEdaToolbox
+from ..research.playbook import load_improvement_playbook
+from ..research.portfolio import MethodCard, load_method_cards
+from ..research.search_eligibility import classify_search_eligibility
 from ..run_layout import run_relative_directory
 from ..schemas import (
     ArtifactKind,
@@ -31,21 +35,17 @@ from ..schemas import (
     ExperimentSpec,
     Fidelity,
     PlannerBudgetSummary,
-    PlannerContractSummary,
     PlannerContext,
+    PlannerContractSummary,
     PlannerConvergenceSummary,
     PlannerDataProfile,
     PlannerExperimentSummary,
     PlannerLessonSummary,
     PlannerMethodCardSummary,
     PlannerPlaybookSummary,
-    ResearchProposal,
     RecoveryContext,
+    ResearchProposal,
 )
-from ..research.eda import PlannerEdaToolbox
-from ..research.playbook import load_improvement_playbook
-from ..research.portfolio import MethodCard, load_method_cards
-from ..research.search_eligibility import classify_search_eligibility
 from .redaction import redact
 from .templates import compact_json, render_context
 from .token_estimator import estimate_tokens
@@ -114,24 +114,8 @@ def _path_is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-_IMPLEMENTATION_REFERENCE_RE = re.compile(
-    r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|"
-    r"\b[A-Za-z0-9_.-]+\.(?:py|pyi|js|ts|tsx|java|go|rs|cpp|cc|c|h)\b|"
-    r"\b(?:entrypoint|function name|class name|source file)\b",
-    flags=re.IGNORECASE,
-)
-
-
 def _code_blind(value: object) -> object:
-    if isinstance(value, str):
-        return _IMPLEMENTATION_REFERENCE_RE.sub(
-            "[implementation detail withheld]", value
-        )
-    if isinstance(value, dict):
-        return {key: _code_blind(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_code_blind(item) for item in value]
-    return value
+    return redact_implementation_references(value)
 
 
 class ContextBuildError(RuntimeError):
