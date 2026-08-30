@@ -81,13 +81,33 @@ fi
 if [ -x "$repo_root/venv/bin/tacorank" ]; then
     tacorank="$repo_root/venv/bin/tacorank"
     python="$repo_root/venv/bin/python"
+    tacorank_mode=installed
 elif [ -x "$repo_root/.venv/bin/tacorank" ]; then
     tacorank="$repo_root/.venv/bin/tacorank"
     python="$repo_root/.venv/bin/python"
+    tacorank_mode=installed
+elif [ -x "$repo_root/venv/bin/python" ]; then
+    # A virtualenv can have the project dependencies installed without the
+    # editable package itself. Run the checked-out source directly in that
+    # case instead of requiring a generated console-script wrapper.
+    python="$repo_root/venv/bin/python"
+    tacorank_mode=source
+elif [ -x "$repo_root/.venv/bin/python" ]; then
+    python="$repo_root/.venv/bin/python"
+    tacorank_mode=source
 else
-    die "could not find venv/bin/tacorank or .venv/bin/tacorank"
+    die "could not find a TacoRank CLI or Python in venv/.venv; install the development environment first"
 fi
 [ -x "$python" ] || die "could not find the Python executable beside tacorank"
+
+run_tacorank() {
+    if [ "$tacorank_mode" = source ]; then
+        PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}" \
+            "$python" -m tacorank.cli "$@"
+    else
+        "$tacorank" "$@"
+    fi
+}
 
 python312=${TACORANK_PYTHON312:-}
 if [ -z "$python312" ]; then
@@ -182,7 +202,7 @@ live_config="$deployment_dir/live-adapters.json"
 printf '%s\n' "Starting new TacoRank live run: $run_id"
 printf '%s\n' "Repository: $repo_root"
 
-"$tacorank" setup-live \
+run_tacorank setup-live \
     --repository-root "$repo_root" \
     --deployment-dir "$deployment_dir" \
     --runtime-dir "$runtime_dir" \
@@ -197,17 +217,17 @@ printf '%s\n' "Repository: $repo_root"
 # the worktree cleanliness invariant.
 prepare_starter_kit
 
-"$tacorank" preflight \
+run_tacorank preflight \
     --config "$config" \
     --live-config "$live_config"
 
 [ ! -e "$repo_root/runs/$run_id/events.jsonl" ] || die "preflight unexpectedly created a ledger"
 
-"$tacorank" run \
+run_tacorank run \
     --config "$config" \
     --live-config "$live_config"
 
-status_json=$("$tacorank" status --run-id "$run_id" --repository-root "$repo_root")
+status_json=$(run_tacorank status --run-id "$run_id" --repository-root "$repo_root")
 printf '%s\n' "$status_json"
 
 "$python" -c '
@@ -224,11 +244,11 @@ if not status.get("final_experiment_id"):
     raise SystemExit("run finalized without final_experiment_id")
 ' "$status_json"
 
-"$tacorank" validate-ledger \
+run_tacorank validate-ledger \
     --run-id "$run_id" \
     --repository-root "$repo_root"
 
-"$tacorank" rebuild-views \
+run_tacorank rebuild-views \
     --run-id "$run_id" \
     --repository-root "$repo_root"
 
