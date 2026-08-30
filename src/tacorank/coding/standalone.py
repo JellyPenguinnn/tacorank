@@ -58,6 +58,7 @@ class TraeStandaloneConfig(StrictModel):
     artifact_roots: List[str]
     editable_roots: List[str]
     allowed_command_ids: List[str]
+    allowed_import_roots: List[str]
     target_interface_excerpts: Dict[str, str] = Field(default_factory=dict)
     coding_step_limit: int = Field(gt=0)
     coding_token_limit: Optional[int] = Field(default=None, gt=0)
@@ -91,6 +92,15 @@ class TraeStandaloneConfig(StrictModel):
             raise ValueError("allowed_command_ids must be non-empty")
         if len(values) != len(set(values)):
             raise ValueError("allowed_command_ids must be unique")
+        return values
+
+    @field_validator("allowed_import_roots")
+    @classmethod
+    def validate_import_roots(cls, values: List[str]) -> List[str]:
+        if not values or any(not value.isidentifier() for value in values):
+            raise ValueError("allowed_import_roots must contain import identifiers")
+        if values != sorted(set(values)):
+            raise ValueError("allowed_import_roots must be sorted and unique")
         return values
 
     @field_validator("data_boundary_sha256")
@@ -409,7 +419,7 @@ async def run_trae_example(
         ),
         allowed_command_ids=config.allowed_command_ids,
         artifact_roots=config.artifact_roots,
-        allowed_import_roots=None,
+        allowed_import_roots=config.allowed_import_roots,
         allowed_capability_imports=(),
         allowed_dependency_changes=(),
         smoke_check=DockerEntrypointSmokeCheck(

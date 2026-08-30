@@ -39,6 +39,7 @@ def test_checked_example_resolves_to_canonical_person2_handoff(tmp_path: Path) -
         artifact_roots=["artifacts", "runs"],
         editable_roots=["solution"],
         allowed_command_ids=["candidate_smoke"],
+        allowed_import_roots=["csv", "solution"],
         target_interface_excerpts={
             "solution/candidate.py": "def run(invocation) -> None",
             "solution/features.py": "training-only feature helpers",
