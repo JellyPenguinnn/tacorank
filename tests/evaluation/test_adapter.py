@@ -163,6 +163,10 @@ class ProtectedAdapterTests(unittest.TestCase):
             result.to_canonical().diagnostic_metrics,
             dict(result.diagnostic_metrics),
         )
+        self.assertEqual(
+            result.to_canonical().parent_metric_deltas,
+            {"GAUC": 0.0, "nDCG@5": 0.0},
+        )
 
     def test_constant_candidate_keeps_baseline_rank_diagnostic_typed(self):
         predictions = prediction_batch(["u", "u", "u"], [0.5, 0.5, 0.5])

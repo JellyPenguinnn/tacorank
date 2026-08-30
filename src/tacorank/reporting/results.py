@@ -257,15 +257,24 @@ def _render_lesson(lesson_id: str, record: dict) -> str:
         "- Confidence: `%.2f`" % candidate.confidence,
         "- Tags: %s" % (", ".join(candidate.tags) if candidate.tags else "none"),
         "- Recorded by: `%s`" % record["recorded_event_id"],
-        "",
-        "## Finding",
-        "",
-        candidate.summary,
-        "",
-        "## Applies when",
-        "",
-        candidate.applicability,
     ]
+    if candidate.measured_under_frame_experiment_id:
+        lines.append(
+            "- Evaluation frame: `%s`"
+            % candidate.measured_under_frame_experiment_id
+        )
+    lines.extend(
+        [
+            "",
+            "## Finding",
+            "",
+            candidate.summary,
+            "",
+            "## Applies when",
+            "",
+            candidate.applicability,
+        ]
+    )
     if candidate.avoid_when:
         lines.extend(("", "## Avoid when", "", candidate.avoid_when))
     lines.extend(
@@ -325,6 +334,19 @@ def render_summary(events: Sequence[Event]) -> str:
                 node.latest_commit_sha or "—",
             )
         )
+    latest_evaluations = {}
+    for event in events:
+        if event.payload.type == "evaluation.completed":
+            latest_evaluations[event.payload.result.experiment_id] = event.payload.result
+    diagnostic_rows = []
+    for experiment_id, result in sorted(latest_evaluations.items()):
+        hypotheses = result.diagnostics.failure_hypotheses
+        if hypotheses:
+            diagnostic_rows.append(
+                "- `%s`: %s" % (experiment_id, " ".join(hypotheses))
+            )
+    if diagnostic_rows:
+        lines.extend(("", "## Diagnostic findings", "", *diagnostic_rows))
     totals = state.resource_totals
     lines.extend(
         (
@@ -397,6 +419,10 @@ def _graph_payload(events: Sequence[Event]) -> dict:
         event.payload.spec.experiment_id: event.payload.spec
         for event in proposal_events
     }
+    latest_evaluations = {}
+    for event in events:
+        if event.payload.type == "evaluation.completed":
+            latest_evaluations[event.payload.result.experiment_id] = event.payload.result
     directions = _direction_directories(
         [spec.family for spec in specifications.values()]
     )
@@ -423,6 +449,12 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                 "highest_fidelity": payload.evaluation.fidelity.value,
                 "metric_set": payload.metric_set.model_dump(mode="json"),
                 "trust": payload.evaluation.trust.model_dump(mode="json"),
+                "diagnostics": payload.evaluation.diagnostics.model_dump(mode="json"),
+                "metrics_artifact": (
+                    payload.evaluation.metrics_artifact.model_dump(mode="json")
+                    if payload.evaluation.metrics_artifact is not None
+                    else None
+                ),
                 "diagnostic_metrics": dict(payload.evaluation.diagnostic_metrics),
                 "adapter_failures": [],
                 "recovery_decisions": [],
@@ -437,15 +469,7 @@ def _graph_payload(events: Sequence[Event]) -> dict:
     for experiment_id in sorted(specifications):
         spec = specifications[experiment_id]
         node = state.experiments[experiment_id]
-        experiment_evaluations = [
-            event.payload.result
-            for event in events
-            if event.payload.type == "evaluation.completed"
-            and event.payload.result.experiment_id == experiment_id
-        ]
-        latest_evaluation = (
-            experiment_evaluations[-1] if experiment_evaluations else None
-        )
+        latest_evaluation = latest_evaluations.get(experiment_id)
         adapter_failures = [
             {
                 "event_id": event.event_id,
@@ -504,6 +528,17 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                 "trust": (
                     node.trust.model_dump(mode="json")
                     if node.trust is not None
+                    else None
+                ),
+                "diagnostics": (
+                    latest_evaluation.diagnostics.model_dump(mode="json")
+                    if latest_evaluation is not None
+                    else None
+                ),
+                "metrics_artifact": (
+                    latest_evaluation.metrics_artifact.model_dump(mode="json")
+                    if latest_evaluation is not None
+                    and latest_evaluation.metrics_artifact is not None
                     else None
                 ),
                 "diagnostic_metrics": (
@@ -623,11 +658,35 @@ def _render_experiment(node: dict, events: Sequence[Event]) -> str:
                 "```",
             )
         )
+    diagnostics = node.get("diagnostics")
+    if diagnostics is not None and any(
+        value not in (None, [], {}) for value in diagnostics.values()
+    ):
+        lines.extend(
+            (
+                "",
+                "## Diagnostics",
+                "",
+                "These aggregate signals support hypotheses, not causal claims.",
+                "",
+                "```json",
+                json.dumps(diagnostics, ensure_ascii=False, sort_keys=True, indent=2),
+                "```",
+            )
+        )
+        if node.get("metrics_artifact") is not None:
+            lines.extend(
+                (
+                    "",
+                    "Metrics artifact: `%s`"
+                    % node["metrics_artifact"]["path"],
+                )
+            )
     if node["diagnostic_metrics"]:
         lines.extend(
             (
                 "",
-                "## Label-free candidate diagnostics",
+                "## Compact diagnostic metrics",
                 "",
                 "```json",
                 json.dumps(

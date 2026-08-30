@@ -498,6 +498,16 @@ class LessonCandidate(StrictModel):
     confidence: float = Field(ge=0.0, le=1.0)
     source_event_ids: List[NonEmptyStr] = Field(default_factory=list)
     source_commit_shas: List[NonEmptyStr] = Field(default_factory=list)
+    measured_under_frame_experiment_id: Optional[NonEmptyStr] = None
+
+    @field_validator("measured_under_frame_experiment_id")
+    @classmethod
+    def validate_frame_id(cls, value: Optional[str]) -> Optional[str]:
+        return (
+            None
+            if value is None
+            else _validate_id(value, "measured_under_frame_experiment_id")
+        )
 
 
 class ResearchProposal(StrictModel):
@@ -871,6 +881,63 @@ class PredictionChange(StrictModel):
     changed_row_fraction: float = Field(ge=0.0, le=1.0)
 
 
+class EvaluationDiagnostics(StrictModel):
+    """Protected aggregate diagnostics without row-level labels or scores."""
+
+    train_validation_gap: Optional[float] = None
+    proxy_parent_delta: Optional[float] = None
+    proxy_full_delta_gap: Optional[float] = Field(default=None, ge=0.0)
+    validation_arm_deltas: Dict[str, float] = Field(default_factory=dict)
+    validation_arm_gap: Optional[float] = Field(default=None, ge=0.0)
+    temporal_delta_slope: Optional[float] = None
+    gain_concentration_top10pct: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    slice_deltas: Dict[str, float] = Field(default_factory=dict)
+    best_slice: Optional[str] = None
+    worst_slice: Optional[str] = None
+    failure_hypotheses: List[NonEmptyStr] = Field(default_factory=list)
+    limitations: List[NonEmptyStr] = Field(default_factory=list)
+
+    @field_validator("validation_arm_deltas", "slice_deltas")
+    @classmethod
+    def validate_diagnostic_maps(cls, values: Dict[str, float]) -> Dict[str, float]:
+        if any(not str(name).strip() for name in values):
+            raise ValueError("diagnostic names must not be empty")
+        return values
+
+    @field_validator("failure_hypotheses", "limitations")
+    @classmethod
+    def validate_diagnostic_codes(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("diagnostic codes must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_diagnostic_consistency(self) -> "EvaluationDiagnostics":
+        if (self.proxy_parent_delta is None) != (self.proxy_full_delta_gap is None):
+            raise ValueError(
+                "proxy parent delta and proxy/full gap must be supplied together"
+            )
+        arms = self.validation_arm_deltas
+        if arms and set(arms) != {"val_a", "val_b"}:
+            raise ValueError("validation arm diagnostics require val_a and val_b")
+        if bool(arms) != (self.validation_arm_gap is not None):
+            raise ValueError(
+                "validation arm gap and arm deltas must be supplied together"
+            )
+        if arms:
+            expected_gap = abs(arms["val_a"] - arms["val_b"])
+            assert self.validation_arm_gap is not None
+            if abs(expected_gap - self.validation_arm_gap) > 1e-12:
+                raise ValueError("validation arm gap does not match arm deltas")
+        for field_name in ("best_slice", "worst_slice"):
+            name = getattr(self, field_name)
+            if name is not None and name not in self.slice_deltas:
+                raise ValueError("%s must identify a recorded slice" % field_name)
+        return self
+
+
 class EvaluationRequest(StrictModel):
     run_id: NonEmptyStr
     experiment_id: NonEmptyStr
@@ -910,10 +977,16 @@ class EvaluationResult(StrictModel):
     baseline_delta: float
     parent_delta: Optional[float] = None
     previous_best_delta: Optional[float] = None
+    baseline_metric_deltas: Dict[NonEmptyStr, float] = Field(default_factory=dict)
+    parent_metric_deltas: Dict[NonEmptyStr, float] = Field(default_factory=dict)
+    previous_best_metric_deltas: Dict[NonEmptyStr, float] = Field(
+        default_factory=dict
+    )
     prediction_change: Union[float, PredictionChange]
     diagnostic_metrics: Dict[NonEmptyStr, float] = Field(default_factory=dict)
     trust: TrustAssessment
     seed_evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+    diagnostics: EvaluationDiagnostics = Field(default_factory=EvaluationDiagnostics)
     metrics_artifact: Optional[ArtifactRef] = None
     resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
 
@@ -940,8 +1013,32 @@ class EvaluationResult(StrictModel):
             raise ValueError("seed_evidence_event_ids must be unique")
         return values
 
+    @field_validator(
+        "baseline_metric_deltas",
+        "parent_metric_deltas",
+        "previous_best_metric_deltas",
+    )
+    @classmethod
+    def validate_metric_delta_names(
+        cls, values: Dict[str, float]
+    ) -> Dict[str, float]:
+        if any(not str(name).strip() for name in values):
+            raise ValueError("metric delta names must not be empty")
+        return values
+
     @model_validator(mode="after")
     def validate_evaluation_route(self) -> "EvaluationResult":
+        expected_metrics = set(self.metric_set.metrics)
+        for field_name in (
+            "baseline_metric_deltas",
+            "parent_metric_deltas",
+            "previous_best_metric_deltas",
+        ):
+            values = getattr(self, field_name)
+            if values and set(values) != expected_metrics:
+                raise ValueError(
+                    "%s must match the evaluated metric schema" % field_name
+                )
         if self.population == Population.PUBLIC_VALIDATION:
             if self.fidelity != Fidelity.FULL or self.public_query_index is None:
                 raise ValueError("public validation requires full fidelity and query index")
@@ -1257,6 +1354,10 @@ class PlannerExperimentSummary(StrictModel):
     stability: Optional[Stability] = None
     integrity: Optional[Integrity] = None
     trust_flags: List[NonEmptyStr] = Field(default_factory=list)
+    failure_hypotheses: List[NonEmptyStr] = Field(default_factory=list)
+    diagnostic_limitations: List[NonEmptyStr] = Field(default_factory=list)
+    diagnostic_best_slice: Optional[str] = None
+    diagnostic_worst_slice: Optional[str] = None
     decision: Optional[ExperimentDecisionKind] = None
     highest_completed_fidelity: Optional[Fidelity] = None
     population: Optional[Population] = None

@@ -141,5 +141,7 @@ def harness(config: RunConfig) -> Harness:
         health_observer=FakeHealthObserver(),
         recovery_manager=FakeRecoveryManager(),
         output_gate=FakeOutputGate(),
-        evaluator=FakeEvaluator(config.metric_names, config.primary_metric_name),
+        evaluator=FakeEvaluator(
+            config.metric_names, config.primary_metric_name, store
+        ),
     )

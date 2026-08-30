@@ -59,6 +59,55 @@ def _prediction_change_spearman(value: object) -> Optional[float]:
     return None if spearman is None else float(spearman)
 
 
+def _planner_diagnostic_metrics(result: object) -> Dict[str, float]:
+    values = dict(getattr(result, "diagnostic_metrics", {}) or {})
+    diagnostics = getattr(result, "diagnostics", None)
+    if diagnostics is None:
+        return {name: float(value) for name, value in values.items()}
+    values.update(
+        {
+            "train_validation_gap": diagnostics.train_validation_gap,
+            "proxy_parent_delta": diagnostics.proxy_parent_delta,
+            "proxy_full_delta_gap": diagnostics.proxy_full_delta_gap,
+            "validation_arm_gap": diagnostics.validation_arm_gap,
+            "temporal_delta_slope": diagnostics.temporal_delta_slope,
+            "gain_concentration_top10pct": diagnostics.gain_concentration_top10pct,
+        }
+    )
+    for arm, value in diagnostics.validation_arm_deltas.items():
+        values["%s_parent_delta" % arm] = value
+    for label, name in (
+        ("best_slice_delta", diagnostics.best_slice),
+        ("worst_slice_delta", diagnostics.worst_slice),
+    ):
+        if name is not None:
+            values[label] = diagnostics.slice_deltas[name]
+    return {
+        name: float(value) for name, value in values.items() if value is not None
+    }
+
+
+def _planner_parent_metric_deltas(
+    *,
+    evaluation: object,
+    metric_set: object,
+    parent_metrics: Optional[object],
+    same_route: bool,
+) -> Dict[str, float]:
+    """Use protected deltas, with a route-safe fallback for legacy events."""
+
+    persisted = dict(getattr(evaluation, "parent_metric_deltas", {}) or {})
+    if persisted:
+        return {name: float(value) for name, value in persisted.items()}
+    if parent_metrics is None or not same_route:
+        return {}
+    return {
+        name: float(value) - float(parent_metrics.metrics[name])
+        for name, value in metric_set.metrics.items()
+        if name in parent_metrics.metrics
+    }
+
+
 def _path_is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
@@ -483,7 +532,7 @@ class ContextBuilder:
             prediction_spearman_vs_parent=_prediction_change_spearman(
                 baseline_evaluation.prediction_change
             ),
-            diagnostic_metrics=dict(baseline_evaluation.diagnostic_metrics),
+            diagnostic_metrics=_planner_diagnostic_metrics(baseline_evaluation),
             child_count=0,
             actual_cost=CostTier.LOW,
             parent_eligible=True,
@@ -513,6 +562,12 @@ class ContextBuilder:
         )
         baseline.child_count = children[baseline.experiment_id]
         metrics_by_experiment = {baseline.experiment_id: baseline_payload.metric_set}
+        routes_by_experiment = {
+            baseline.experiment_id: (
+                baseline_evaluation.population,
+                baseline_evaluation.fidelity,
+            )
+        }
         summaries: List[PlannerExperimentSummary] = []
 
         for proposal_event in spec_events:
@@ -525,14 +580,20 @@ class ContextBuilder:
             decision = decision_event.payload.decision if decision_event else None
             output = output_event.payload.result if output_event else None
             metric_set = evaluation.metric_set if evaluation else node.metric_set
+            parent_metrics = metrics_by_experiment.get(spec.parent_experiment_id)
+            parent_route = routes_by_experiment.get(spec.parent_experiment_id)
+            metric_deltas = {}
+            if evaluation is not None and metric_set is not None:
+                current_route = (evaluation.population, evaluation.fidelity)
+                metric_deltas = _planner_parent_metric_deltas(
+                    evaluation=evaluation,
+                    metric_set=metric_set,
+                    parent_metrics=parent_metrics,
+                    same_route=parent_route == current_route,
+                )
+                routes_by_experiment[spec.experiment_id] = current_route
             if metric_set is not None:
                 metrics_by_experiment[spec.experiment_id] = metric_set
-            parent_metrics = metrics_by_experiment.get(spec.parent_experiment_id)
-            metric_deltas = {}
-            if metric_set is not None and parent_metrics is not None:
-                for name, value in metric_set.metrics.items():
-                    if name in parent_metrics.metrics:
-                        metric_deltas[name] = value - parent_metrics.metrics[name]
 
             support = [proposal_event.event_id]
             if evaluation_event is not None:
@@ -552,6 +613,20 @@ class ContextBuilder:
                     stability=evaluation.trust.stability if evaluation else None,
                     integrity=evaluation.trust.integrity if evaluation else None,
                     trust_flags=(list(evaluation.trust.flags) if evaluation else []),
+                    failure_hypotheses=(
+                        list(evaluation.diagnostics.failure_hypotheses)
+                        if evaluation
+                        else []
+                    ),
+                    diagnostic_limitations=(
+                        list(evaluation.diagnostics.limitations) if evaluation else []
+                    ),
+                    diagnostic_best_slice=(
+                        evaluation.diagnostics.best_slice if evaluation else None
+                    ),
+                    diagnostic_worst_slice=(
+                        evaluation.diagnostics.worst_slice if evaluation else None
+                    ),
                     decision=decision.decision if decision else None,
                     highest_completed_fidelity=(
                         evaluation.fidelity if evaluation else node.highest_fidelity
@@ -579,7 +654,7 @@ class ContextBuilder:
                         else None
                     ),
                     diagnostic_metrics=(
-                        dict(evaluation.diagnostic_metrics) if evaluation else {}
+                        _planner_diagnostic_metrics(evaluation) if evaluation else {}
                     ),
                     child_count=children[spec.experiment_id],
                     actual_cost=spec.estimated_cost.cost_tier,

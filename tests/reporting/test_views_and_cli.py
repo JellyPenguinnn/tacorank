@@ -23,7 +23,10 @@ def test_views_are_derived_and_cli_validates(harness, baseline_evaluation, capsy
     assert "exp_001" in summary
     assert "Unmeasured tokens:" in summary
     assert "Total reported tokens:" in summary
-    assert "No lessons recorded" in (run_directory / "lessons/INDEX.md").read_text()
+    lesson_index = (run_directory / "lessons/INDEX.md").read_text()
+    assert "lesson_001" in lesson_index
+    lesson = (run_directory / "lessons/lesson_001.md").read_text()
+    assert "confirmed clean result" in lesson
     assert '"best_experiment_id": "exp_001"' in (
         run_directory / "STATUS.md"
     ).read_text()
@@ -37,6 +40,14 @@ def test_views_are_derived_and_cli_validates(harness, baseline_evaluation, capsy
         "exp_001",
     ]
     experiment = graph["nodes"][1]
+    assert experiment["diagnostics"]["validation_arm_gap"] == 0.01
+    experiment_report = (
+        run_directory
+        / "experiment-graph/directions/feature-cross/experiments/exp_001.md"
+    ).read_text()
+    assert "## Diagnostics" in experiment_report
+    assert "user_history.cold" in experiment_report
+    assert "## Diagnostic findings" in summary
     assert experiment["diagnostic_metrics"]["user_rankable_fraction"] == 1.0
     assert experiment["adapter_failures"] == []
     assert experiment["recovery_decisions"] == []

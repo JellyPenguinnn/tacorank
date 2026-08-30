@@ -168,6 +168,71 @@ class Harness:
     def state(self):
         return project(self.events())
 
+    def _execution_seed(
+        self, experiment_id: str, fidelity: Fidelity, patch_commit_sha: str
+    ) -> int:
+        if fidelity != Fidelity.FULL:
+            return self.config.seed_schedule[0]
+        events = self.events()
+        event_by_id = {event.event_id: event for event in events}
+        completed = 0
+        for event in events:
+            if not (
+                event.event_type == EventType.EVALUATION_COMPLETED
+                and event.payload.result.experiment_id == experiment_id
+                and event.payload.result.fidelity == Fidelity.FULL
+                and event.payload.result.population == Population.PUBLIC_VALIDATION
+            ):
+                continue
+            output = event_by_id.get(event.causation_event_id)
+            finished = (
+                event_by_id.get(output.causation_event_id)
+                if output is not None
+                else None
+            )
+            started = (
+                event_by_id.get(finished.causation_event_id)
+                if finished is not None
+                else None
+            )
+            if (
+                started is None
+                or started.event_type != EventType.EXECUTION_STARTED
+            ):
+                raise OrchestrationError(
+                    "full evaluation cannot resolve its execution identity"
+                )
+            if started.payload.request.patch_commit_sha == patch_commit_sha:
+                completed += 1
+        if completed >= len(self.config.seed_schedule):
+            raise OrchestrationError(
+                "distinct full-fidelity seed schedule exhausted for %s"
+                % experiment_id
+            )
+        return self.config.seed_schedule[completed]
+
+    def _reference_metrics(
+        self, experiment_id: Optional[str], fidelity: Fidelity
+    ) -> dict:
+        if not experiment_id or experiment_id == "baseline":
+            return self._baseline_metrics()
+        for event in reversed(self.events()):
+            if (
+                event.event_type == EventType.EVALUATION_COMPLETED
+                and event.payload.result.experiment_id == experiment_id
+                and event.payload.result.fidelity == fidelity
+            ):
+                metric_set = event.payload.result.metric_set
+                values = dict(metric_set.metrics)
+                values.setdefault(
+                    metric_set.primary_metric_name, metric_set.primary_score
+                )
+                return values
+        raise OrchestrationError(
+            "reference experiment %s has no %s evaluation"
+            % (experiment_id, fidelity.value)
+        )
+
     def bootstrap(self, baseline_evaluation) -> None:
         """Freeze run identity and record independently supplied baseline parity."""
 
@@ -866,10 +931,6 @@ class Harness:
                 )
                 next_request_template = None
             else:
-                seed_index = min(
-                    execution_attempt - 1,
-                    len(self.config.seed_schedule) - 1,
-                )
                 request = RunRequest(
                     run_id=self.config.run_id,
                     experiment_id=spec.experiment_id,
@@ -878,7 +939,11 @@ class Harness:
                     command_id=self._command_for(fidelity),
                     patch_commit_sha=patch_check.patch_commit_sha,
                     patch_receipt_id=patch_check.receipt_id,
-                    seed=self.config.seed_schedule[seed_index],
+                    seed=self._execution_seed(
+                        spec.experiment_id,
+                        fidelity,
+                        patch_check.patch_commit_sha,
+                    ),
                     data_manifest_sha256=self.config.data_manifest_sha256,
                     timeout_seconds=self.config.timeout_profiles.get("standard", 600),
                     memory_limit_mb=4096,
@@ -1094,15 +1159,8 @@ class Harness:
             )
             state = self.state()
             baseline = self._baseline_metrics()
-            best = dict(baseline)
-            if state.best_experiment_id in state.experiments:
-                best_node = state.experiments[state.best_experiment_id]
-                if best_node.metric_set:
-                    best = dict(best_node.metric_set.metrics)
-                    best.setdefault(
-                        best_node.metric_set.primary_metric_name,
-                        best_node.metric_set.primary_score,
-                    )
+            parent = self._reference_metrics(spec.parent_experiment_id, fidelity)
+            best = self._reference_metrics(state.best_experiment_id, fidelity)
             evaluation_request = EvaluationRequest(
                 run_id=self.config.run_id,
                 experiment_id=spec.experiment_id,
@@ -1115,7 +1173,7 @@ class Harness:
                 contract_sha256=self.verified_contract.contract_sha256,
                 evaluator_sha256=self.config.evaluator_sha256,
                 baseline_summary=baseline,
-                parent_summary=best,
+                parent_summary=parent,
                 previous_best_summary=best,
                 public_query_index=(
                     state.public_validation_queries + 1
@@ -1209,7 +1267,7 @@ class Harness:
                 run_id=self.config.run_id,
                 experiment_id=spec.experiment_id,
                 baseline_score=baseline[self.config.primary_metric_name],
-                parent_score=best[self.config.primary_metric_name],
+                parent_score=parent[self.config.primary_metric_name],
                 previous_best_score=best[self.config.primary_metric_name],
             )
             try:
@@ -1463,14 +1521,11 @@ class Harness:
             reproduction_run, reproduction_finished, "clean_reproduce"
         )
         baseline = self._baseline_metrics()
-        best = dict(baseline)
         best_node = state.experiments[plan.experiment_id]
-        if best_node.metric_set is not None:
-            best = dict(best_node.metric_set.metrics)
-            best.setdefault(
-                best_node.metric_set.primary_metric_name,
-                best_node.metric_set.primary_score,
-            )
+        parent = self._reference_metrics(
+            best_node.parent_experiment_id, Fidelity.FULL
+        )
+        best = self._reference_metrics(plan.experiment_id, Fidelity.FULL)
         evaluation = await self.evaluator.evaluate(
             EvaluationRequest(
                 run_id=self.config.run_id,
@@ -1484,7 +1539,7 @@ class Harness:
                 contract_sha256=self.verified_contract.contract_sha256,
                 evaluator_sha256=self.config.evaluator_sha256,
                 baseline_summary=baseline,
-                parent_summary=best,
+                parent_summary=parent,
                 previous_best_summary=best,
                 public_query_index=self.state().public_validation_queries + 1,
             )

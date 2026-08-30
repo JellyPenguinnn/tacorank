@@ -5,7 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from tacorank.context.builder import ContextBuildError
+from tacorank.context.builder import (
+    ContextBuildError,
+    _planner_parent_metric_deltas,
+)
 from tacorank.context.redaction import redact
 from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.schemas import ArtifactKind, CostEstimate, ResearchProposal
@@ -69,11 +72,19 @@ def test_planner_history_preserves_complete_evaluation_evidence(
     assert latest.highest_completed_fidelity.value == "full"
     assert latest.prediction_change == 0.1
     assert latest.prediction_spearman_vs_parent == 0.9
-    assert latest.diagnostic_metrics == {
-        "spearman_vs_fm_baseline": 0.8,
-        "user_rankable_fraction": 1.0,
-    }
+    assert latest.diagnostic_metrics["spearman_vs_fm_baseline"] == 0.8
+    assert latest.diagnostic_metrics["user_rankable_fraction"] == 1.0
     assert latest.trust_flags == []
+    assert latest.diagnostic_metrics["validation_arm_gap"] == 0.01
+    assert latest.diagnostic_metrics["temporal_delta_slope"] == -0.003
+    assert latest.metric_deltas == {
+        "gauc": pytest.approx(0.02),
+        "ndcg@5": pytest.approx(0.02),
+        "primary": pytest.approx(0.02),
+    }
+    assert latest.diagnostic_worst_slice == "user_history.cold"
+    assert "Cohort weakness" in latest.failure_hypotheses[0]
+    assert "contract v1" in latest.diagnostic_limitations[0]
     assert latest.parent_eligible is True
     assert latest.best_eligible is True
     assert context.refinement_frontier_ids == []
@@ -85,6 +96,35 @@ def test_planner_history_preserves_complete_evaluation_evidence(
         "proxy",
         "full",
     ]
+
+
+def test_planner_metric_deltas_are_authoritative_and_route_safe() -> None:
+    candidate = SimpleNamespace(metrics={"GAUC": 0.64, "nDCG@5": 0.52})
+    full_parent = SimpleNamespace(metrics={"GAUC": 0.67, "nDCG@5": 0.54})
+    protected = SimpleNamespace(
+        parent_metric_deltas={"GAUC": -0.031, "nDCG@5": -0.021}
+    )
+
+    assert _planner_parent_metric_deltas(
+        evaluation=protected,
+        metric_set=candidate,
+        parent_metrics=full_parent,
+        same_route=False,
+    ) == {"GAUC": -0.031, "nDCG@5": -0.021}
+
+    legacy = SimpleNamespace(parent_metric_deltas={})
+    assert _planner_parent_metric_deltas(
+        evaluation=legacy,
+        metric_set=candidate,
+        parent_metrics=full_parent,
+        same_route=False,
+    ) == {}
+    assert _planner_parent_metric_deltas(
+        evaluation=legacy,
+        metric_set=candidate,
+        parent_metrics=full_parent,
+        same_route=True,
+    ) == pytest.approx({"GAUC": -0.03, "nDCG@5": -0.02})
 
 
 def test_mandatory_context_cannot_be_silently_truncated(harness, baseline_evaluation):
@@ -223,5 +263,7 @@ def test_execution_attempts_are_unique_across_fidelities(harness, baseline_evalu
         "smoke",
         "proxy",
         "full",
+        "full",
+        "full",
     ]
-    assert [request.attempt for request in requests] == [1, 2, 3]
+    assert [request.attempt for request in requests] == [1, 2, 3, 4, 5]

@@ -11,6 +11,7 @@ import sys
 from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 from .comparisons import compare_metric_sets
+from .diagnostics import DiagnosticFeatures, compute_evaluation_diagnostics
 from .metrics import normalize_binary_labels, validate_metric_set
 from .no_op import analyze_prediction_change
 from .trust import TrustConfig, TrustEvidence, assess_trust
@@ -153,6 +154,7 @@ class EvaluationInputs:
     parent: MetricSet
     previous_best: MetricSet
     parent_scores: Optional[Sequence[float]] = None
+    diagnostic_features: Optional[DiagnosticFeatures] = None
     baseline_scores: Optional[Sequence[float]] = None
     seed_evaluation_event_ids: Tuple[str, ...] = ()
     internal_proxy_delta: Optional[float] = None
@@ -411,6 +413,22 @@ class EvaluationService:
             request.parent_scores,
             self.trust_config.no_op.score_tolerance,
         )
+        diagnostic_summary = compute_evaluation_diagnostics(
+            user_ids=predictions.user_ids,
+            labels=request.labels,
+            candidate_scores=predictions.scores,
+            parent_scores=(
+                request.parent_scores
+                if request.parent_scores is not None
+                else predictions.scores
+            ),
+            parent_delta=parent_delta,
+            features=request.diagnostic_features,
+            proxy_parent_delta=request.internal_proxy_delta,
+            validation_gap_threshold=0.006,
+            temporal_slope_threshold=self.trust_config.drift_slope_threshold,
+            concentration_threshold=self.trust_config.gain_concentration_threshold,
+        )
         prior_seed_results = self._resolve_seed_results(request)
         seed_metric_sets = tuple(
             result.metric_set for result in prior_seed_results
@@ -438,7 +456,12 @@ class EvaluationService:
                 alignment_suspect=request.alignment_suspect,
                 internal_proxy_delta=request.internal_proxy_delta,
                 unbiased_audit_delta=request.unbiased_audit_delta,
-                val_b_delta=request.val_b_delta,
+                val_a_delta=diagnostic_summary.validation_arm_deltas.get("val_a"),
+                val_b_delta=(
+                    request.val_b_delta
+                    if request.val_b_delta is not None
+                    else diagnostic_summary.validation_arm_deltas.get("val_b")
+                ),
                 delta_correlation=request.delta_correlation,
                 delta_correlation_experiment_id=(
                     request.delta_correlation_experiment_id
@@ -446,16 +469,60 @@ class EvaluationService:
                 score_unique_fraction=change.unique_score_fraction,
                 gain_concentration_top10pct=(
                     request.gain_concentration_top10pct
+                    if request.gain_concentration_top10pct is not None
+                    else diagnostic_summary.gain_concentration_top10pct
                 ),
-                drift_primary_slope=request.drift_primary_slope,
+                drift_primary_slope=(
+                    request.drift_primary_slope
+                    if request.drift_primary_slope is not None
+                    else diagnostic_summary.temporal_delta_slope
+                ),
             ),
             self.trust_config,
         )
-        diagnostics = _prediction_quality_diagnostics(
-            predictions,
-            parent_scores=request.parent_scores,
-            baseline_scores=request.baseline_scores,
-            tolerance=self.trust_config.no_op.score_tolerance,
+        diagnostic_metrics = dict(
+            _prediction_quality_diagnostics(
+                predictions,
+                parent_scores=request.parent_scores,
+                baseline_scores=request.baseline_scores,
+                tolerance=self.trust_config.no_op.score_tolerance,
+            )
+        )
+        diagnostic_metrics.update(
+            {
+                **(
+                    {
+                        "proxy_full_delta_gap": (
+                            diagnostic_summary.proxy_full_delta_gap
+                        ),
+                    }
+                    if diagnostic_summary.proxy_full_delta_gap is not None
+                    else {}
+                ),
+                **(
+                    {"validation_arm_gap": diagnostic_summary.validation_arm_gap}
+                    if diagnostic_summary.validation_arm_gap is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "temporal_delta_slope": (
+                            diagnostic_summary.temporal_delta_slope
+                        )
+                    }
+                    if diagnostic_summary.temporal_delta_slope is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "gain_concentration_top10pct": (
+                            diagnostic_summary.gain_concentration_top10pct
+                        )
+                    }
+                    if diagnostic_summary.gain_concentration_top10pct is not None
+                    else {}
+                ),
+            }
         )
         return EvaluationResult(
             run_id=request.run_id,
@@ -474,7 +541,8 @@ class EvaluationService:
             previous_best_delta=best_delta,
             prediction_change=change,
             trust=trust,
-            diagnostic_metrics=diagnostics,
+            diagnostic_metrics=diagnostic_metrics,
+            diagnostics=diagnostic_summary,
             seed_evidence_event_ids=request.seed_evaluation_event_ids,
         )
 

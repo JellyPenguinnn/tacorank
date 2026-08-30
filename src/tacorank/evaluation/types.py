@@ -10,6 +10,7 @@ from typing import Dict, List, Mapping, Optional, Tuple
 
 from tacorank.schemas import (
     Decision,
+    EvaluationDiagnostics,
     EvaluationResult as CanonicalEvaluationResult,
     ExperimentDecision as CanonicalExperimentDecision,
     Fidelity,
@@ -114,6 +115,7 @@ class EvaluationResult:
     prediction_change: PredictionChange
     trust: TrustAssessment
     diagnostic_metrics: Mapping[str, float] = field(default_factory=dict)
+    diagnostics: EvaluationDiagnostics = field(default_factory=EvaluationDiagnostics)
     seed_evidence_event_ids: Tuple[str, ...] = ()
 
     def to_canonical(self) -> CanonicalEvaluationResult:
@@ -136,6 +138,9 @@ class EvaluationResult:
             baseline_delta=self.baseline_delta.primary,
             parent_delta=self.parent_delta.primary,
             previous_best_delta=self.previous_best_delta.primary,
+            baseline_metric_deltas=dict(self.baseline_delta.metrics),
+            parent_metric_deltas=dict(self.parent_delta.metrics),
+            previous_best_metric_deltas=dict(self.previous_best_delta.metrics),
             prediction_change=CanonicalPredictionChange(
                 spearman_vs_parent=self.prediction_change.spearman_vs_parent,
                 changed_row_fraction=self.prediction_change.changed_row_fraction,
@@ -152,6 +157,7 @@ class EvaluationResult:
                 seed_count=self.trust.seed_count,
             ),
             seed_evidence_event_ids=list(self.seed_evidence_event_ids),
+            diagnostics=self.diagnostics,
         )
 
 

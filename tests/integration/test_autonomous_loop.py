@@ -60,6 +60,15 @@ class NonImprovingEvaluator(FakeEvaluator):
                     "baseline_delta": 0.001,
                     "parent_delta": 0.001,
                     "previous_best_delta": 0.0,
+                    "trust": result.trust.model_copy(
+                        update={
+                            "seed_mean": (
+                                0.601
+                                if result.trust.stability.value == "confirmed"
+                                else None
+                            )
+                        }
+                    ),
                 }
             )
         return result
@@ -151,7 +160,9 @@ def test_outer_loop_uses_memory_and_counts_distinct_terminal_iterations(
     harness.config.max_experiments = 10
     harness.planner = planner
     harness.evaluator = NonImprovingEvaluator(
-        harness.config.metric_names, harness.config.primary_metric_name
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
     )
     harness.bootstrap(baseline_evaluation)
 

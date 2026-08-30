@@ -282,7 +282,7 @@ def test_runner_exception_is_retried_as_infrastructure_failure(
 
     state = asyncio.run(harness.run_one_experiment())
 
-    assert len(runner.requests) == 4
+    assert len(runner.requests) == 6
     assert runner.requests[0].seed == runner.requests[1].seed
     assert runner.requests[0].patch_commit_sha == runner.requests[1].patch_commit_sha
     assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED

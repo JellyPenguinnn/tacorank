@@ -231,6 +231,13 @@ class RunConfig(StrictModel):
             raise ValueError("command_ids must be non-empty and unique")
         if not self.seed_schedule:
             raise ValueError("seed_schedule must not be empty")
+        if len(self.seed_schedule) != len(set(self.seed_schedule)):
+            raise ValueError("seed_schedule must contain distinct seeds")
+        if len(self.seed_schedule) < self.max_confirmation_attempts + 1:
+            raise ValueError(
+                "seed_schedule must contain one initial seed plus every "
+                "confirmation seed"
+            )
         _validate_runtime_mapping(self.allowed_runtime_adjustments)
         if any(
             not isinstance(name, str) or not name.strip() or seconds <= 0
