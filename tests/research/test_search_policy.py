@@ -722,7 +722,11 @@ def test_near_best_exploratory_parent_continues_depth_first(planner_context):
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.parent.experiment_id == "exp_0003"
     assert choice.family == "duration_bias"
-    assert choice.method_card_id == "duration_bias_censored_watch_time"
+    # The parent already spent duration_bias_censored_watch_time, so the
+    # same-family refinement picks the family's other card. Before the family
+    # had a second card this route had nothing to offer and the search had to
+    # leave the direction after a single attempt.
+    assert choice.method_card_id == "duration_bias_quantile_deconfounded"
 
 
 def test_meaningful_no_gain_backtracks_to_highest_scoring_experimental_path(

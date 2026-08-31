@@ -41,8 +41,8 @@ before backtracking, rather than probing every research family from baseline.
     "objective": ["objective_pairwise_bpr", "objective_listwise_user_softmax"],
     "temporal_history": ["temporal_history_compact"],
     "multitask": ["multitask_single_auxiliary"],
-    "duration_bias": ["duration_bias_censored_watch_time"],
-    "features": ["temporal_drift_past_only"],
+    "duration_bias": ["duration_bias_quantile_deconfounded", "duration_bias_censored_watch_time"],
+    "features": ["features_list_context_relative", "temporal_drift_past_only"],
     "model": ["model_compact_ranker"],
     "ensemble": ["ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]
