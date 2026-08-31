@@ -101,6 +101,9 @@ METHOD_QUERIES = {
     "sampling_hard_negative_pairs": (
         "hard negative sampling pairwise recommender implicit feedback"
     ),
+    "ensemble_causal_rolling_residual_blend": (
+        "causal rolling feedback learning to rank residual stacking recommender ensemble"
+    ),
     "ensemble_diverse_residual_candidate": (
         "rank ensemble diverse recommender systems score fusion"
     ),
@@ -224,6 +227,17 @@ METHOD_RELEVANCE_GROUPS = {
         ("recommend",),
         ("hard negative", "negative sampling", "false negative"),
         ("pairwise", "implicit feedback", "ranking"),
+    ),
+    "ensemble_causal_rolling_residual_blend": (
+        ("recommend", "ranking"),
+        ("causal", "rolling", "sequential", "temporal", "history"),
+        (
+            "ensemble",
+            "residual",
+            "stacking",
+            "rank fusion",
+            "model combination",
+        ),
     ),
     "ensemble_diverse_residual_candidate": (
         ("recommend", "ranking"),

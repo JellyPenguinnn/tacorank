@@ -4,6 +4,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 type Json = Record<string, unknown>;
 type Event = { event_id?: string; seq?: number; timestamp?: string; event_type?: string; payload?: Json };
+type TokenUsage = {
+  provider_tokens: number; estimated_tokens: number; unmeasured_tokens: number; total_reported_tokens: number;
+};
 type Run = {
   run_id: string; source: 'ledger' | 'launch'; status: string; phase: string; is_live: boolean; launch_error: string | null;
   can_stop: boolean; stop_requested_at: string | null;
@@ -14,6 +17,7 @@ type Run = {
   current_experiment_id: string | null; current_attempt: number | null; current_fidelity: string | null;
   stage_started_at: string | null; configured_timeout_seconds: number | null; estimated_deadline: string | null;
   last_event_id: string | null; last_event_type: string | null; last_event_at: string | null;
+  token_usage: TokenUsage;
 };
 type Iteration = {
   experiment_id: string; plan?: Json; contexts?: Json[]; lessons?: Json[]; implementation?: Json; gate_a?: Json;
@@ -27,6 +31,7 @@ const object = (value: unknown): Json => value && typeof value === 'object' && !
 const text = (value: unknown, fallback = '—') => typeof value === 'string' && value ? value : fallback;
 const humanize = (value: string) => value.replaceAll('_', ' ').replaceAll('.', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 const formatScore = (value: number | null) => value === null ? '—' : value.toFixed(6);
+const formatCount = (value: number) => value.toLocaleString();
 const formatTime = (value?: string | null) => value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'No events';
 const formatDuration = (value: number | null) => {
   if (value === null || !Number.isFinite(value)) return '—';
@@ -250,7 +255,7 @@ export default function Home() {
             {PROGRESS_STEPS.map((step, index) => <div key={step} className={`progress-step ${index < activeProgress ? 'complete' : index === activeProgress ? current.status === 'interrupted' || current.phase === 'recovery' ? 'recovery' : 'active' : ''}`}><i>{index < activeProgress ? '✓' : index + 1}</i><span>{step}</span></div>)}
           </div></>}
         </section>
-        <section className="metric-grid dashboard-metrics"><article className="metric-card cyan"><span>Iterations</span><strong>{current.experiments_proposed}</strong><small>planner proposals</small></article><article className="metric-card pink"><span>Baseline</span><strong>{formatScore(current.baseline_primary_score)}</strong><small>protected FM</small></article><article className="metric-card cyan"><span>Memory</span><strong>{memory.lessons}</strong><small>{memory.contexts} planner contexts</small></article><article className="metric-card neutral"><span>Final selection</span><strong className="text-metric">{current.final_experiment_id ?? 'Pending'}</strong><small>{current.stop_reason_code ?? 'stop rule has not fired'}</small></article></section>
+        <section className="metric-grid dashboard-metrics"><article className="metric-card cyan"><span>Iterations</span><strong>{current.experiments_proposed}</strong><small>planner proposals</small></article><article className="metric-card pink"><span>Baseline</span><strong>{formatScore(current.baseline_primary_score)}</strong><small>protected FM</small></article><article className="metric-card cyan"><span>Memory</span><strong>{memory.lessons}</strong><small>{memory.contexts} planner contexts</small></article><article className="metric-card neutral"><span>Tokens used</span><strong>{formatCount(current.token_usage.total_reported_tokens)}</strong><small>{formatCount(current.token_usage.provider_tokens)} provider · {formatCount(current.token_usage.estimated_tokens)} estimated{current.token_usage.unmeasured_tokens > 0 ? ` · ${formatCount(current.token_usage.unmeasured_tokens)} unmeasured` : ''}</small></article><article className="metric-card neutral"><span>Final selection</span><strong className="text-metric">{current.final_experiment_id ?? 'Pending'}</strong><small>{current.stop_reason_code ?? 'stop rule has not fired'}</small></article></section>
         <section className="section-heading"><div><p className="eyebrow">Complete research record</p><h2>All iterations</h2></div><span>{selectedDetail?.iterations.length ?? 0} total</span></section>
         <section className="iteration-list">
           {selectedDetail?.iterations.map((iteration, index) => {

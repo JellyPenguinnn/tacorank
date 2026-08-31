@@ -17,6 +17,19 @@ export type LedgerEvent = {
   resource_delta?: JsonRecord;
 };
 
+export type TokenUsage = {
+  provider_input_tokens: number;
+  provider_output_tokens: number;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  unmeasured_input_tokens: number;
+  unmeasured_output_tokens: number;
+  provider_tokens: number;
+  estimated_tokens: number;
+  unmeasured_tokens: number;
+  total_reported_tokens: number;
+};
+
 export type RunSummary = {
   run_id: string;
   source: 'ledger' | 'launch';
@@ -45,6 +58,7 @@ export type RunSummary = {
   last_event_id: string | null;
   last_event_type: string | null;
   last_event_at: string | null;
+  token_usage: TokenUsage;
 };
 
 export type LaunchRecord = {
@@ -83,6 +97,51 @@ function text(value: unknown): string | null {
 
 function number(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function nonnegativeInteger(value: unknown): number {
+  const parsed = number(value);
+  return parsed === null ? 0 : Math.max(0, Math.trunc(parsed));
+}
+
+function emptyTokenUsage(): TokenUsage {
+  return {
+    provider_input_tokens: 0,
+    provider_output_tokens: 0,
+    estimated_input_tokens: 0,
+    estimated_output_tokens: 0,
+    unmeasured_input_tokens: 0,
+    unmeasured_output_tokens: 0,
+    provider_tokens: 0,
+    estimated_tokens: 0,
+    unmeasured_tokens: 0,
+    total_reported_tokens: 0,
+  };
+}
+
+function tokenUsage(events: LedgerEvent[]): TokenUsage {
+  const usage = emptyTokenUsage();
+  for (const event of events) {
+    const delta = record(event.resource_delta);
+    const input = nonnegativeInteger(delta.llm_input_tokens);
+    const output = nonnegativeInteger(delta.llm_output_tokens);
+    const measurement = text(delta.token_measurement) ?? 'none';
+    if (measurement === 'provider') {
+      usage.provider_input_tokens += input;
+      usage.provider_output_tokens += output;
+    } else if (measurement === 'estimated') {
+      usage.estimated_input_tokens += input;
+      usage.estimated_output_tokens += output;
+    } else {
+      usage.unmeasured_input_tokens += input;
+      usage.unmeasured_output_tokens += output;
+    }
+  }
+  usage.provider_tokens = usage.provider_input_tokens + usage.provider_output_tokens;
+  usage.estimated_tokens = usage.estimated_input_tokens + usage.estimated_output_tokens;
+  usage.unmeasured_tokens = usage.unmeasured_input_tokens + usage.unmeasured_output_tokens;
+  usage.total_reported_tokens = usage.provider_tokens + usage.estimated_tokens + usage.unmeasured_tokens;
+  return usage;
 }
 
 function nested(payload: JsonRecord, name: string): JsonRecord {
@@ -319,6 +378,7 @@ async function summarizeLaunch(item: LaunchRecord, lockedPid: number | null): Pr
     last_event_id: null,
     last_event_type: null,
     last_event_at: null,
+    token_usage: emptyTokenUsage(),
   };
 }
 
@@ -465,6 +525,7 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
     last_event_id: lastEvent?.event_id ?? null,
     last_event_type: lastEvent?.event_type ?? null,
     last_event_at: lastEvent?.timestamp ?? null,
+    token_usage: tokenUsage(events),
   };
 }
 

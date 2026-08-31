@@ -60,6 +60,7 @@ DEFAULT_METHOD_ORDER = {
         "sampling_hard_negative_pairs",
     ),
     "ensemble": (
+        "ensemble_causal_rolling_residual_blend",
         "ensemble_parallel_round_synthesis",
         "ensemble_diverse_residual_candidate",
         "ensemble_confirmed_members",

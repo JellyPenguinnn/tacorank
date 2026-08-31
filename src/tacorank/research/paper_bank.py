@@ -196,6 +196,15 @@ METHOD_BANK_TOPICS = {
         "debiasing",
         "training_data",
     ),
+    "ensemble_causal_rolling_residual_blend": (
+        "ensemble",
+        "residual",
+        "temporal_drift",
+        "sequential",
+        "user_modeling",
+        "ranking",
+        "evaluation",
+    ),
     "ensemble_diverse_residual_candidate": (
         "ensemble",
         "diversity",

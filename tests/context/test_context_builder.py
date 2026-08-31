@@ -45,7 +45,7 @@ def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_e
     )
     assert first.refinement_frontier_ids == []
     assert first.ensemble_candidate_ids == []
-    assert len(first.method_cards) == 26
+    assert len(first.method_cards) == 27
     assert any(
         card.method_id == "multitask_watch_time_auxiliary"
         for card in first.method_cards

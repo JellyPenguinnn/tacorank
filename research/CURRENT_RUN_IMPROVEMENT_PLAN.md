@@ -58,7 +58,7 @@ that parent/family/method retires the mechanism.
     ],
     "model": ["model_compact_ranker", "model_field_aware_ranker"],
     "sampling": ["sampling_deterministic_coverage", "sampling_hard_negative_pairs"],
-    "ensemble": ["ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
+    "ensemble": ["ensemble_causal_rolling_residual_blend", "ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]
   }
 }
@@ -403,7 +403,56 @@ A standard-log gain that reverses on random exposure is evidence of possible
 policy overfitting, not automatic proof that the model is worse. Investigate
 the population and propensity differences before changing training.
 
-### Direction 8 — ensemble only confirmed complements
+### Direction 8 — causal rolling-feedback residual blend
+
+The supplied rolling-blend notes point to one integrated, validation-only
+research direction: use a strict causal history contract to produce a diverse
+compact learning-to-rank base, then correct its within-user residual ordering
+with frozen-history and sequence-aware members. This combines the strongest
+parts of the three notes without treating their validation result as a test
+claim.
+
+**Mechanism:** construct user, user-video, user-author, session, item, time-gap,
+and engagement histories from rows strictly earlier than the scored row. Apply
+one deterministic same-timestamp batch policy, with no self-outcome or future
+outcome in any feature. Train a small diverse stage-one set—multiple-seed
+LambdaRank, rank_xendcg, and CatBoost YetiRank with user query groups—then fit
+stage-two corrections from frozen-history LightGBM, rank2, and a compact
+DIN-style positive/negative sequence plus time-context member. For each member,
+compute the exact per-user sample z-score with `ddof=1` and use the one frozen
+sparse recipe:
+
+```text
+Z(lab_base) - 0.40*Z(frozen_lgb) - 0.10*Z(rank2) + 0.15*Z(DIN50)
+```
+
+The negative coefficients are residual correction vectors; they do not invert
+labels. Keep the stage-one member set, history cutoff, z-score definition,
+weights, seed policy, and fallback behavior fixed for the experiment. Do not
+coordinate-search weights separately on each validation slice.
+
+**Evaluation contract:** first use the preregistered inner temporal arm, then
+run the frozen public-validation recipe. The primary decision remains the
+contract mean of GAUC and nDCG@5. Require a trusted full-fidelity gain greater
+than `epsilon`, meaningful within-user rank movement, and no concentrated gain
+that disappears on later temporal slices. A later temporal arm or serving-mode
+check is evidence about transfer, not permission to tune on test labels.
+
+**Do not use when:** the serving contract does not explicitly declare that
+earlier scored-row feedback is available, chronological/batch ordering cannot
+be reconstructed, any component is fitted in-sample or with future outcomes,
+or the only positive result comes from validation-selected weights. If rolling
+feedback is not authorized, reduce the proposal to a train-window-only causal
+history control and record it as a different method rather than silently using
+online outcomes.
+
+**Falsifier:** leakage or row-order ambiguity, invalid per-user normalization,
+no trusted full-fidelity gain beyond noise, regression on the later temporal
+arm, or a gain concentrated in only a small set of date slices. The notes'
+validation-only score and one-shot test score are directional evidence for this
+hypothesis, not convergence or official test evidence.
+
+### Direction 9 — ensemble only confirmed complements
 
 Consider rank averaging only after at least two full, trusted, reproducible
 candidates improve through different mechanisms and have complementary errors.
@@ -425,6 +474,8 @@ the best member beyond noise or if one member is suspicious/unstable.
 | Duration correction | Aggregate gain only in long videos | Treat as possible duration bias; do not promote until cohort-safe. |
 | Temporal-drift feature | Clean cheap gain | Keep it as a component, then consider model interactions. |
 | Model swap | No matched-budget gain | Stop architecture search; do not sweep capacity. |
+| Causal rolling-feedback blend | Clean gain on the inner and later temporal arms | Freeze the recipe, then test only one serving-contract-safe refinement. |
+| Causal rolling-feedback blend | Gain is slice-concentrated or absent out of time | Reject the blend and return to the strongest trusted non-ensemble branch. |
 | Any two confirmed candidates | Complementary residuals | Test a small rank-average ensemble. |
 
 ## 6. Planner proposal checklist
@@ -472,6 +523,12 @@ After each full evaluation, re-enter the mandatory decision order in section 2.
 - Wang et al., [Deep & Cross Network for Ad Click Predictions](https://arxiv.org/abs/1708.05123).
 - Guo et al., [DeepFM](https://arxiv.org/abs/1703.04247).
 - Lian et al., [xDeepFM](https://arxiv.org/abs/1803.05170).
+
+The integrated causal rolling-feedback direction is grounded in the local
+research notes `ROLLING_BLEND_062_PLAYBOOK.md`, `EXPERIMENT_SUMMARY.md`, and
+`PLAYBOOK.md`. Their reported validation and one-shot test figures are treated
+as non-authoritative hypothesis evidence; no hidden/test labels are used for
+planning or tuning.
 
 Local benchmark facts, metric definitions, baseline variance, oracle headroom,
 and tested dead ends come from `docs/KUAIRAND_STARTER_KIT.md`,

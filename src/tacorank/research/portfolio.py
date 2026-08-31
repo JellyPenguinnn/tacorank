@@ -655,6 +655,87 @@ def default_portfolio() -> ExperimentPortfolio:
                 ),
             ),
             MethodCard(
+                method_id="ensemble_causal_rolling_residual_blend",
+                family="ensemble",
+                summary=(
+                    "Blend strict causal rolling feedback with diverse compact "
+                    "rankers and fixed per-user residual corrections."
+                ),
+                tags=(
+                    "ensemble",
+                    "rolling_feedback",
+                    "causal_history",
+                    "residual",
+                    "out_of_time",
+                ),
+                cost_tier="high",
+                mechanism=(
+                    "Build one strict earlier-row feature mode with deterministic "
+                    "same-timestamp batching, train compact LambdaRank, "
+                    "rank_xendcg, and CatBoost YetiRank members, then apply "
+                    "frozen-history LightGBM, rank2, and DIN-style sequence/time "
+                    "residual corrections. Sample-z-normalize each member per "
+                    "user and use only the fixed sparse blend "
+                    "Z(lab_base) - 0.40*Z(frozen_lgb) - 0.10*Z(rank2) "
+                    "+ 0.15*Z(DIN50); do not tune weights on public validation."
+                ),
+                prerequisites=(
+                    "baseline_parity",
+                    "strict_temporal_cutoff",
+                    "standard_public_evaluation_complete",
+                    "rolling_feedback_mode_declared",
+                ),
+                allowed_data=(
+                    "train_interactions",
+                    "user_id",
+                    "video_id",
+                    "author_id",
+                    "tab",
+                    "date",
+                    "hourmin",
+                    "duration_ms",
+                    "long_view",
+                    "is_click",
+                    "is_like",
+                    "is_follow",
+                    "is_comment",
+                    "is_forward",
+                    "is_hate",
+                    "play_time_ms",
+                    "profile_stay_time",
+                    "comment_stay_time",
+                    "is_profile_enter",
+                    "verified_predictions",
+                ),
+                expected_effect=(
+                    "Capture causal preference and temporal drift while reducing "
+                    "ranker variance through complementary residual ordering."
+                ),
+                falsifier=(
+                    "Any self/future leakage, invalid residual fit, no trusted "
+                    "full-fidelity gain beyond epsilon, or gain that disappears "
+                    "on the later temporal arm or slice checks."
+                ),
+                prohibition_conditions=(
+                    "rolling_feedback_mode_undeclared",
+                    "future_or_self_outcome_leakage",
+                    "adaptive_validation_weight_search",
+                    "test_label_or_hidden_feedback",
+                ),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/model.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
+                sources=(
+                    "ROLLING_BLEND_062_PLAYBOOK.md",
+                    "EXPERIMENT_SUMMARY.md",
+                    "PLAYBOOK.md",
+                ),
+            ),
+            MethodCard(
                 method_id="ensemble_parallel_round_synthesis",
                 family="ensemble",
                 summary="Align all independently accepted parallel-round members.",
