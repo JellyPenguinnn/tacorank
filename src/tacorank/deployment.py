@@ -243,7 +243,11 @@ def setup_live_deployment(
         "docker_host": docker_host,
         "docker_image": image,
         "docker_image_environment_sha256": image_environment_sha256,
-        "docker_cpu_count": 2.0,
+        # LightGBM training dominates iteration wall time; 2 CPUs on a
+        # multi-core host made every fidelity run a ~7 minute retrain.
+        # Determinism holds because the quota (and thus the thread count)
+        # is frozen per deployment and every run uses the same value.
+        "docker_cpu_count": 8.0,
         "docker_tmpfs_size_mb": 256,
         "output_quota_max_bytes": 2 * 1024 * 1024 * 1024,
         "data_manifest_path": str(manifest_path),
