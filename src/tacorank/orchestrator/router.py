@@ -1257,7 +1257,7 @@ class Harness:
                     ),
                     data_manifest_sha256=self.config.data_manifest_sha256,
                     timeout_seconds=self.config.timeout_profiles.get("standard", 600),
-                    memory_limit_mb=4096,
+                    memory_limit_mb=10240,
                     gpu_memory_limit_mb=0,
                     network_enabled=False,
                     runtime_settings=runtime_settings,
@@ -2282,7 +2282,7 @@ class Harness:
             seed=seed,
             data_manifest_sha256=self.config.data_manifest_sha256,
             timeout_seconds=self.config.timeout_profiles.get("standard", 600),
-            memory_limit_mb=4096,
+            memory_limit_mb=10240,
             gpu_memory_limit_mb=0,
             network_enabled=False,
         )
