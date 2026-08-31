@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
+from pathlib import Path
 from urllib.error import HTTPError
 
 import pytest
@@ -13,8 +15,10 @@ from tacorank.providers import deepseek as deepseek_module
 from tacorank.providers.deepseek import DeepSeekResearchProvider
 from tacorank.providers.research_provider import ProviderError, ProviderRequest
 from tacorank.research.duplicate_detection import compute_duplicate_key
+from tacorank.research.literature import OpenAlexLiteratureSkill
+from tacorank.research.paper_bank import PaperBankLiteratureSkill
 from tacorank.research.search_policy import SearchPolicy
-from tacorank.schemas import TokenMeasurement
+from tacorank.schemas import LiteratureEvidence, ResearchProposal, TokenMeasurement
 
 from .conftest import make_summary
 
@@ -62,6 +66,16 @@ def response(value, *, finish_reason="stop", prompt_tokens=101, completion_token
     }
 
 
+def empty_response(*, prompt_tokens=101, completion_tokens=0):
+    value = response(
+        {},
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+    value["choices"][0]["message"]["content"] = ""
+    return value
+
+
 def output_factory(action, spec, reason_code, reason, supporting_event_ids):
     return {
         "action": action,
@@ -70,6 +84,22 @@ def output_factory(action, spec, reason_code, reason, supporting_event_ids):
         "reason": reason,
         "supporting_event_ids": supporting_event_ids,
     }
+
+
+def literature_evidence():
+    return LiteratureEvidence(
+        evidence_id="lit_paper_001",
+        paper_id="W1234567890",
+        title="Bayesian Personalized Ranking from Implicit Feedback",
+        abstract="Pairwise ranking optimizes relative preference ordering.",
+        year=2009,
+        authors=["Steffen Rendle"],
+        venue="UAI",
+        citation_count=1000,
+        influential_citation_count=100,
+        url="https://openalex.org/W1234567890",
+        query="Bayesian personalized ranking recommender systems",
+    )
 
 
 def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_context):
@@ -82,6 +112,27 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     planner_context.baseline.diagnostic_metrics = {
         "user_rankable_fraction": 1.0,
     }
+    prior = make_summary(
+        experiment_id="exp_0001",
+        family="temporal_history",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        trust_verdict="negative",
+        parent_delta=-0.00007,
+        prediction_change=0.0126,
+    )
+    prior.failure_hypotheses = [
+        "Concentrated movement: a small user cohort carries most score movement."
+    ]
+    prior.diagnostic_best_slice = "popularity_rank.cold"
+    prior.diagnostic_worst_slice = "popularity_rank.hot"
+    prior.diagnostic_metrics = {
+        "gain_concentration_top10pct": 1.0,
+        "best_slice_delta": 0.00025,
+        "worst_slice_delta": -0.00021,
+    }
+    planner_context.family_history = [prior]
     planner_context.active_lessons = [
         {
             "lesson_id": "lesson_001",
@@ -116,7 +167,7 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
 
     assert result["run_id"] == planner_context.run_id
     assert result["context_id"] == planner_context.context_id
-    assert result["experiment_id"] == "exp_0001"
+    assert result["experiment_id"] == "exp_0002"
     assert result["parent_experiment_id"] == choice.parent.experiment_id
     assert result["parent_commit_sha"] == choice.parent.parent_commit_sha
     assert result["family"] == choice.family
@@ -145,6 +196,11 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
         "train_rows": 4,
         "score_rows": 2,
     }
+    prior_prompt = prompt_document["context"]["family_history"][0]
+    assert prior_prompt["failure_hypotheses"] == prior.failure_hypotheses
+    assert prior_prompt["diagnostic_best_slice"] == "popularity_rank.cold"
+    assert prior_prompt["diagnostic_worst_slice"] == "popularity_rank.hot"
+    assert prior_prompt["diagnostic_metrics"]["gain_concentration_top10pct"] == 1.0
     assert prompt_document["context"]["active_lessons"] == [
         {
             "lesson_id": "lesson_001",
@@ -160,6 +216,7 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     ]
     assert "source_commit_shas" not in serialized_prompt
     assert "read-only aggregate" in payload["messages"][0]["content"]
+    assert "do not merely increase residual magnitude" in payload["messages"][0]["content"]
     assert all(
         "implementation_targets" not in card
         for card in prompt_document["context"]["method_cards"]
@@ -180,6 +237,75 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert provider.resource_delta.token_measurement == TokenMeasurement.PROVIDER
 
 
+def test_deepseek_provider_grounds_plan_in_retrieved_literature(planner_context):
+    calls = []
+    evidence = literature_evidence()
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, timeout
+        calls.append(payload)
+        return response(
+            candidate(
+                literature_evidence_ids=[
+                    evidence.evidence_id,
+                    "lit_invented_id",
+                ]
+            )
+        )
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(
+            ProviderRequest(
+                planner_context,
+                choice,
+                literature_evidence=(evidence,),
+            )
+        )
+    )
+
+    assert result["literature_evidence"] == [evidence.model_dump(mode="json")]
+    ResearchProposal.model_validate(result)
+    prompt = json.loads(calls[0]["messages"][1]["content"])
+    assert prompt["literature_research"]["required"] is True
+    assert prompt["literature_research"]["papers"] == [
+        evidence.model_dump(mode="json")
+    ]
+    assert "untrusted scientific evidence" in calls[0]["messages"][0]["content"]
+    assert "lit_invented_id" not in json.dumps(result)
+
+
+def test_deepseek_provider_exposes_bank_papers_as_advisory(planner_context):
+    calls = []
+    evidence = literature_evidence().model_copy(
+        update={"provider": "paper_bank", "evidence_id": "bank_reference_001"}
+    )
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, timeout
+        calls.append(payload)
+        return response(candidate(literature_evidence_ids=[]))
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(
+            ProviderRequest(
+                planner_context,
+                choice,
+                literature_evidence=(evidence,),
+                literature_required=False,
+            )
+        )
+    )
+
+    prompt = json.loads(calls[0]["messages"][1]["content"])
+    assert prompt["literature_research"]["required"] is False
+    assert prompt["literature_research"]["advisory"] is True
+    assert result["literature_evidence"] == []
+
+
 def test_deepseek_provider_preserves_policy_owned_ensemble_components(
     planner_context,
 ):
@@ -193,8 +319,8 @@ def test_deepseek_provider_preserves_policy_owned_ensemble_components(
         parent_eligible=False,
         trust_verdict="negative",
         stability="not_applicable",
-        parent_delta=-0.004,
-        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
+        parent_delta=-0.001,
+        metric_deltas={"GAUC": -0.0008, "nDCG@5": -0.0012},
         prediction_change=0.8,
         prediction_spearman_vs_parent=0.6,
         method_card_ids=["temporal_history_compact"],
@@ -318,6 +444,42 @@ def test_research_planner_repairs_code_specific_narrative(planner_context):
     assert "Remove repository paths" in repair_prompt["repair"]["instruction"]
 
 
+def test_research_planner_retries_empty_repair_completion(planner_context):
+    responses = [
+        response(candidate(change_summary="Edit solution/candidate.py.")),
+        empty_response(prompt_tokens=90),
+        response(
+            candidate(
+                change_summary=(
+                    "Compare positive/negative preference ordering for user/item "
+                    "ranking."
+                )
+            )
+        ),
+    ]
+    requests = []
+
+    def transport(url, headers, payload, timeout):
+        requests.append(payload)
+        return responses.pop(0)
+
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    planner = ResearchPlanner(
+        provider,
+        output_factory=output_factory,
+        input_token_limit=2_000,
+        output_token_limit=1_000,
+    )
+
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result["action"] == "propose"
+    assert len(requests) == 3
+    assert requests[1]["thinking"] == {"type": "enabled"}
+    assert requests[2]["thinking"] == {"type": "disabled"}
+    assert "unusable" in requests[2]["messages"][0]["content"]
+
+
 def test_deepseek_provider_rejects_truncated_completion(planner_context):
     calls = []
 
@@ -368,6 +530,38 @@ def test_cli_selects_deepseek_without_putting_secret_in_config(config, monkeypat
     assert isinstance(planner, ResearchPlanner)
     assert isinstance(planner.provider, DeepSeekResearchProvider)
     assert "secret-key" not in json.dumps(configured.canonical_dict(), sort_keys=True)
+
+
+def test_cli_enables_keyless_openalex_skill(config, monkeypatch):
+    configured = config.model_copy(
+        update={"research_provider": "deepseek", "literature_research_enabled": True}
+    )
+    monkeypatch.setenv(configured.deepseek_api_key_env, "secret-key")
+    planner = _planner_for(configured)
+
+    assert isinstance(planner.literature_skill, OpenAlexLiteratureSkill)
+    serialized_config = json.dumps(configured.canonical_dict(), sort_keys=True)
+    assert "secret-key" not in serialized_config
+
+
+def test_cli_enables_hash_bound_advisory_paper_bank(config, monkeypatch):
+    source = Path(__file__).parents[2] / "research" / "paper_bank.json"
+    target = config.repository_root / "research" / "paper_bank.json"
+    target.write_bytes(source.read_bytes())
+    configured = config.model_copy(
+        update={
+            "research_provider": "deepseek",
+            "literature_research_enabled": True,
+            "literature_provider": "paper_bank",
+            "literature_bank_sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+        }
+    )
+    monkeypatch.setenv(configured.deepseek_api_key_env, "secret-key")
+
+    planner = _planner_for(configured)
+
+    assert isinstance(planner.literature_skill, PaperBankLiteratureSkill)
+    assert planner.literature_skill.requires_citation is False
 
 
 def test_cli_fails_closed_when_deepseek_key_is_missing(config, monkeypatch):

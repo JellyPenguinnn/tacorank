@@ -210,6 +210,28 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         last_context = _events_of(events, EventType.CONTEXT_CREATED)
         _require(bool(last_context), "planner recommendation requires context")
         _require(last_context[-1].payload.context.role == "planner", "latest context must be planner")
+    elif event_type == EventType.PLANNING_FAILED:
+        _require(
+            state.status in (RunStatus.READY, RunStatus.RUNNING)
+            and state.phase == "planner_context",
+            "planning failure requires an active planner checkpoint",
+        )
+        last_context = _events_of(events, EventType.CONTEXT_CREATED)
+        _require(bool(last_context), "planning failure requires context")
+        context_event = last_context[-1]
+        _require(
+            context_event.payload.context.role == "planner"
+            and context_event.payload.context.context_id == payload.result.context_id,
+            "planning failure context mismatch",
+        )
+        _require(
+            events[-1].event_id == context_event.event_id,
+            "planning failure must immediately follow its planner context",
+        )
+        _require(
+            state.active_experiment_id is None,
+            "planning failure cannot be attached to an active experiment",
+        )
     elif event_type == EventType.EXPERIMENT_PROPOSED:
         spec = payload.spec
         _require(state.status in (RunStatus.READY, RunStatus.RUNNING), "run is not accepting proposals")

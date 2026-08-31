@@ -27,6 +27,7 @@ from .coding import (
     TRAE_STATELESS_DOCKER_MARKER,
     hash_trae_runtime_package,
 )
+from .config import PRODUCTION_TARGET_INTERFACE_EXCERPTS
 from .docker_host import normalize_local_docker_host
 from .evaluation.proxy import split_validation_indices
 
@@ -62,6 +63,16 @@ SIDE_FEATURE_FILES = (
 TRAE_ONLY_DATA_BOUNDARY_SHA256 = hashlib.sha256(
     b"tacorank-trae-only-no-dataset-v1"
 ).hexdigest()
+RUNTIME_REQUIRED_IMPORTS = (
+    "benchmarks.kuairand_pure.pipeline",
+    "certifi",
+    "numpy",
+    "pandas",
+    "pydantic",
+    "tacorank",
+    "yaml",
+)
+RUNTIME_SOURCE_IMPORT_ROOTS = ("solution",)
 
 
 class DeploymentError(RuntimeError):
@@ -174,6 +185,7 @@ def setup_trae_deployment(
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
         "data_boundary_sha256": TRAE_ONLY_DATA_BOUNDARY_SHA256,
+        "allowed_import_roots": list(assets["allowed_import_roots"]),
         "trae": _trae_payload(
             runtime=runtime,
             runtime_identity=assets["runtime_identity"],
@@ -215,6 +227,27 @@ def setup_live_deployment(
     docker_host = _discover_docker_host(docker, root)
     _require_python312(python)
     _require_clean_tracked_checkout(root)
+    paper_bank_path = root / "research" / "paper_bank.json"
+    if paper_bank_path.is_symlink() or not paper_bank_path.is_file():
+        raise DeploymentError(
+            "research/paper_bank.json must be a regular non-symlinked file"
+        )
+    try:
+        _run_output(
+            (
+                "git",
+                "ls-files",
+                "--error-unmatch",
+                "research/paper_bank.json",
+            ),
+            cwd=root,
+            label="Paper bank tracking verification",
+        )
+    except DeploymentError as exc:
+        raise DeploymentError(
+            "research/paper_bank.json must be tracked by the source commit"
+        ) from exc
+    paper_bank_sha256 = _sha256_file(paper_bank_path)
     _run(
         ("git", "submodule", "update", "--init", "--recursive"),
         cwd=root,
@@ -233,6 +266,7 @@ def setup_live_deployment(
     assets = _prepare_trae_runtime(root, runtime, python, docker)
     image = str(assets["image"])
     image_environment_sha256 = str(assets["image_environment_sha256"])
+    allowed_import_roots = list(assets["allowed_import_roots"])
     runtime_identity = assets["runtime_identity"]
     generated_data = _prepare_data(root, deployment, data)
 
@@ -407,7 +441,7 @@ def setup_live_deployment(
         "protected_columns": ["label"],
         "hidden_path_tokens": ["hidden_labels", "final_labels", "test_labels"],
         "future_column_patterns": ["(?:^|_)future(?:_|$)"],
-        "allowed_import_roots": None,
+        "allowed_import_roots": allowed_import_roots,
         "allowed_capability_imports": [],
         "allowed_dependency_changes": [],
     }
@@ -426,6 +460,8 @@ def setup_live_deployment(
         "evaluator_sha256": evaluator_hash,
         "baseline_commit_sha": baseline_commit,
         "max_experiments": 50,
+        "parallel_directions": 2,
+        "synthesize_parallel_improvements": True,
         "wall_time_limit_seconds": 21600,
         "convergence_epsilon": 0.002,
         "convergence_patience": 3,
@@ -543,10 +579,20 @@ def setup_live_deployment(
         "deepseek_model": DEEPSEEK_MODEL,
         "deepseek_base_url": DEEPSEEK_BASE_URL,
         "deepseek_api_key_env": "DEEPSEEK_API_KEY",
-        "deepseek_timeout_seconds": 120,
+        "deepseek_timeout_seconds": 300,
+        "research_planning_max_attempts": 2,
+        "research_planning_retry_backoff_seconds": 1.0,
         "deepseek_max_output_tokens": 8192,
         "deepseek_thinking_enabled": True,
         "deepseek_reasoning_effort": "high",
+        "literature_research_enabled": True,
+        "literature_provider": "paper_bank",
+        "literature_base_url": "https://api.openalex.org",
+        "literature_timeout_seconds": 20,
+        "literature_max_papers": 6,
+        "literature_min_citation_count": 5,
+        "literature_bank_path": "research/paper_bank.json",
+        "literature_bank_sha256": paper_bank_sha256,
     }
     _write_json_exclusive(run_path, run_payload)
     return {
@@ -571,7 +617,9 @@ def _prepare_trae_runtime(
     _patch_trae_cross_platform_docker_exec(runtime)
     _patch_trae_deepseek_reasoning(runtime)
     _patch_trae_docker_edit_tool(runtime)
-    image, image_environment_sha256 = _build_runtime_image(root, docker)
+    image, image_environment_sha256, allowed_import_roots = _build_runtime_image(
+        root, docker
+    )
     _install_trae_tools(runtime, docker, image, root)
     runtime_identity = _trae_identity(runtime)
     trae_yaml = runtime / "trae-agent.yaml"
@@ -580,6 +628,7 @@ def _prepare_trae_runtime(
     return {
         "image": image,
         "image_environment_sha256": image_environment_sha256,
+        "allowed_import_roots": allowed_import_roots,
         "runtime_identity": runtime_identity,
         "trae_yaml": trae_yaml,
     }
@@ -1574,7 +1623,9 @@ def _trae_identity(runtime: Path) -> Mapping[str, Path]:
     }
 
 
-def _build_runtime_image(root: Path, docker: Path) -> Tuple[str, str]:
+def _build_runtime_image(
+    root: Path, docker: Path
+) -> Tuple[str, str, Tuple[str, ...]]:
     commit = _git_text(root, ("rev-parse", "--short=12", "HEAD"))
     tag = "tacorank-runtime:" + commit
     platform = _run_output(
@@ -1629,7 +1680,76 @@ def _build_runtime_image(root: Path, docker: Path) -> Tuple[str, str]:
     payload = json.dumps(environment, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
-    return image_id, hashlib.sha256(payload).hexdigest()
+    allowed_import_roots = _runtime_image_import_roots(root, docker, image_id)
+    return image_id, hashlib.sha256(payload).hexdigest(), allowed_import_roots
+
+
+def _runtime_image_import_roots(
+    root: Path, docker: Path, image: str
+) -> Tuple[str, ...]:
+    """Verify core runtime imports and inventory exact top-level image modules."""
+
+    required = json.dumps(RUNTIME_REQUIRED_IMPORTS, separators=(",", ":"))
+    script = (
+        "import importlib,json,pkgutil,sys;"
+        "required=" + required + ";"
+        "[importlib.import_module(name) for name in required];"
+        "roots=set(sys.builtin_module_names);"
+        "roots.update(getattr(sys,'stdlib_module_names',()));"
+        "roots.update(item.name for item in pkgutil.iter_modules());"
+        "print(json.dumps(sorted(roots),separators=(',',':')))"
+    )
+    output = _run_output(
+        (
+            str(docker),
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--entrypoint",
+            "/usr/local/bin/python3",
+            image,
+            "-I",
+            "-c",
+            script,
+        ),
+        cwd=root,
+        label="Docker runtime import verification",
+    )
+    try:
+        discovered = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise DeploymentError("Docker runtime import inventory is malformed") from error
+    if (
+        not isinstance(discovered, list)
+        or not discovered
+        or len(discovered) > 10_000
+        or not all(
+            isinstance(value, str)
+            and len(value) <= 200
+            and "\x00" not in value
+            for value in discovered
+        )
+        or len(discovered) != len(set(discovered))
+    ):
+        raise DeploymentError("Docker runtime import inventory is malformed")
+    # ``pkgutil`` may report interpreter-internal filenames such as
+    # ``_sysconfigdata__linux_aarch64-linux-gnu``. They are loadable through
+    # importlib but cannot appear as an AST import root, so omit them from the
+    # Gate A allowlist instead of rejecting an otherwise valid runtime image.
+    roots = {value for value in discovered if value.isidentifier()}
+    roots.update(RUNTIME_SOURCE_IMPORT_ROOTS)
+    required_roots = {name.split(".", 1)[0] for name in RUNTIME_REQUIRED_IMPORTS}
+    if not required_roots.issubset(roots):
+        raise DeploymentError("Docker runtime import inventory is incomplete")
+    return tuple(sorted(roots))
 
 
 def _discover_docker_host(docker: Path, root: Path) -> str:

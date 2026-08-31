@@ -40,8 +40,8 @@ def test_clean_mild_diverse_regression_is_soft_ensemble_candidate(planner_contex
         parent_eligible=False,
         trust_verdict="negative",
         stability="not_applicable",
-        parent_delta=-0.004,
-        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
+        parent_delta=-0.001,
+        metric_deltas={"GAUC": -0.0008, "nDCG@5": -0.0012},
         prediction_change=0.8,
         prediction_spearman_vs_parent=0.6,
     )
@@ -53,6 +53,30 @@ def test_clean_mild_diverse_regression_is_soft_ensemble_candidate(planner_contex
     assert not eligibility.best_checkpoint_eligible
     assert not eligibility.refinement_eligible
     assert eligibility.ensemble_eligible
+
+
+def test_regression_beyond_one_epsilon_has_no_portfolio_followup(planner_context):
+    result = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        fidelity="proxy",
+        population="internal_proxy",
+        decision="prune",
+        parent_eligible=False,
+        trust_verdict="negative",
+        stability="not_applicable",
+        parent_delta=-0.004,
+        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
+        prediction_change=0.8,
+        prediction_spearman_vs_parent=0.6,
+    )
+
+    eligibility = classify_search_eligibility(result, planner_context)
+
+    assert eligibility.disposition == PruneDisposition.HARD
+    assert not eligibility.refinement_eligible
+    assert not eligibility.ensemble_eligible
+    assert "SEVERE_PRIMARY_REGRESSION" in eligibility.reasons
 
 
 def test_metric_tradeoff_allows_one_refinement(planner_context):

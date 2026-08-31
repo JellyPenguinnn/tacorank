@@ -286,6 +286,7 @@ def _self_test(uid: int, gid: int) -> int:
         "status=dict(line.split(':',1) for line in open('/proc/self/status') if ':' in line);"
         "assert int(status['CapEff'].strip(),16)==0;"
         "assert status['NoNewPrivs'].strip()=='1';"
+        "import certifi,numpy,pandas,pydantic,yaml;"
         "import tacorank.execution.solution_cli;"
         "import benchmarks.kuairand_pure.pipeline;"
         "s=os.statvfs('/artifacts');"

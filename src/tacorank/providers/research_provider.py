@@ -12,6 +12,10 @@ class ProviderRequest:
     policy_choice: Any
     input_token_limit: int | None = None
     output_token_limit: int | None = None
+    literature_evidence: tuple[Any, ...] = ()
+    # ``None`` preserves the historical behavior: retrieved evidence is
+    # mandatory. The curated paper bank explicitly sets this to ``False``.
+    literature_required: bool | None = None
 
 
 class ResearchProvider(Protocol):
@@ -24,6 +28,14 @@ class ResearchProvider(Protocol):
 
 class ProviderError(RuntimeError):
     pass
+
+
+class TransientProviderError(ProviderError):
+    """Provider failure that is safe to retry without changing the request."""
+
+
+class ProviderTimeoutError(TransientProviderError):
+    """Provider request exceeded its configured network timeout."""
 
 
 class MockResearchProvider:

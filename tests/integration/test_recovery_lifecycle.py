@@ -424,8 +424,8 @@ def test_trae_exception_is_recorded_and_stops_fail_closed(
     assert adapter_failures[0].payload.result.failure_stage == "coding"
     assert len(worker.repair_calls) == 1
     assert decisions[-1].action == RecoveryAction.ABANDON
-    assert state.status.value == "stopped"
-    assert replay(events).status.value == "stopped"
+    assert state.status.value == "failed"
+    assert replay(events).status.value == "failed"
 
 
 def test_transient_initial_coding_failure_retries_and_persists_redacted_tail(
@@ -502,6 +502,7 @@ def test_second_transient_initial_coding_failure_is_recorded_then_abandoned(
     assert state.experiments["exp_001"].status == ExperimentStatus.INVALID
     assert state.phase == "planning"
     assert state.status.value == "running"
+    assert state.active_experiment_id is None
 
 
 def test_permanent_initial_coding_failure_abandons_only_the_experiment(
@@ -524,6 +525,7 @@ def test_permanent_initial_coding_failure_abandons_only_the_experiment(
     assert state.experiments["exp_001"].status == ExperimentStatus.INVALID
     assert state.phase == "planning"
     assert state.status.value == "running"
+    assert state.active_experiment_id is None
 
 
 def test_real_recovery_survives_two_transient_failures_with_bounded_retries(

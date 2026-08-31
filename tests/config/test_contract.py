@@ -59,6 +59,67 @@ def test_deepseek_configuration_rejects_unsafe_values(config, field, value, matc
         RunConfig.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "field,value,match",
+    [
+        (
+            "literature_base_url",
+            "http://api.openalex.org",
+            "OpenAlex HTTPS origin",
+        ),
+        (
+            "literature_base_url",
+            "https://example.com",
+            "OpenAlex HTTPS origin",
+        ),
+        (
+            "literature_base_url",
+            "https://user:secret@api.openalex.org",
+            "credential-free",
+        ),
+    ],
+)
+def test_literature_configuration_rejects_unsafe_values(
+    config, field, value, match
+):
+    payload = config.model_dump(mode="python")
+    payload[field] = value
+
+    with pytest.raises(ValueError, match=match):
+        RunConfig.model_validate(payload)
+
+
+def test_enabled_paper_bank_requires_a_valid_hash(config):
+    payload = config.model_dump(mode="python")
+    payload.update(
+        literature_research_enabled=True,
+        literature_provider="paper_bank",
+        literature_bank_sha256=None,
+    )
+
+    with pytest.raises(ValueError, match="requires literature_bank_sha256"):
+        RunConfig.model_validate(payload)
+
+    payload["literature_bank_sha256"] = "not-a-hash"
+    with pytest.raises(ValueError, match="lowercase sha256"):
+        RunConfig.model_validate(payload)
+
+
+def test_enabled_paper_bank_accepts_hash_bound_configuration(config):
+    payload = config.model_dump(mode="python")
+    payload.update(
+        literature_research_enabled=True,
+        literature_provider="paper_bank",
+        literature_max_papers=6,
+        literature_bank_sha256="a" * 64,
+    )
+
+    validated = RunConfig.model_validate(payload)
+
+    assert validated.literature_provider == "paper_bank"
+    assert validated.literature_max_papers == 6
+
+
 def test_coding_token_limit_can_be_explicitly_unbounded(config):
     payload = config.model_dump(mode="python")
     payload["coding_token_limit"] = None

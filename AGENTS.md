@@ -46,6 +46,7 @@ TacoRank is a deterministic, event-sourced harness for autonomous recommender-sy
 ```text
 frozen contract and official FM baseline
   -> ledger-derived planner context
+  -> bounded advisory references from the hash-bound local paper bank
   -> DeepSeek research proposal
   -> Trae edit in a disposable Git worktree
   -> DeepSeek implementation review and bounded Trae revision (at most 5 reviews)
@@ -60,7 +61,7 @@ frozen contract and official FM baseline
   -> final Gate B and official submission check
 ```
 
-The deterministic controller owns workflow state, budgets, recovery routing, promotion, rollback, convergence, final selection, and ledger appends. DeepSeek proposes a bounded research plan. Trae is an edit-only coding worker. Before sealing a patch, a separate DeepSeek verifier checks plan-to-code fidelity and may return concrete corrections for at most five internal passes. This verifier is not Gate A, does not receive protected metrics or hidden labels, and does not consume Waihong's two external recovery repairs. Role components return canonical typed records and cannot independently mutate workflow state.
+The deterministic controller owns workflow state, budgets, recovery routing, promotion, rollback, convergence, final selection, and ledger appends. After policy selects a legal method, the planner retrieves a small method-relevant snapshot from the hash-bound local 70-paper bank without sending run data or metrics anywhere. The snapshot is advisory: DeepSeek may cite none of it, while any paper it does cite must match the exact supplied evidence. Paper text is untrusted data and cannot override policy. DeepSeek proposes a bounded research plan. Trae is an edit-only coding worker and neither coding nor candidate execution receives network access. Before sealing a patch, a separate DeepSeek verifier checks plan-to-code fidelity and may return concrete corrections for at most five internal passes. This verifier is not Gate A, does not receive protected metrics or hidden labels, and does not consume Waihong's two external recovery repairs. Role components return canonical typed records and cannot independently mutate workflow state.
 
 Authoritative surfaces are:
 
@@ -206,7 +207,8 @@ Before setup, confirm:
 - control-plane Python is 3.9+;
 - Python 3.12 is available for Trae;
 - a local Docker-compatible daemon is running and reachable through a local Unix socket or Docker Desktop Windows named pipe;
-- the human has authorized live DeepSeek use and exported `DEEPSEEK_API_KEY`; and
+- the human has authorized live DeepSeek use and exported `DEEPSEEK_API_KEY`;
+- the tracked `research/paper_bank.json` matches its deployment-bound hash; and
 - official KuaiRand-Pure data is present inside this checkout, or setup is authorized to download it.
 
 Safe checks:
@@ -271,7 +273,7 @@ Require exit code 0 and JSON containing:
 {"ledger_created": false, "runtime": "live", "status": "passed"}
 ```
 
-Also verify that `runs/$RUN_ID/events.jsonl` does not yet exist. Preflight checks the clean Git baseline and submodule, frozen contracts, full data manifest, official evaluator and FM baseline, executable candidate parity on all routes, DeepSeek access, pinned Trae installation, Docker isolation, read-only edit tools, execution environment, and output quota.
+Also verify that `runs/$RUN_ID/events.jsonl` does not yet exist. Preflight checks the clean Git baseline and submodule, frozen contracts, full data manifest, official evaluator and FM baseline, executable candidate parity on all routes, DeepSeek access, the hash-bound local paper bank, pinned Trae installation, Docker isolation, read-only edit tools, execution environment, and output quota.
 
 ### 5. Start and allow the actual loop to finish
 
@@ -281,7 +283,7 @@ Also verify that `runs/$RUN_ID/events.jsonl` does not yet exist. Preflight check
   --live-config "$LIVE_CONFIG"
 ```
 
-The production command is intentionally quiet during long external calls. Keep it attached and allow it to return. It executes one experiment at a time, persists every handoff, and automatically finalizes after a legal stop.
+The production command is intentionally quiet during long external calls. Keep it attached and allow it to return. The default deployment requests at most two directions concurrently from one planner snapshot: one outcome-routed primary action and one globally untried scouting method when available. A prior method may repeat only in the primary lane when the deterministic policy explicitly deepens or refines it; spare lanes must not replay previously attempted directions on a new parent. Typed transient provider failures are retried once under a 300-second per-request timeout, and the complete batch is sealed before its Trae worktrees and candidate executions run concurrently. Each lane receives independent evidence and serialized protected-query indices, then independently accepted improvements may pass through one newly gated synthesis candidate before the next round. The controller persists every handoff and automatically finalizes after a legal stop.
 
 Default frozen search limits generated by `setup-live` are:
 
@@ -390,6 +392,7 @@ Use the exact immutable configurations generated for that run:
 | Python 3.12 or Docker is missing | Install only with authorization, or pass canonical executable paths. |
 | Docker daemon/socket preflight fails | Start or repair the approved local daemon, then rerun preflight. |
 | DeepSeek authentication/model check fails | Confirm only that the shell variable is present; ask the human to correct or rotate the key. Never inspect or print it. |
+| Paper-bank preflight fails | Preserve run evidence and verify the tracked bank path and deployment-bound SHA-256. Create a new deployment after an authorized bank change; do not hand-edit generated config or literature evidence. |
 | Setup directory already exists | Choose a new run/deployment/runtime identity after preserving the existing directory. |
 | Run ID already has a ledger | Do not reuse it. Inspect/validate it or select a new run ID. |
 | `resume` rejects the phase | Preserve evidence; the state is ambiguous and requires operator review. |

@@ -28,7 +28,11 @@ DEFAULT_FAMILY_ORDER = HIGH_VALUE_FAMILIES + (
     "other",
 )
 DEFAULT_METHOD_ORDER = {
-    "objective": ("objective_pairwise_bpr", "objective_listwise_user_softmax"),
+    "objective": (
+        "objective_pairwise_bpr",
+        "objective_loss_aligned_features",
+        "objective_listwise_user_softmax",
+    ),
     "temporal_history": ("temporal_history_compact",),
     "multitask": ("multitask_single_auxiliary",),
     "duration_bias": ("duration_bias_censored_watch_time",),
@@ -189,6 +193,7 @@ def _method_for_family(
     *,
     preferred: str | None = None,
     parent_experiment_id: str | None = None,
+    allow_repeated: bool = False,
 ) -> Any | None:
     eligible = {
         str(get_value(card, "method_id", "")): card
@@ -205,7 +210,11 @@ def _method_for_family(
         if family == "ensemble":
             return None
         eligible.pop("ensemble_diverse_residual_candidate", None)
-    attempted = _attempted_methods_for_parent(context, parent_experiment_id)
+    attempted = (
+        set()
+        if allow_repeated
+        else _attempted_methods_for_parent(context, parent_experiment_id)
+    )
     if preferred is not None:
         return None if preferred in attempted else eligible.get(preferred)
     for method_id in _method_order(context, family):
@@ -227,6 +236,35 @@ def _attempted_methods_for_parent(
         for method_id in map(
             str, as_list(get_value(summary, "method_card_ids", None))
         )
+    }
+
+
+def _ordered_eligible_method_cards(context: Any, family: str) -> tuple[Any, ...]:
+    """Return every eligible card in the playbook's deterministic order."""
+
+    by_id = {
+        str(get_value(card, "method_id", "")): card
+        for card in eligible_method_cards(context, family)
+    }
+    ordered = [
+        by_id.pop(method_id)
+        for method_id in _method_order(context, family)
+        if method_id in by_id
+    ]
+    ordered.extend(by_id[method_id] for method_id in sorted(by_id))
+    return tuple(ordered)
+
+
+def _globally_attempted_method_ids(context: Any) -> set[str]:
+    """Return method cards already tested anywhere in the durable history."""
+
+    return {
+        method_id
+        for summary in as_list(get_value(context, "family_history", None))
+        for method_id in map(
+            str, as_list(get_value(summary, "method_card_ids", None))
+        )
+        if method_id
     }
 
 
@@ -748,12 +786,28 @@ def _playbook_choice(
                 "OUTPUT_CHECK_REJECTED",
                 "The latest output failed structural or contract validation and must recover.",
             )
-        if rule == "suspicious_or_compromised" and (
-            integrity == "compromised" or verdict == "suspicious"
-        ):
+        if rule == "suspicious_or_compromised" and integrity == "compromised":
             return _blocked(
                 "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
-                "The latest evaluation is suspicious or integrity-compromised.",
+                "The latest evaluation is integrity-compromised and requires "
+                "operator quarantine.",
+            )
+        if rule == "suspicious_or_compromised" and verdict == "suspicious":
+            return _next_independent_choice(
+                context,
+                eligible,
+                allowed,
+                family,
+                reason_code="SUSPICIOUS_RESULT_QUARANTINED",
+                reason=(
+                    "Quarantine the suspicious result as non-reward evidence and "
+                    "continue from a verified eligible parent with an independent "
+                    "method."
+                ),
+            ) or _blocked(
+                "NO_ELIGIBLE_METHOD",
+                "The suspicious result was quarantined and no independent eligible "
+                "method remains.",
             )
         if rule == "unstable" and stability == "unstable":
             return _blocked(
@@ -1078,4 +1132,133 @@ class SearchPolicy:
             "NO_ELIGIBLE_METHOD",
             "No candidate method satisfies status, data, prerequisite, prohibition and family gates.",
             phase="none",
+        )
+
+    def choose_parallel_direction(
+        self, context: Any, direction_index: int, direction_count: int
+    ) -> PolicyChoice:
+        """Choose a bounded lane without globally replaying prior directions.
+
+        Lane zero is the normal outcome-routed search choice, so a trusted
+        improvement or explicit refinement can deepen one prior method. Extra
+        lanes are scouting actions and may use only method cards never attempted
+        anywhere in the run. This prevents each parallel round from replaying
+        the same portfolio merely because the selected parent changed.
+        """
+
+        if direction_index < 0 or direction_index >= direction_count:
+            raise ValueError("parallel direction index is out of range")
+        choices = self._parallel_choices(context)
+        if direction_index >= len(choices):
+            raise ValueError(
+                "parallel direction index exceeds unique legal search choices"
+            )
+        return choices[direction_index]
+
+    def _parallel_choices(self, context: Any) -> tuple[PolicyChoice, ...]:
+        """Build one policy route plus globally untried scouting methods."""
+
+        graph = GraphView.from_context(context)
+        eligible = list(graph.eligible_parents())
+        allowed = _allowed_families(context)
+        if not eligible or not allowed or not method_card_map(context):
+            fallback = self.choose(context)
+            return (fallback,) if fallback.action == "propose" else ()
+
+        choices: list[PolicyChoice] = []
+        primary = self.choose(context)
+        if primary.action == "propose":
+            choices.append(primary)
+
+        selected_methods = {
+            str(choice.method_card_id)
+            for choice in choices
+            if choice.method_card_id
+        }
+        attempted_methods = _globally_attempted_method_ids(context)
+        parent = _best_parent(eligible)
+        for family in allowed:
+            if family == "ensemble":
+                continue
+            for card in _ordered_eligible_method_cards(context, family):
+                method_id = str(get_value(card, "method_id", ""))
+                if (
+                    not method_id
+                    or method_id in attempted_methods
+                    or method_id in selected_methods
+                ):
+                    continue
+                choices.append(
+                    _proposal(
+                        parent=parent,
+                        family=family,
+                        card=card,
+                        phase="parallel_round",
+                        reason_code="PARALLEL_GLOBALLY_UNTRIED_METHOD",
+                        reason=(
+                            "Use spare round capacity to test globally untried "
+                            "research method %s from trusted parent %s; previously "
+                            "attempted directions are not replayed as scouting lanes."
+                            % (method_id, parent.experiment_id)
+                        ),
+                    )
+                )
+                selected_methods.add(method_id)
+        return tuple(choices)
+
+    def parallel_direction_capacity(self, context: Any) -> int:
+        """Return policy-primary plus globally untried scouting capacity."""
+
+        return len(self._parallel_choices(context))
+
+    def choose_synthesis(
+        self, context: Any, component_experiment_ids: Sequence[str]
+    ) -> PolicyChoice:
+        """Create one agent-implemented alignment candidate from round winners."""
+
+        graph = GraphView.from_context(context)
+        eligible_by_id = {
+            node.experiment_id: node for node in graph.eligible_parents()
+        }
+        components = [
+            eligible_by_id[experiment_id]
+            for experiment_id in component_experiment_ids
+            if experiment_id in eligible_by_id
+        ]
+        if len(components) < 2:
+            return _blocked(
+                "INSUFFICIENT_PARALLEL_IMPROVEMENTS",
+                "Synthesis requires at least two independently accepted round members.",
+                phase="synthesis",
+            )
+        parent = _best_parent(components)
+        card = _method_for_family(
+            context,
+            "ensemble",
+            preferred="ensemble_parallel_round_synthesis",
+            parent_experiment_id=parent.experiment_id,
+            allow_repeated=True,
+        )
+        if card is None:
+            return _blocked(
+                "SYNTHESIS_METHOD_UNAVAILABLE",
+                "The parallel synthesis method is not legal at this checkpoint.",
+                phase="synthesis",
+            )
+        secondary = tuple(
+            node.experiment_id
+            for node in components
+            if node.experiment_id != parent.experiment_id
+        )
+        return _proposal(
+            parent=parent,
+            family="ensemble",
+            card=card,
+            phase="synthesis",
+            reason_code="PARALLEL_ROUND_SYNTHESIS",
+            reason=(
+                "Align every independently accepted round improvement on the best "
+                "member, resolve interaction conflicts, and produce one gated candidate."
+            ),
+            component_experiment_ids=secondary,
         )

@@ -4,6 +4,12 @@ from .duplicate_detection import DuplicateDetector, compute_duplicate_key
 from .eda import PlannerEdaError, PlannerEdaToolbox
 from .graph_view import ExperimentNodeView, GraphView
 from .linucb import LinUCBLegalChoiceRanker
+from .literature import (
+    LiteratureResearchError,
+    LiteratureResearchSkill,
+    OpenAlexLiteratureSkill,
+)
+from .paper_bank import PaperBankLiteratureSkill
 from .convergence_advisor import ConvergenceAdvice, ConvergenceAdvisor
 from .plan_validation import PlanValidator, ValidationResult
 from .portfolio import ExperimentPortfolio, MethodCard, default_portfolio
@@ -22,6 +28,8 @@ __all__ = [
     "ExperimentPortfolio",
     "GraphView",
     "LinUCBLegalChoiceRanker",
+    "LiteratureResearchError",
+    "LiteratureResearchSkill",
     "MethodCard",
     "PlannerEdaError",
     "PlannerEdaToolbox",
@@ -30,6 +38,8 @@ __all__ = [
     "PruneDisposition",
     "SearchEligibility",
     "SearchPolicy",
+    "OpenAlexLiteratureSkill",
+    "PaperBankLiteratureSkill",
     "ValidationResult",
     "compute_duplicate_key",
     "classify_search_eligibility",

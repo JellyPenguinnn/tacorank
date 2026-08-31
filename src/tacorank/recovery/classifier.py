@@ -82,6 +82,7 @@ DISK_QUOTA_ERROR_CODES = frozenset(
         "ENOSPC",
     }
 )
+EVIDENCE_LIMIT = 800
 
 
 @dataclass(frozen=True)
@@ -357,7 +358,7 @@ def classify_failure(result: Any) -> FailureClassification:
         failure_class=failure_class,
         reason_code=reason,
         fingerprint=fingerprint_result(result),
-        evidence=normalize_text(str(evidence))[:800],
+        evidence=_bounded_evidence(evidence),
         deliberate_integrity_violation=deliberate,
         made_progress=made_progress,
         transient_coding_failure=transient_coding,

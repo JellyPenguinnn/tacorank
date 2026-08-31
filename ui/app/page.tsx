@@ -77,6 +77,9 @@ function JsonView({ value, empty = 'Not recorded yet.' }: { value: unknown; empt
 
 function Plan({ plan }: { plan?: Json }) {
   if (!plan) return <p className="empty-copy">The planner has not proposed this iteration yet.</p>;
+  const papers = Array.isArray(plan.literature_evidence)
+    ? plan.literature_evidence.map(object).filter((paper) => typeof paper.title === 'string')
+    : [];
   return <div className="detail-stack">
     <div className="callout"><span>Hypothesis</span><p>{text(plan.hypothesis)}</p></div>
     <dl className="detail-list">
@@ -88,6 +91,15 @@ function Plan({ plan }: { plan?: Json }) {
       <div><dt>Falsification</dt><dd>{text(plan.falsification_condition)}</dd></div>
       <div><dt>Target files</dt><dd>{Array.isArray(plan.target_files) ? plan.target_files.join(', ') : '—'}</dd></div>
     </dl>
+    {papers.length > 0 && <div className="literature-evidence">
+      <h4>Online paper evidence</h4>
+      <ul>{papers.map((paper) => <li key={text(paper.evidence_id)}>
+        {typeof paper.url === 'string' ? <a href={paper.url} target="_blank" rel="noreferrer">{text(paper.title)}</a> : <strong>{text(paper.title)}</strong>}
+        <span>{[Array.isArray(paper.authors) ? paper.authors.join(', ') : null, paper.year, paper.venue, typeof paper.citation_count === 'number' ? `${paper.citation_count} citations` : null, paper.evidence_id].filter(Boolean).join(' · ')}</span>
+        <p>{text(paper.abstract, 'Abstract unavailable.')}</p>
+        {typeof paper.query === 'string' && <small>Search: {paper.query}</small>}
+      </li>)}</ul>
+    </div>}
   </div>;
 }
 
@@ -256,7 +268,7 @@ export default function Home() {
       </>}
     </section>
 
-    {confirmStart && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !starting) { setApiKey(''); setConfirmStart(false); } }}><section className="start-modal" role="dialog" aria-modal="true" aria-labelledby="start-title"><form onSubmit={(event) => { event.preventDefault(); void start(); }}><span className="modal-icon">▶</span><p className="eyebrow">Production workflow</p><h2 id="start-title">Start a new live run?</h2><p>This launches setup, non-mutating preflight, the paid DeepSeek + Trae loop, final submission checking, and ledger validation. It uses a fresh run ID and may run for hours.</p><label className="api-key-field"><span>DeepSeek API key</span><input type="password" name="deepseek-api-key" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="Paste your API key" autoComplete="off" autoCapitalize="none" spellCheck={false} autoFocus required disabled={starting || !canStart} /><small>The key is used only for this launch. It is not saved in browser storage, run metadata, or API responses.</small></label>{!canStart && <div className="credential-note">A script-managed live run is already active. Open the latest run to monitor it.</div>}<div className="modal-actions"><button type="button" className="cancel-button" onClick={() => { setApiKey(''); setConfirmStart(false); }} disabled={starting}>Cancel</button><button type="submit" className="start-button modal-start" disabled={starting || !canStart || !apiKey.trim()}>{starting ? 'Launching…' : 'Start production run'}</button></div></form></section></div>}
+    {confirmStart && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !starting) { setApiKey(''); setConfirmStart(false); } }}><section className="start-modal" role="dialog" aria-modal="true" aria-labelledby="start-title"><form onSubmit={(event) => { event.preventDefault(); void start(); }}><span className="modal-icon">▶</span><p className="eyebrow">Production workflow</p><h2 id="start-title">Start a new live run?</h2><p>This launches setup, non-mutating preflight, keyless online paper research, the paid DeepSeek + Trae loop, final submission checking, and ledger validation. It uses a fresh run ID and may run for hours.</p><label className="api-key-field"><span>DeepSeek API key</span><input type="password" name="deepseek-api-key" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="Paste your DeepSeek API key" autoComplete="off" autoCapitalize="none" spellCheck={false} autoFocus required disabled={starting || !canStart} /><small>The key is required for planning and coding, used only for this launch, and never saved in browser storage, run metadata, logs, or API responses. OpenAlex paper research needs no key.</small></label>{!canStart && <div className="credential-note">A script-managed live run is already active. Open the latest run to monitor it.</div>}<div className="modal-actions"><button type="button" className="cancel-button" onClick={() => { setApiKey(''); setConfirmStart(false); }} disabled={starting}>Cancel</button><button type="submit" className="start-button modal-start" disabled={starting || !canStart || !apiKey.trim()}>{starting ? 'Launching…' : 'Start production run'}</button></div></form></section></div>}
     {confirmStop && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !stopping) setConfirmStop(null); }}><section className="start-modal stop-modal" role="dialog" aria-modal="true" aria-labelledby="stop-title"><form onSubmit={(event) => { event.preventDefault(); void stop(confirmStop); }}><span className="modal-icon stop-icon">■</span><p className="eyebrow">Interrupt live workflow</p><h2 id="stop-title">Stop this run?</h2><p>This interrupts the controller and active worker for <code>{confirmStop}</code>. Durable ledger evidence is preserved, but the run is not finalized and may not be resumable from its current phase.</p><div className="stop-warning"><strong>No result will be fabricated.</strong><span>The dashboard will mark the operational run interrupted after its process exits.</span></div><div className="modal-actions"><button type="button" className="cancel-button" onClick={() => setConfirmStop(null)} disabled={stopping}>Keep running</button><button type="submit" className="stop-button modal-stop" disabled={stopping}>{stopping ? 'Stopping…' : 'Stop this run'}</button></div></form></section></div>}
   </main>;
 }

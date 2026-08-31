@@ -35,9 +35,9 @@ Use deterministic small non-zero factor initialization (zero-initializing both
 factor sides produces zero latent gradients), multiple representative passes,
 and capped per-user pairs. Verify that the residual has non-zero variance and
 that repeated items can receive different user-conditioned scores. Implement
-and wire the mechanism through `solution/candidate.py`; helper modules may be
-added only when that entrypoint imports and uses them. Do not invent
-`solution/train.py` as a replacement entrypoint.
+and wire the mechanism through the approved candidate scaffold. Keep
+`solution/candidate.py` as the stable entrypoint that imports and uses the
+changed helpers; `solution/train.py` is never an alternate entrypoint.
 
 ## Sources
 

@@ -608,3 +608,75 @@ def test_trae_responses_sdk_is_exactly_pinned() -> None:
     ).read_text(encoding="utf-8")
 
     assert "openai==3.6.0" in requirements.splitlines()
+
+
+def test_runtime_dockerfile_installs_reviewed_runtime_requirements() -> None:
+    dockerfile = (
+        Path(__file__).parents[2] / "docker" / "runtime.Dockerfile"
+    ).read_text(encoding="utf-8")
+
+    assert "--requirement requirements.txt" in dockerfile
+    assert "python -m pip install --no-cache-dir --no-deps ." in dockerfile
+    assert dockerfile.index("--requirement requirements.txt") < dockerfile.index(
+        "python -m pip install --no-cache-dir --no-deps ."
+    )
+
+
+def test_runtime_import_inventory_is_bound_to_built_image(
+    tmp_path: Path, monkeypatch
+) -> None:
+    observed = {}
+
+    def output(args, *, cwd, label):
+        observed.update(args=tuple(args), cwd=cwd, label=label)
+        roots = sorted(
+            {
+                "benchmarks",
+                "certifi",
+                "numpy",
+                "pandas",
+                "pydantic",
+                "tacorank",
+                "yaml",
+                "_sysconfigdata__linux_aarch64-linux-gnu",
+            }
+        )
+        return json.dumps(roots)
+
+    monkeypatch.setattr(deployment_module, "_run_output", output)
+    roots = deployment_module._runtime_image_import_roots(
+        tmp_path, tmp_path / "docker", "sha256:" + "a" * 64
+    )
+
+    assert "solution" in roots
+    assert "_sysconfigdata__linux_aarch64-linux-gnu" not in roots
+    assert set(deployment_module.RUNTIME_REQUIRED_IMPORTS) != set(roots)
+    assert observed["label"] == "Docker runtime import verification"
+    assert observed["args"][1:9] == (
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+    )
+    script = observed["args"][-1]
+    for name in deployment_module.RUNTIME_REQUIRED_IMPORTS:
+        assert name in script
+
+
+def test_runtime_import_inventory_rejects_malformed_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        deployment_module,
+        "_run_output",
+        lambda *args, **kwargs: '{"not":"a list"}',
+    )
+
+    with pytest.raises(deployment_module.DeploymentError, match="inventory is malformed"):
+        deployment_module._runtime_image_import_roots(
+            tmp_path, tmp_path / "docker", "sha256:" + "b" * 64
+        )

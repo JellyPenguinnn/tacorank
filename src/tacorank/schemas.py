@@ -512,6 +512,57 @@ class LessonCandidate(StrictModel):
         )
 
 
+class LiteratureEvidence(StrictModel):
+    """Bounded scholarly evidence exposed to the code-blind planner."""
+
+    evidence_id: NonEmptyStr
+    provider: Literal["openalex", "paper_bank"] = "openalex"
+    paper_id: NonEmptyStr
+    title: NonEmptyStr
+    abstract: NonEmptyStr
+    year: Optional[int] = Field(default=None, ge=1800, le=2100)
+    authors: List[NonEmptyStr] = Field(default_factory=list)
+    venue: Optional[NonEmptyStr] = None
+    citation_count: int = Field(default=0, ge=0)
+    influential_citation_count: int = Field(default=0, ge=0)
+    url: NonEmptyStr
+    query: NonEmptyStr
+    organization: Optional[Literal["bytedance", "meta", "kuaishou"]] = None
+    relationship: Optional[
+        Literal["company_authored", "company_coauthored", "company_deployed"]
+    ] = None
+    topics: List[NonEmptyStr] = Field(default_factory=list)
+    priority: Optional[int] = Field(default=None, ge=1, le=3)
+    prominence_basis: List[NonEmptyStr] = Field(default_factory=list)
+    authors_truncated: bool = False
+
+    @field_validator("evidence_id")
+    @classmethod
+    def validate_evidence_id(cls, value: str) -> str:
+        return _validate_id(value, "literature_evidence_id")
+
+    @field_validator("authors")
+    @classmethod
+    def validate_authors(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("literature evidence authors must be unique")
+        return values
+
+    @field_validator("topics", "prominence_basis")
+    @classmethod
+    def validate_unique_literature_tags(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("literature evidence tags must be unique")
+        return values
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        if not re.fullmatch(r"https://[^\s/?#]+(?:/[^\s]*)?", value):
+            raise ValueError("literature evidence URL must use HTTPS")
+        return value
+
+
 class ResearchProposal(StrictModel):
     """Code-blind research recommendation produced by Person 1.
 
@@ -539,6 +590,7 @@ class ResearchProposal(StrictModel):
     # leave this empty.
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+    literature_evidence: List[LiteratureEvidence] = Field(default_factory=list)
     duplicate_key: NonEmptyStr
 
     @field_validator("run_id", "experiment_id", "context_id")
@@ -558,6 +610,16 @@ class ResearchProposal(StrictModel):
         if len(normalized) != len(set(normalized)):
             raise ValueError("component_experiment_ids must be unique")
         return normalized
+
+    @field_validator("literature_evidence")
+    @classmethod
+    def validate_literature_evidence(
+        cls, values: List[LiteratureEvidence]
+    ) -> List[LiteratureEvidence]:
+        identifiers = [value.evidence_id for value in values]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("literature_evidence must not contain duplicates")
+        return values
 
 
 class ExperimentSpec(ResearchProposal):
@@ -780,6 +842,31 @@ class AdapterFailureResult(StrictModel):
         if self.outcome in (RunOutcome.SUCCESS, RunOutcome.CANCELLED):
             raise ValueError("adapter failure must have a failed outcome")
         return self
+
+
+class PlanningFailureResult(StrictModel):
+    """A run-level failure raised before a new experiment exists.
+
+    Planning failures must not be attributed to the previously completed
+    experiment.  The planner context is the durable identity for this adapter
+    boundary.
+    """
+
+    run_id: NonEmptyStr
+    context_id: NonEmptyStr
+    failure_stage: Literal["planner"] = "planner"
+    error_class: NonEmptyStr
+    error_fingerprint: str
+    error_summary: NonEmptyStr
+    diagnostic_artifacts: List[ArtifactRef] = Field(default_factory=list)
+    resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
+
+    @field_validator("error_fingerprint")
+    @classmethod
+    def validate_error_fingerprint(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("error_fingerprint must be lowercase sha256")
+        return value
 
 
 class OutputCheckResult(StrictModel):
@@ -1547,6 +1634,7 @@ class CoderContext(ContextDocument):
     active_lessons: List[Dict[str, Any]] = Field(default_factory=list)
     coding_invariants: List[NonEmptyStr] = Field(default_factory=list)
     prior_result_summaries: List[CoderPriorResultSummary] = Field(default_factory=list)
+    component_patches: List[Dict[str, Any]] = Field(default_factory=list)
     owner_retry_error_summary: Optional[NonEmptyStr] = None
     owner_retry_instructions: Optional[NonEmptyStr] = None
     step_limit: int = Field(gt=0)
@@ -1626,6 +1714,7 @@ class EventType(str, Enum):
     BASELINE_VERIFIED = "baseline.verified"
     CONTEXT_CREATED = "context.created"
     PLANNER_RECOMMENDED = "planner.recommended"
+    PLANNING_FAILED = "planning.failed"
     EXPERIMENT_PROPOSED = "experiment.proposed"
     PATCH_CREATED = "patch.created"
     PATCH_CHECKED = "patch.checked"
@@ -1651,6 +1740,13 @@ class RunStartedPayload(StrictModel):
     contract_sha256: str
     protected_paths_sha256: str
     max_experiments: int = Field(gt=0)
+    parallel_directions: int = Field(default=1, gt=0, le=7)
+    synthesize_parallel_improvements: bool = True
+    deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
+    research_planning_max_attempts: int = Field(default=1, gt=0, le=3)
+    research_planning_retry_backoff_seconds: float = Field(
+        default=0.0, ge=0.0, le=30.0
+    )
     wall_time_limit_seconds: int = Field(gt=0)
     token_limit: Optional[int] = Field(default=None, gt=0)
     gpu_seconds_limit: Optional[int] = Field(default=None, gt=0)
@@ -1713,6 +1809,11 @@ class PlannerRecommendedPayload(StrictModel):
         if self.output.action == PlannerAction.PROPOSE:
             raise ValueError("planner.recommended cannot contain a proposal")
         return self
+
+
+class PlanningFailedPayload(StrictModel):
+    type: Literal["planning.failed"] = "planning.failed"
+    result: PlanningFailureResult
 
 
 class ExperimentProposedPayload(StrictModel):
@@ -1826,6 +1927,7 @@ EventPayload = Annotated[
         BaselineVerifiedPayload,
         ContextCreatedPayload,
         PlannerRecommendedPayload,
+        PlanningFailedPayload,
         ExperimentProposedPayload,
         PatchCreatedPayload,
         PatchCheckedPayload,
@@ -1853,6 +1955,7 @@ EVENT_PAYLOAD_MODELS: Mapping[EventType, Type[StrictModel]] = {
     EventType.BASELINE_VERIFIED: BaselineVerifiedPayload,
     EventType.CONTEXT_CREATED: ContextCreatedPayload,
     EventType.PLANNER_RECOMMENDED: PlannerRecommendedPayload,
+    EventType.PLANNING_FAILED: PlanningFailedPayload,
     EventType.EXPERIMENT_PROPOSED: ExperimentProposedPayload,
     EventType.PATCH_CREATED: PatchCreatedPayload,
     EventType.PATCH_CHECKED: PatchCheckedPayload,

@@ -28,7 +28,8 @@ class ContractError(RuntimeError):
 DEFAULT_TARGET_INTERFACE_EXCERPTS = {
     "solution/candidate.py": (
         "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
-        "-> None; include this file in target_files; read only "
+        "-> None; this is the stable production entrypoint and must remain wired "
+        "to every approved helper edited by the experiment. Read only "
         "invocation.input_root and write exactly invocation.output_path as "
         "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
         "invocation.seed; return None. fm_baseline_predictions.csv contains "
@@ -37,7 +38,56 @@ DEFAULT_TARGET_INTERFACE_EXCERPTS = {
         "parent-plus-residual result. Bound only the residual on the parent's "
         "original score scale and preserve the exact parent score when no "
         "supported residual is available."
-    )
+    ),
+    "solution/features.py": (
+        "Candidate-owned feature boundary. Preserve the strict train.csv and "
+        "score.csv schemas and the fitted-on-training-only FeatureEncoder API. "
+        "Scoring rows never contain long_view. Any new aggregate must be "
+        "deterministic and use only interactions earlier than the row it scores."
+    ),
+    "solution/model.py": (
+        "Candidate-owned model components. FactorizationMachine is the compact "
+        "pointwise starting implementation. Approved experiments may add or "
+        "replace trainable components here, but must preserve deterministic seeds, "
+        "finite unconstrained ranking scores, and non-zero trainable gradients."
+    ),
+    "solution/train.py": (
+        "Candidate-owned training orchestration. fit_pointwise is a helper, not an "
+        "entrypoint. Training may read train.csv only, must respect the supplied "
+        "fidelity and seed, and must not evaluate, select, or early-stop on public "
+        "validation or score-population labels."
+    ),
+    "solution/inference.py": (
+        "Candidate-owned scoring and output helpers. Preserve authenticated, "
+        "row-aligned FM parent scores, add only the approved bounded residual on "
+        "the original score scale, retain exact parent fallback, and create exactly "
+        "one ordered finite output CSV exclusively."
+    ),
+}
+
+PRODUCTION_TARGET_INTERFACE_EXCERPTS = {
+    **DEFAULT_TARGET_INTERFACE_EXCERPTS,
+    "solution/candidate.py": (
+        "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
+        "-> None; this is the stable production entrypoint and must remain wired "
+        "to every approved helper edited by the experiment. Read only "
+        "invocation.input_root and write exactly invocation.output_path as "
+        "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
+        "invocation.seed; return None. train.csv columns are exactly "
+        "date,user_id,video_id,author_id,tab,duration_ms,long_view; score.csv "
+        "columns are exactly row_id,date,user_id,video_id,author_id,tab,duration_ms "
+        "and never expose long_view. fm_baseline_predictions.csv contains the "
+        "setup-verified official FM score aligned one-to-one with score.csv; its "
+        ".sha256 file authenticates it. These are unconstrained real-valued "
+        "ranking scores, not probabilities. Never sigmoid, clip to [0,1], "
+        "normalize, or rescale the FM parent or the parent-plus-residual result. "
+        "Bound only the residual on the parent's original score scale and preserve "
+        "the exact parent when no supported residual is available. duration_ms is "
+        "video duration, never watch time. Training dates strictly precede score "
+        "dates. Preserve contiguous row_id order, duplicate rows, finite "
+        "deterministic scores, and exclusive output creation. Use all training rows "
+        "or an explicit deterministic representative sample."
+    ),
 }
 
 
@@ -55,6 +105,8 @@ class RunConfig(StrictModel):
     evaluator_sha256: str
     baseline_commit_sha: NonEmptyStr
     max_experiments: int = Field(default=50, gt=0)
+    parallel_directions: int = Field(default=1, gt=0, le=7)
+    synthesize_parallel_improvements: bool = True
     wall_time_limit_seconds: int = Field(default=21_600, gt=0)
     token_limit: Optional[int] = Field(default=None, gt=0)
     gpu_seconds_limit: Optional[int] = Field(default=None, gt=0)
@@ -115,10 +167,25 @@ class RunConfig(StrictModel):
     deepseek_model: NonEmptyStr = "deepseek-v4-flash"
     deepseek_base_url: NonEmptyStr = "https://api.deepseek.com"
     deepseek_api_key_env: NonEmptyStr = "DEEPSEEK_API_KEY"
-    deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
+    deepseek_timeout_seconds: int = Field(default=300, gt=0, le=600)
+    research_planning_max_attempts: int = Field(default=2, gt=0, le=3)
+    research_planning_retry_backoff_seconds: float = Field(
+        default=1.0, ge=0.0, le=30.0
+    )
     deepseek_max_output_tokens: int = Field(default=8_192, gt=0)
     deepseek_thinking_enabled: bool = True
     deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
+    # Historical run configs omit these fields and therefore keep the old
+    # offline-only planner behavior. New setup-live deployments explicitly
+    # enable the hash-bound advisory paper bank.
+    literature_research_enabled: bool = False
+    literature_provider: Literal["openalex", "paper_bank"] = "openalex"
+    literature_base_url: NonEmptyStr = "https://api.openalex.org"
+    literature_timeout_seconds: int = Field(default=20, gt=0, le=120)
+    literature_max_papers: int = Field(default=3, gt=0, le=8)
+    literature_min_citation_count: int = Field(default=5, ge=0)
+    literature_bank_path: str = "research/paper_bank.json"
+    literature_bank_sha256: Optional[str] = None
 
     @field_validator("run_id")
     @classmethod
@@ -127,7 +194,9 @@ class RunConfig(StrictModel):
 
         return _validate_id(value, "run_id")
 
-    @field_validator("contract_path", "protected_paths_path")
+    @field_validator(
+        "contract_path", "protected_paths_path", "literature_bank_path"
+    )
     @classmethod
     def validate_relative_config_paths(cls, value: str) -> str:
         return normalize_relative_path(value)
@@ -173,6 +242,14 @@ class RunConfig(StrictModel):
             raise ValueError("allowed_research_families must not be empty")
         if not self.allowed_research_data:
             raise ValueError("allowed_research_data must not be empty")
+        if (
+            self.literature_research_enabled
+            and self.literature_provider == "paper_bank"
+            and self.literature_bank_sha256 is None
+        ):
+            raise ValueError(
+                "enabled paper_bank literature requires literature_bank_sha256"
+            )
         return self
 
     @field_validator("target_interface_excerpts")
@@ -204,6 +281,13 @@ class RunConfig(StrictModel):
             raise ValueError("live_adapter_config_sha256 must be lowercase sha256")
         return value
 
+    @field_validator("literature_bank_sha256")
+    @classmethod
+    def validate_optional_paper_bank_hash(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not SHA256_RE.fullmatch(value):
+            raise ValueError("literature_bank_sha256 must be lowercase sha256")
+        return value
+
     @field_validator("deepseek_base_url")
     @classmethod
     def validate_deepseek_base_url(cls, value: str) -> str:
@@ -218,6 +302,27 @@ class RunConfig(StrictModel):
             or parsed.fragment
         ):
             raise ValueError("deepseek_base_url must be a credential-free HTTPS origin")
+        return value
+
+    @field_validator("literature_base_url")
+    @classmethod
+    def validate_literature_base_url(cls, value: str) -> str:
+        value = value.rstrip("/")
+        parsed = urlparse(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "api.openalex.org"
+            or parsed.port is not None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "literature_base_url must be the credential-free OpenAlex "
+                "HTTPS origin"
+            )
         return value
 
     @field_validator("deepseek_api_key_env")

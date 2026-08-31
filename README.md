@@ -48,7 +48,7 @@ After completing [installation](#installation) and [deployment setup](#configura
   --live-config .tacorank/deployment/live-adapters.json
 ```
 
-This is the canonical end-to-end entry point. It runs one experiment at a time, rebuilds each planner context from durable memory, stops on a frozen convergence or resource rule, and finalizes the selected test submission automatically.
+This is the canonical end-to-end entry point. Production deployments request at most two research directions concurrently from one ledger snapshot: one normal outcome-routed search action and, when available, one globally untried scouting method. A previously tested method may reappear only as the explicit policy route for a justified refinement or deepening; spare parallel capacity never replays old directions merely because the parent changed. Typed transient provider failures are retried once and the batch is sealed before Trae starts. Trae and candidate execution then run in independent worktrees, each lane is evaluated with serialized protected-query authority, and independently accepted improvements may be synthesized into one newly gated candidate. The next round starts from durable post-synthesis memory. Frozen convergence and resource rules still own stopping and final selection.
 
 ## Agent-assisted operation
 
@@ -99,6 +99,7 @@ Only the controller may append events or change workflow state. Role components 
 | Python | 3.12.x | Isolated pinned Trae runtime created by setup |
 | Docker | Running Docker-compatible daemon | Hardened Trae tools and CPU candidate execution |
 | DeepSeek | `DEEPSEEK_API_KEY` with model access | Research planning, Trae coding, and bounded implementation review |
+| Curated paper bank | Local, hash-bound JSON | Optional method-relevant references from 70 ByteDance, Meta, and Kuaishou papers |
 | KuaiRand-Pure | Local official data, or network access for setup download | Training, evaluation, and submission generation |
 
 The live workflow is CPU-only. On macOS, Docker Desktop or a Docker-compatible daemon such as Colima is sufficient. Native Windows PowerShell is also supported with Docker Desktop in Linux-container mode. Trae tool calls use the same reviewed stateless Docker-exec bridge on Windows, macOS, and Linux; they do not depend on a host pseudo-terminal or `pexpect.spawn`.
@@ -453,7 +454,7 @@ architecture. If the data directory is already complete, omit
 directory. macOS uses Docker Desktop's local Unix socket and the same stateless
 Docker-exec bridge as Windows, without changing its existing socket behavior.
 
-Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, pinned Trae install/config/runtime, credential presence and DeepSeek model access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
+Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, the hash-bound local paper bank, pinned Trae install/config/runtime, credential presence and DeepSeek model access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
 
 After a run starts, inspect or rebuild its state with:
 

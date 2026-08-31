@@ -8,7 +8,7 @@ TacoRank is the integration backbone for the five-person autonomous KuaiRand-Pur
 frozen contract + official baseline
                 |
                 v
-ledger-derived research feedback -> DeepSeek researcher -> ResearchProposal
+ledger-derived research feedback -> bounded advisory paper-bank references -> DeepSeek researcher -> ResearchProposal
                 |                                      |
                 |                                      v
                 |                     controller binds code targets + ladder
@@ -35,7 +35,7 @@ ledger-derived research feedback -> DeepSeek researcher -> ResearchProposal
 clean reproduce validation best -> test inference -> Gate B -> submission check
 ```
 
-`Harness.run_until_stopped()` executes one experiment at a time. Each terminal decision and lesson is appended before the next planner context is built, so later proposals consume durable evidence rather than in-memory messages. `Harness.run_to_completion()` adds finalization after a frozen convergence, experiment, wall-time, token, GPU, integrity, or no-legal-proposal stop.
+`Harness.run_until_stopped()` uses the configured round width. Production requests at most two directions concurrently from one planner snapshot. The first is the normal outcome-routed policy choice; the optional second is a globally untried method, so parallel fan-out cannot repeat the same portfolio on every new parent. Typed transient provider failures are retried once under the frozen planning timeout. The controller atomically seals the complete batch before fan-out; each direction then gets its own Trae worktree, Gate A receipt, execution seal, Gate B result, protected evaluation, and terminal decision. Protected public-query indices are serialized at the evaluator boundary even though coding and execution are concurrent. When two or more round members independently improve the incumbent, a synthesis-capable research and coding pass receives their verified component patches, creates a fresh candidate from the strongest member, and traverses the same gates and evaluation ladder. Only then does the next planner snapshot begin. `Harness.run_to_completion()` adds finalization after a frozen convergence, experiment, wall-time, token, GPU, integrity, or no-legal-proposal stop.
 
 Confirmation seeds are additional executions of the same experiment and commit. They are fully recorded and charged to resource totals, but only the terminal full-fidelity experiment decision consumes one convergence-patience slot. The default frozen rule is no improvement greater than `0.002` for three consecutive terminal full iterations.
 
@@ -61,6 +61,11 @@ durable fact. `PlannerContext.active_lessons` contains only active `lesson.recor
 events selected by the deterministic retrieval policy. Hidden-final evaluations enter
 neither layer, and `lessons/*.md` remains a generated human-readable projection rather
 than a planner input or source of truth.
+
+Suspicious non-compromised experiments are quarantined as non-reward evidence
+and cannot become parents, refinements, or ensemble members. The search policy
+continues from a verified eligible frontier parent when an independent legal
+method remains. Compromised integrity still fails closed.
 
 ## Experiment lifecycle and gates
 
@@ -164,7 +169,7 @@ Production exposes no fake runtime flag. Test doubles are constructed directly b
 
 ## DeepSeek and credential boundary
 
-The researcher and pinned Trae worker use `deepseek-v4-flash` with high reasoning through separate bounded adapters. `SearchPolicy` still owns the parent, family, phase, and reviewed method card. DeepSeek receives only research policy, method overviews, experiment feedback, lessons, and budget, then returns a code-blind hypothesis and intervention. It does not receive repository paths, implementation interfaces, commit lineage, pipeline stages, commands, or the execution ladder. After validation, the deterministic controller binds the authorized code targets and frozen smoke/proxy/full ladder before Trae receives the coding context. Invalid provider output is recorded at a durable planner checkpoint and raises a resumable error rather than becoming false convergence.
+The researcher and pinned Trae worker use `deepseek-v4-flash` with high reasoning through separate bounded adapters. `SearchPolicy` still owns the parent, family, phase, and reviewed method card. Once that method is selected, the live planner deterministically retrieves a bounded topic-matched set from the hash-bound local 70-paper bank; no dataset rows, metrics, run identifiers, user identifiers, or literature query leave the controller. DeepSeek receives the research policy, method overviews, experiment feedback, lessons, budget, and untrusted paper snapshot as optional references. It may cite none of them. If it cites a paper, it must use an exact retrieved evidence ID and cannot invent or alter the record. DeepSeek does not receive repository paths, implementation interfaces, commit lineage, pipeline stages, commands, or the execution ladder. After validation, the deterministic controller binds the authorized code targets and frozen smoke/proxy/full ladder before Trae receives the coding context. Candidate coding and execution remain network-disabled. Invalid provider output is recorded at a durable planner checkpoint and raises a resumable error rather than becoming false convergence.
 
 The API key is read only from the configured environment variable. It must never appear in configuration, prompts, Git, logs, trajectories, fixtures, or artifacts.
 
