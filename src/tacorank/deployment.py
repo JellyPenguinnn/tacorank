@@ -300,7 +300,7 @@ def setup_live_deployment(
         "timeout_profiles": {"standard": 600, "extended": 900},
         "max_confirmation_attempts": 2,
         "seed_schedule": [11, 22, 33, 44, 55],
-        "context_token_limit": 6000,
+        "context_token_limit": 24000,
         "adapter_mode": "live",
         "live_adapter_config_sha256": _sha256_file(live_path),
         "editable_roots": ["solution"],
