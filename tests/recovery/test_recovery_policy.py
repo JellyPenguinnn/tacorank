@@ -545,7 +545,12 @@ def test_first_noop_gets_one_scoped_trae_wiring_repair():
     assert "solution/train.py" in decision.instructions
     assert "starting with the current diff" in decision.instructions
     assert "Do not survey setup files" in decision.instructions
-    assert "task_done immediately" in decision.instructions
+    # The worker's tools are the editor and task_done, so it must be told to
+    # finish rather than to run a check it cannot run. Gating task_done on a
+    # check it has no way to perform left it editing until the step budget was
+    # gone, which discards the attempt and produces no patch at all.
+    assert "call task_done" in decision.instructions
+    assert "cannot execute code" in decision.instructions
     assert "Frozen contract; protected evaluator and data" not in decision.instructions
 
 
