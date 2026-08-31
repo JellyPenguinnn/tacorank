@@ -139,6 +139,7 @@ Setup must run from a clean tracked checkout so the Git baseline, protected mani
    ```bash
    .venv/bin/tacorank setup-live \
      --run-id run_001 \
+     --run-mode discovery \
      --download-data
    ```
 
@@ -154,7 +155,7 @@ Setup must run from a clean tracked checkout so the Git baseline, protected mani
 
    Setup places the hash-verified official FM predictions beside every candidate score view and records an executable parity receipt. Preflight verifies the current `solution/candidate.py` still reproduces those exact bytes on smoke, proxy, full, and final routes, in addition to the clean Git baseline and submodule, frozen contracts, data manifest, official evaluator, Trae installation and model access, Docker runtime, read-only edit-tool mount, execution environment, and hard output quota. Success reports `"ledger_created": false`.
 
-4. Start the complete autonomous loop.
+4. Start the autonomous loop.
 
    ```bash
    .venv/bin/tacorank run \
@@ -163,6 +164,8 @@ Setup must run from a clean tracked checkout so the Git baseline, protected mani
    ```
 
 `setup-live` writes credential-free generated files under ignored `.tacorank/`. The API key is passed only through the environment to the research provider and the isolated Trae child process; it is not written to configuration, prompts, logs, trajectories, fixtures, or artifacts.
+
+`--run-mode discovery` is the recommended research workflow: it ignores the three-result early-convergence rule, spends the frozen adaptive-search budget (or stops when no legal non-duplicate proposal remains), and does not automatically select or check a submission. Use `--run-mode submission` only when the goal is the complete competition workflow with automatic convergence and finalization. A stopped discovery run can be finalized later with the explicit `finalize` command.
 
 ## Trae-only coding validation
 
@@ -199,7 +202,7 @@ Use the same frozen deployment configurations for lifecycle operations:
 .venv/bin/tacorank validate-ledger --run-id run_001 --repository-root .
 .venv/bin/tacorank rebuild-views --run-id run_001 --repository-root .
 
-# Finalize a stopped run if automatic finalization did not complete.
+# Explicitly finalize a stopped discovery run, or retry submission finalization.
 .venv/bin/tacorank finalize \
   --config .tacorank/deployment/run-config.json \
   --live-config .tacorank/deployment/live-adapters.json

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Sequence
 
 from ..schemas import LiteratureEvidence
 
-from .code_blind import contains_implementation_reference
+from .code_blind import find_implementation_reference
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
 from .graph_view import (
     ExperimentNodeView,
@@ -19,7 +20,14 @@ from .graph_view import (
     has_value,
 )
 from .method_eligibility import evaluate_method_card, method_card_map
+from .plans import plan_for_method
 from .search_eligibility import classify_search_eligibility
+from .variant_configuration import (
+    METHOD_ACTIVE_PARAMETERS,
+    METHOD_FORMULATIONS,
+    reference_variant_parameters,
+    treatment_partition,
+)
 
 HIDDEN_PATTERNS = (
     "hidden test",
@@ -102,11 +110,87 @@ def _authorized_no_op_reimplementation(
 SHARED_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 EVENT_ID_PATTERN = re.compile(r"evt_\d{6,}$")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?$")
+
+_VARIANT_BOUNDS = {
+    "embedding_dim": (2.0, 32.0, True),
+    "learning_rate": (1e-5, 0.2, False),
+    "epochs": (1.0, 40.0, True),
+    "negative_count": (1.0, 16.0, True),
+    "l2": (0.0, 0.1, False),
+    "residual_scale": (0.0, 0.5, False),
+    "max_train_rows": (1000.0, 1_141_112.0, True),
+    "history_decay_days": (1.0, 180.0, False),
+    "history_shrinkage": (0.0, 1000.0, False),
+}
+_VARIANT_LITERALS = {
+    "listwise_strategy": {"full_observed"},
+}
+
+
+def _variant_parameter_errors(family: str, values: Any) -> list[str]:
+    if not isinstance(values, dict):
+        return ["CAMPAIGN_VARIANT_PARAMETERS_REQUIRED"]
+    formulation = values.get("formulation")
+    allowed_formulations = {
+        "objective": {"pointwise", "bpr", "listwise"},
+        "temporal_history": {"temporal_history"},
+        "features": {"history_affinity"},
+    }.get(family, set())
+    errors = []
+    if formulation not in allowed_formulations:
+        errors.append("VARIANT_FORMULATION_MISMATCH")
+    unknown = set(values) - {"formulation", *_VARIANT_BOUNDS, *_VARIANT_LITERALS}
+    if unknown:
+        errors.append("UNKNOWN_VARIANT_PARAMETER")
+    for key, value in values.items():
+        if key in _VARIANT_LITERALS:
+            if value not in _VARIANT_LITERALS[key]:
+                errors.append("VARIANT_PARAMETER_OUT_OF_RANGE")
+            continue
+        if key not in _VARIANT_BOUNDS:
+            continue
+        lower, upper, integer = _VARIANT_BOUNDS[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            errors.append("INVALID_VARIANT_PARAMETER_TYPE")
+            continue
+        if integer and not isinstance(value, int):
+            errors.append("INVALID_VARIANT_PARAMETER_TYPE")
+        elif not lower <= float(value) <= upper:
+            errors.append("VARIANT_PARAMETER_OUT_OF_RANGE")
+    if family == "features":
+        shrinkage = values.get("history_shrinkage")
+        regularization = values.get("l2")
+        epochs = values.get("epochs")
+        residual_scale = values.get("residual_scale")
+        if (
+            isinstance(shrinkage, (int, float))
+            and not isinstance(shrinkage, bool)
+            and float(shrinkage) < 5.0
+        ):
+            errors.append("FEATURE_REGULARIZATION_REQUIRED")
+        if (
+            isinstance(regularization, (int, float))
+            and not isinstance(regularization, bool)
+            and float(regularization) < 1e-6
+        ):
+            errors.append("FEATURE_REGULARIZATION_REQUIRED")
+        if isinstance(epochs, int) and not isinstance(epochs, bool) and epochs > 5:
+            errors.append("FEATURE_COMPLEXITY_LIMIT_EXCEEDED")
+        if (
+            isinstance(residual_scale, (int, float))
+            and not isinstance(residual_scale, bool)
+            and float(residual_scale) > 0.2
+        ):
+            errors.append("FEATURE_COMPLEXITY_LIMIT_EXCEEDED")
+    return errors
+
+
 @dataclass(frozen=True)
 class ValidationResult:
     accepted: bool
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    diagnostics: tuple[str, ...] = ()
 
 
 def _nonempty(value: Any) -> bool:
@@ -157,6 +241,7 @@ class PlanValidator:
     ) -> ValidationResult:
         errors: list[str] = []
         warnings: list[str] = []
+        diagnostics: list[str] = []
         context_id = get_value(context, "context_id", None)
         contract_hash = get_value(context, "contract_sha256", None)
         contract = get_value(context, "contract_summary", None)
@@ -203,6 +288,11 @@ class PlanValidator:
             errors.append("INVALID_EXPERIMENT_ID")
         if not SHARED_ID_PATTERN.fullmatch(str(get_value(spec, "parent_experiment_id", ""))):
             errors.append("INVALID_PARENT_EXPERIMENT_ID")
+        effective_implementation_parent_id = get_value(
+            spec, "implementation_parent_experiment_id", None
+        ) or get_value(spec, "parent_experiment_id", None)
+        if not SHARED_ID_PATTERN.fullmatch(str(effective_implementation_parent_id or "")):
+            errors.append("INVALID_IMPLEMENTATION_PARENT_EXPERIMENT_ID")
         if context_id and not SHARED_ID_PATTERN.fullmatch(str(context_id)):
             errors.append("INVALID_CONTEXT_ID")
         if not _valid_commit(get_value(spec, "parent_commit_sha", None)):
@@ -224,8 +314,70 @@ class PlanValidator:
                 spec, "parent_experiment_id", None
             ) != get_value(get_value(choice, "parent"), "experiment_id", None):
                 errors.append("PARENT_POLICY_MISMATCH")
+            expected_implementation_parent = (
+                get_value(choice, "implementation_parent", None)
+                or get_value(choice, "parent", None)
+            )
+            if expected_implementation_parent is not None and (
+                get_value(spec, "implementation_parent_experiment_id", None)
+                or get_value(spec, "parent_experiment_id", None)
+            ) != get_value(expected_implementation_parent, "experiment_id", None):
+                errors.append("IMPLEMENTATION_PARENT_POLICY_MISMATCH")
             if get_value(choice, "family", None) and family != get_value(choice, "family"):
                 errors.append("FAMILY_POLICY_MISMATCH")
+            choice_plan_id = get_value(choice, "plan_id", None)
+            declared_plan_id = get_value(spec, "plan_id", None)
+            inferred_plan_ids = {
+                plan.plan_id
+                for method_id in map(
+                    str, as_list(get_value(spec, "method_card_ids", None))
+                )
+                for plan in [plan_for_method(method_id)]
+                if plan is not None
+            }
+            effective_plan_id = declared_plan_id
+            if effective_plan_id is None and len(inferred_plan_ids) == 1:
+                effective_plan_id = next(iter(inferred_plan_ids))
+            if choice_plan_id is not None and effective_plan_id != choice_plan_id:
+                errors.append("RESEARCH_PLAN_POLICY_MISMATCH")
+            for field, code in (
+                ("campaign_id", "CAMPAIGN_POLICY_MISMATCH"),
+                ("variant_id", "VARIANT_POLICY_MISMATCH"),
+            ):
+                if get_value(spec, field, None) != get_value(choice, field, None):
+                    errors.append(code)
+
+        campaign = get_value(context, "research_campaign", None)
+        campaign_id = get_value(spec, "campaign_id", None)
+        variant_id = get_value(spec, "variant_id", None)
+        if campaign is None:
+            if campaign_id is not None or variant_id is not None:
+                errors.append("UNCONFIGURED_CAMPAIGN_VARIANT")
+        else:
+            if campaign_id != get_value(campaign, "campaign_id", None):
+                errors.append("CAMPAIGN_CONTEXT_MISMATCH")
+            if not _nonempty(get_value(spec, "variant_instruction", None)):
+                errors.append("CAMPAIGN_VARIANT_INSTRUCTION_REQUIRED")
+            variant_parameters = get_value(spec, "variant_parameters", None)
+            if (
+                not isinstance(variant_parameters, dict)
+                or not _nonempty(variant_parameters.get("formulation"))
+            ):
+                errors.append("CAMPAIGN_VARIANT_PARAMETERS_REQUIRED")
+            else:
+                errors.extend(_variant_parameter_errors(family, variant_parameters))
+            campaign_methods = get_value(
+                campaign, "family_method_card_ids", None
+            ) or {}
+            allowed_campaign_methods = {
+                str(item) for item in as_list(campaign_methods.get(family, ()))
+            }
+            proposed_campaign_methods = {
+                str(item)
+                for item in as_list(get_value(spec, "method_card_ids", None))
+            }
+            if not proposed_campaign_methods.issubset(allowed_campaign_methods):
+                errors.append("VARIANT_METHOD_MISMATCH")
 
         graph = GraphView.from_context(context)
         parent_id = get_value(spec, "parent_experiment_id", None)
@@ -236,6 +388,14 @@ class PlanValidator:
             for summary in historical_summaries
             if str(get_value(summary, "experiment_id", ""))
         }
+        implementation_parent_id = get_value(
+            spec, "implementation_parent_experiment_id", None
+        ) or parent_id
+        implementation_parent = graph.get(str(implementation_parent_id))
+        if implementation_parent is None and implementation_parent_id:
+            implementation_parent = ExperimentNodeView.from_summary(
+                historical_by_id.get(str(implementation_parent_id))
+            )
         refinement_ids = (
             {
                 str(item)
@@ -295,14 +455,15 @@ class PlanValidator:
                 or not classify_search_eligibility(summary, context).refinement_eligible
             ):
                 errors.append("INELIGIBLE_REFINEMENT_PARENT")
-        if (
-            parent is not None
-            and get_value(spec, "parent_commit_sha", None)
-            and parent.parent_commit_sha
-            and get_value(spec, "parent_commit_sha") != parent.parent_commit_sha
+        if implementation_parent is None:
+            errors.append("UNKNOWN_IMPLEMENTATION_PARENT")
+        elif (
+            get_value(spec, "parent_commit_sha", None)
+            and implementation_parent.parent_commit_sha
+            and get_value(spec, "parent_commit_sha")
+            != implementation_parent.parent_commit_sha
         ):
-            # The summary's commit_sha represents the code state being branched from.
-            errors.append("PARENT_COMMIT_MISMATCH")
+            errors.append("IMPLEMENTATION_PARENT_COMMIT_MISMATCH")
 
         component_ids = [
             str(item)
@@ -363,6 +524,19 @@ class PlanValidator:
             map(str, as_list(get_value(spec, "method_card_ids", None)))
         )
         method_ids = set(raw_method_ids)
+        declared_plan_id = get_value(spec, "plan_id", None)
+        method_plan_ids = {
+            plan.plan_id
+            for method_id in method_ids
+            for plan in [plan_for_method(method_id)]
+            if plan is not None
+        }
+        if len(method_plan_ids) > 1 or (
+            declared_plan_id is not None
+            and method_plan_ids
+            and declared_plan_id not in method_plan_ids
+        ):
+            errors.append("RESEARCH_PLAN_METHOD_MISMATCH")
         if not raw_method_ids:
             errors.append("METHOD_CARD_REQUIRED")
         if len(raw_method_ids) != len(method_ids):
@@ -370,9 +544,22 @@ class PlanValidator:
         required_method_id = get_value(choice, "method_card_id", None)
         if required_method_id and method_ids != {str(required_method_id)}:
             errors.append("METHOD_POLICY_MISMATCH")
+        allowed_method_ids = {
+            str(item)
+            for item in as_list(
+                get_value(choice, "allowed_method_card_ids", None)
+                if choice is not None
+                else None
+            )
+        }
+        if allowed_method_ids and (
+            len(raw_method_ids) != 1 or not method_ids.issubset(allowed_method_ids)
+        ):
+            errors.append("METHOD_POLICY_MISMATCH")
         cards = method_card_map(context)
         if not cards:
             errors.append("CONTEXT_METHOD_CARDS_MISSING")
+        campaign_active_parameters: set[str] = set()
         for method_id in sorted(method_ids):
             card = cards.get(method_id)
             if card is None:
@@ -380,6 +567,34 @@ class PlanValidator:
                 continue
             eligibility = evaluate_method_card(card, context, family=family)
             errors.extend(eligibility.reasons)
+            active_parameters = set(
+                METHOD_ACTIVE_PARAMETERS.get(
+                    method_id,
+                    tuple(
+                        str(item)
+                        for item in as_list(
+                            get_value(card, "active_parameters", None)
+                        )
+                    ),
+                )
+                if campaign is not None
+                else ()
+            )
+            campaign_active_parameters.update(active_parameters)
+            if campaign is not None and active_parameters:
+                supplied_parameters = set(
+                    (get_value(spec, "variant_parameters", None) or {}).keys()
+                )
+                if supplied_parameters != active_parameters:
+                    errors.append("VARIANT_ACTIVE_PARAMETER_MISMATCH")
+                expected_formulation = METHOD_FORMULATIONS.get(method_id)
+                if expected_formulation is not None and (
+                    (get_value(spec, "variant_parameters", None) or {}).get(
+                        "formulation"
+                    )
+                    != expected_formulation
+                ):
+                    errors.append("VARIANT_METHOD_FORMULATION_MISMATCH")
         source_events = set(map(str, as_list(get_value(context, "source_event_ids", None))))
         if any(not EVENT_ID_PATTERN.fullmatch(event_id) for event_id in source_events):
             errors.append("INVALID_CONTEXT_EVENT_ID")
@@ -427,14 +642,120 @@ class PlanValidator:
             elif snapshot != source:
                 errors.append("LITERATURE_EVIDENCE_TAMPERED")
 
-        text = " ".join(
-            str(get_value(spec, field, ""))
-            for field in ("hypothesis", "change_summary", "expected_mechanism", "falsification_condition")
-        ).lower()
+        history = as_list(get_value(context, "family_history", None))
+        hypothesis_evidence = get_value(spec, "hypothesis_evidence", None)
+        prior_evaluations = {
+            str(get_value(summary, "evaluation_event_id", ""))
+            for summary in history
+            if get_value(summary, "evaluation_event_id", None)
+        }
+        if prior_evaluations and hypothesis_evidence is None:
+            errors.append("HYPOTHESIS_EVIDENCE_REQUIRED_AFTER_PRIOR_EVALUATION")
+        if hypothesis_evidence is not None and prior_evaluations:
+            cited_evaluations = set(
+                map(
+                    str,
+                    as_list(
+                        get_value(
+                            hypothesis_evidence,
+                            "source_evaluation_event_ids",
+                            None,
+                        )
+                    ),
+                )
+            )
+            if not cited_evaluations:
+                errors.append("HYPOTHESIS_EVALUATION_EVIDENCE_REQUIRED")
+            if not cited_evaluations.issubset(prior_evaluations):
+                errors.append("HYPOTHESIS_EVIDENCE_NOT_PRIOR_EVALUATION")
+            if not cited_evaluations.issubset(evidence_events):
+                errors.append("HYPOTHESIS_EVIDENCE_NOT_DECLARED")
+            changed = set(
+                map(
+                    str,
+                    as_list(get_value(hypothesis_evidence, "changed_factors", None)),
+                )
+            )
+            held = set(
+                map(
+                    str,
+                    as_list(get_value(hypothesis_evidence, "held_constant", None)),
+                )
+            )
+            if not changed or not held:
+                errors.append("HYPOTHESIS_TREATMENT_BOUNDARY_REQUIRED")
+            if changed.intersection(held):
+                errors.append("HYPOTHESIS_TREATMENT_BOUNDARY_OVERLAP")
+            if get_value(spec, "campaign_id", None) and campaign_active_parameters:
+                if changed.union(held) != campaign_active_parameters:
+                    errors.append("CAMPAIGN_TREATMENT_BOUNDARY_MISMATCH")
+                reference = reference_variant_parameters(
+                    context,
+                    str(implementation_parent_id or ""),
+                    campaign_active_parameters,
+                    formulation=str(
+                        (get_value(spec, "variant_parameters", None) or {}).get(
+                            "formulation", ""
+                        )
+                    ),
+                )
+                actual_changed, actual_held = treatment_partition(
+                    get_value(spec, "variant_parameters", None) or {},
+                    reference,
+                    campaign_active_parameters,
+                )
+                if changed != set(actual_changed):
+                    errors.append("CAMPAIGN_CHANGED_FACTORS_MISMATCH")
+                if held != set(actual_held):
+                    errors.append("CAMPAIGN_HELD_CONSTANT_MISMATCH")
+            effects = get_value(
+                hypothesis_evidence, "expected_metric_effects", None
+            ) or {}
+            baseline_metric_set = get_value(
+                get_value(context, "baseline", None), "metric_set", None
+            )
+            allowed_metrics = set(
+                map(
+                    str,
+                    (
+                        get_value(baseline_metric_set, "metrics", None) or {}
+                    ).keys(),
+                )
+            )
+            if not effects:
+                errors.append("EXPECTED_METRIC_EFFECT_REQUIRED")
+            elif allowed_metrics and not set(map(str, effects)).issubset(allowed_metrics):
+                errors.append("EXPECTED_METRIC_EFFECT_UNKNOWN")
+
+        narrative_fields = (
+            "hypothesis",
+            "change_summary",
+            "expected_mechanism",
+            "falsification_condition",
+            "variant_instruction",
+        )
+        narrative = {
+            field: str(get_value(spec, field, "")) for field in narrative_fields
+        }
+        parameters = get_value(spec, "variant_parameters", "")
+        narrative["variant_parameters"] = (
+            json.dumps(parameters, ensure_ascii=True, sort_keys=True)
+            if isinstance(parameters, dict)
+            else str(parameters)
+        )
+        text = " ".join(narrative.values()).lower()
         if any(pattern in text for pattern in HIDDEN_PATTERNS):
             errors.append("HIDDEN_TEST_REFERENCE")
-        if contains_implementation_reference(text):
+        for field, value in narrative.items():
+            reference = find_implementation_reference(value)
+            if reference is None:
+                continue
             errors.append("CODE_SPECIFIC_PLAN_FORBIDDEN")
+            diagnostics.append(
+                "code_reference field=%s category=%s token=%s"
+                % (field, reference.category, json.dumps(reference.text))
+            )
+            break
         if any(component_id.lower() not in text for component_id in component_ids):
             errors.append("ENSEMBLE_COMPONENT_NOT_DESCRIBED")
 
@@ -481,4 +802,9 @@ class PlanValidator:
             if estimate is not None and remaining is not None and estimate > remaining:
                 errors.append(code)
 
-        return ValidationResult(accepted=not errors, errors=tuple(dict.fromkeys(errors)), warnings=tuple(dict.fromkeys(warnings)))
+        return ValidationResult(
+            accepted=not errors,
+            errors=tuple(dict.fromkeys(errors)),
+            warnings=tuple(dict.fromkeys(warnings)),
+            diagnostics=tuple(dict.fromkeys(diagnostics)),
+        )

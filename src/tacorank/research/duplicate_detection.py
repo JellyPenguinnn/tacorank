@@ -32,7 +32,23 @@ def duplicate_payload(spec: Any) -> dict[str, Any]:
     """
 
     methods = [str(item) for item in get_value(spec, "method_card_ids", ()) or ()]
+    campaign_id = get_value(spec, "campaign_id", "") or ""
+    if campaign_id:
+        return {
+            "campaign_id": campaign_id,
+            "family": get_value(spec, "family", ""),
+            "method_card_ids": methods,
+            # Campaign slot IDs identify chronology, not scientific novelty.
+            # Excluding them prevents the planner from repeating the same
+            # method/configuration under a fresh slot or parent.
+            "variant_parameters": get_value(spec, "variant_parameters", None) or {},
+            "component_experiment_ids": [
+                str(item)
+                for item in get_value(spec, "component_experiment_ids", ()) or ()
+            ],
+        }
     return {
+        "plan_id": get_value(spec, "plan_id", "") or "",
         "parent_commit_sha": get_value(spec, "parent_commit_sha", ""),
         "parent_experiment_id": get_value(spec, "parent_experiment_id", ""),
         "family": get_value(spec, "family", ""),

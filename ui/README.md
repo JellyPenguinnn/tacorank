@@ -38,6 +38,9 @@ same dashboard-reserved run ID and perform the paid production workflow:
 setup, preflight, autonomous execution, finalization, and validation. Launcher
 logs are written under ignored `.tacorank/dashboard-launches/`.
 
+The start dialog defaults to the 50-slot objective-then-temporal campaign and
+also exposes the standard autonomous search as an explicit alternative.
+
 ## Validate
 
 ```bash

@@ -222,9 +222,10 @@ class ResearchPlanner:
         )
         if not result.accepted:
             logger.warning(
-                "research_plan_validation_failed context_id=%s errors=%s",
+                "research_plan_validation_failed context_id=%s errors=%s diagnostics=%s",
                 _get(context, "context_id", None),
                 ",".join(result.errors),
+                ";".join(result.diagnostics) or "none",
             )
             repair = getattr(self.provider, "repair", None)
             if repair is not None:
@@ -243,9 +244,15 @@ class ResearchPlanner:
                 )
         if not result.accepted:
             logger.warning(
-                "research_plan_blocked_after_repair context_id=%s errors=%s",
+                "research_plan_blocked_after_repair context_id=%s errors=%s diagnostics=%s",
                 _get(context, "context_id", None),
                 ",".join(result.errors),
+                ";".join(result.diagnostics) or "none",
+            )
+            diagnostic_suffix = (
+                "; diagnostics: " + "; ".join(result.diagnostics)
+                if result.diagnostics
+                else ""
             )
             return self._attach_provider_usage(
                 self.output_factory(
@@ -253,7 +260,8 @@ class ResearchPlanner:
                     None,
                     "INVALID_PROVIDER_PLAN",
                     "Provider proposal failed Person 1 plan validation: "
-                    + ", ".join(result.errors),
+                    + ", ".join(result.errors)
+                    + diagnostic_suffix,
                     supporting,
                 )
             )

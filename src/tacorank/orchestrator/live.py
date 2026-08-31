@@ -53,6 +53,7 @@ from ..execution import (
     SealedExecutionVerifier,
     default_command_registry,
 )
+from ..execution.conformance import verify_execution_receipt
 from ..git import WorktreeManager
 from ..memory.event_store import EventStore
 from ..memory.projections import project
@@ -644,7 +645,7 @@ class ProtectedEvaluationBridge:
         best_batch = self._reference_batch(state.best_experiment_id, key, population)
         previous_best = self._score_reference(best_batch, population, request)
         execution_request = self._execution_request(request.output_checked_event_id)
-        internal_proxy_delta = self._internal_proxy_delta(
+        internal_proxy = self._internal_proxy_evidence(
             request, execution_request.patch_commit_sha
         )
         seed_events = (
@@ -681,10 +682,26 @@ class ProtectedEvaluationBridge:
             parent=parent,
             previous_best=previous_best,
             parent_scores=parent_batch.scores,
+            previous_best_scores=best_batch.scores,
             diagnostic_features=population.diagnostic_features,
             baseline_scores=baseline_batch.scores,
+            training_diagnostics=self._training_diagnostics(
+                request.output_checked_event_id
+            ),
             seed_evaluation_event_ids=seed_events,
-            internal_proxy_delta=internal_proxy_delta,
+            internal_proxy_delta=(
+                internal_proxy.parent_delta if internal_proxy is not None else None
+            ),
+            internal_proxy_ci_lower=(
+                internal_proxy.trust.parent_delta_ci_lower
+                if internal_proxy is not None
+                else None
+            ),
+            internal_proxy_ci_upper=(
+                internal_proxy.trust.parent_delta_ci_upper
+                if internal_proxy is not None
+                else None
+            ),
         )
         self._active_references = (baseline, parent, previous_best)
         try:
@@ -701,7 +718,6 @@ class ProtectedEvaluationBridge:
     async def decide(
         self, result: EvaluationResult, context: EvaluationDecisionContext
     ) -> ExperimentDecision:
-        del context
         key = (result.experiment_id, result.attempt, result.fidelity.value)
         domain = self._domain_results.get(key)
         if domain is None:
@@ -734,6 +750,7 @@ class ProtectedEvaluationBridge:
                 confirmations_remaining=max(
                     0, self.config.max_confirmation_attempts - prior_confirmations
                 ),
+                promote_inconclusive_proxy=context.promote_inconclusive_proxy,
             ),
         )
         canonical = decision.to_canonical()
@@ -863,6 +880,69 @@ class ProtectedEvaluationBridge:
             raise ContractError("evaluation request evidence is missing")
         return started
 
+    def _training_diagnostics(self, output_event_id: str) -> Mapping[str, float]:
+        output = next(
+            (
+                event
+                for event in self.event_store.read_events(repair_tail=True)
+                if event.event_id == output_event_id
+                and event.payload.type == "output.checked"
+            ),
+            None,
+        )
+        finished = next(
+            (
+                event
+                for event in self.event_store.read_events(repair_tail=True)
+                if output is not None
+                and event.event_id == output.causation_event_id
+                and event.payload.type == "execution.finished"
+            ),
+            None,
+        )
+        reference = (
+            finished.payload.result.checkpoint_artifact
+            if finished is not None
+            else None
+        )
+        if reference is None or self.artifact_store is None:
+            return {}
+        path = self.artifact_store.verify(reference)
+        if path.stat().st_size > 64 * 1024:
+            raise ContractError("training diagnostics exceed the bounded size")
+        document = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ContractError("training diagnostics must be a JSON object")
+        experiment_id = getattr(finished.payload.result, "experiment_id", None)
+        conformance = (
+            verify_execution_receipt(
+                self._experiment_spec(experiment_id), document
+            )
+            if experiment_id is not None
+            else {}
+        )
+        allowed = {
+            "train_rows",
+            "interaction_coverage",
+            "loss_start",
+            "loss_end",
+            "pairwise_accuracy",
+            "gradient_norm",
+            "residual_mean",
+            "residual_std",
+        }
+        values: Dict[str, float] = {}
+        for key in allowed:
+            value = document.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            parsed = float(value)
+            if not math.isfinite(parsed):
+                raise ContractError("training diagnostics must be finite")
+            values[key] = parsed
+        values.update(conformance)
+        return values
+
     def _resolve_seed_result(self, event_id: str) -> DomainEvaluationResult:
         event = next(
             (
@@ -913,14 +993,23 @@ class ProtectedEvaluationBridge:
                 seed_mean=canonical.trust.seed_mean,
                 seed_stderr=canonical.trust.seed_stderr,
                 seed_count=canonical.trust.seed_count,
+                parent_delta_mean=canonical.trust.parent_delta_mean,
+                parent_delta_stderr=canonical.trust.parent_delta_stderr,
+                parent_delta_ci_lower=canonical.trust.parent_delta_ci_lower,
+                parent_delta_ci_upper=canonical.trust.parent_delta_ci_upper,
+                best_delta_mean=canonical.trust.best_delta_mean,
+                best_delta_stderr=canonical.trust.best_delta_stderr,
+                best_delta_ci_lower=canonical.trust.best_delta_ci_lower,
+                best_delta_ci_upper=canonical.trust.best_delta_ci_upper,
+                minimum_practical_gain=canonical.trust.minimum_practical_gain,
             ),
             diagnostics=canonical.diagnostics,
             seed_evidence_event_ids=tuple(canonical.seed_evidence_event_ids),
         )
 
-    def _internal_proxy_delta(
+    def _internal_proxy_evidence(
         self, request: EvaluationRequest, patch_commit_sha: str
-    ) -> Optional[float]:
+    ) -> Optional[EvaluationResult]:
         if (
             request.population != Population.PUBLIC_VALIDATION
             or request.fidelity != Fidelity.FULL
@@ -937,9 +1026,20 @@ class ProtectedEvaluationBridge:
             ):
                 continue
             execution = self._execution_request(event.causation_event_id)
-            if execution.patch_commit_sha == patch_commit_sha:
-                return result.parent_delta
+            if (
+                execution.patch_commit_sha == patch_commit_sha
+                and execution.seed == request.seed
+            ):
+                return result
         return None
+
+    def _internal_proxy_delta(
+        self, request: EvaluationRequest, patch_commit_sha: str
+    ) -> Optional[float]:
+        """Compatibility projection for callers that only need the delta."""
+
+        result = self._internal_proxy_evidence(request, patch_commit_sha)
+        return result.parent_delta if result is not None else None
 
     def _write_diagnostics_artifact(
         self, result: DomainEvaluationResult
@@ -1535,6 +1635,7 @@ def _verify_executable_baseline_parity(
         "candidate_entrypoint",
         "candidate_source_path",
         "candidate_source_sha256",
+        "candidate_support_sha256",
         "routes",
     }:
         raise ContractError("baseline parity receipt has an invalid schema")
@@ -1551,6 +1652,18 @@ def _verify_executable_baseline_parity(
         or document["candidate_source_sha256"] != _sha256_file(candidate_source)
     ):
         raise ContractError("baseline parity candidate source identity changed")
+    support = document["candidate_support_sha256"]
+    expected_support = {
+        relative: _sha256_file(config.repository_root / relative)
+        for relative in (
+            "solution/experiment_config.py",
+            "solution/research_scaffold.py",
+            "solution/official_fm.py",
+            "solution/losses.py",
+        )
+    }
+    if support != expected_support:
+        raise ContractError("baseline parity candidate support identity changed")
     routes = document["routes"]
     expected_routes = {
         "candidate_smoke",

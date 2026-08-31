@@ -31,6 +31,15 @@ from ..schemas import (
 from .resources import ResourceSummary
 
 
+def _reported_primary_score(node: object) -> Optional[float]:
+    trust = getattr(node, "trust", None)
+    seed_mean = getattr(trust, "seed_mean", None)
+    if seed_mean is not None:
+        return float(seed_mean)
+    metric_set = getattr(node, "metric_set", None)
+    return None if metric_set is None else float(metric_set.primary_score)
+
+
 def render_metric_table(
     named_results: Mapping[str, EvaluationResult],
 ) -> str:
@@ -399,6 +408,7 @@ def _state_payload(events: Sequence[Event]) -> dict:
         ExperimentStatus.ACCEPTED,
         ExperimentStatus.REJECTED,
         ExperimentStatus.PRUNED,
+        ExperimentStatus.RETAINED,
         ExperimentStatus.INVALID,
         ExperimentStatus.NO_OP,
     }
@@ -452,6 +462,7 @@ def _state_payload(events: Sequence[Event]) -> dict:
     return {
         "schema_version": "1.0",
         "run_id": state.run_id,
+        "run_mode": state.run_mode,
         "execution_mode": (
             "parallel_rounds" if state.parallel_directions > 1 else "sequential"
         ),
@@ -461,6 +472,7 @@ def _state_payload(events: Sequence[Event]) -> dict:
         },
         "current": runtime,
         "global": {
+            "run_mode": state.run_mode,
             "status": state.status.value,
             "phase": state.phase,
             "best_experiment_id": state.best_experiment_id,
@@ -614,6 +626,11 @@ def render_summary(events: Sequence[Event]) -> str:
         for event in events
         if event.payload.type == "planning.failed"
     ]
+    specifications = {
+        event.payload.spec.experiment_id: event.payload.spec
+        for event in events
+        if event.payload.type == "experiment.proposed"
+    }
     adapter_failures = [
         event.payload.result
         for event in events
@@ -628,21 +645,27 @@ def render_summary(events: Sequence[Event]) -> str:
         "",
         "# TacoRank run summary",
         "",
-        "| Experiment | Family | Status | Fidelity | Primary | Loop time | Trae coding | Execution | Recovery | Commit |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Experiment | Family | Campaign variant | Status | Fidelity | Primary | Loop time | Trae coding | Execution | Recovery | Commit |",
+        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for node in sorted(state.experiments.values(), key=lambda item: item.experiment_id):
         timing = experiment_timing(events, node.experiment_id)
         lines.append(
-            "| %s | %s | %s | %s | %s | %s | %.3fs | %.3fs | %.3fs | %s |"
+            "| %s | %s | %s | %s | %s | %s | %s | %.3fs | %.3fs | %.3fs | %s |"
             % (
                 node.experiment_id,
                 node.family,
+                (
+                    specifications[node.experiment_id].variant_id
+                    if node.experiment_id in specifications
+                    and specifications[node.experiment_id].variant_id
+                    else "—"
+                ),
                 node.status.value,
                 node.highest_fidelity.value if node.highest_fidelity else "—",
                 (
-                    "%.8f" % node.metric_set.primary_score
-                    if node.metric_set is not None
+                    "%.8f" % _reported_primary_score(node)
+                    if _reported_primary_score(node) is not None
                     else "—"
                 ),
                 (
@@ -656,6 +679,55 @@ def render_summary(events: Sequence[Event]) -> str:
                 node.latest_commit_sha or "—",
             )
         )
+    campaign_specs = [
+        spec for spec in specifications.values() if spec.campaign_id is not None
+    ]
+    if campaign_specs:
+        family_order = list(dict.fromkeys(spec.family for spec in campaign_specs))
+        lines.extend(
+            (
+                "",
+                "## Campaign comparison",
+                "",
+                "| Family | Attempted | Full evaluations | Best experiment | Best primary | Baseline delta |",
+                "| --- | ---: | ---: | --- | ---: | ---: |",
+            )
+        )
+        for family in family_order:
+            family_nodes = [
+                state.experiments[spec.experiment_id]
+                for spec in campaign_specs
+                if spec.family == family and spec.experiment_id in state.experiments
+            ]
+            full_nodes = [
+                node
+                for node in family_nodes
+                if node.highest_fidelity is not None
+                and node.highest_fidelity.value == "full"
+                and node.metric_set is not None
+            ]
+            best = max(
+                full_nodes,
+                key=lambda node: _reported_primary_score(node),
+                default=None,
+            )
+            best_score = _reported_primary_score(best) if best is not None else None
+            baseline_delta = (
+                best_score - state.baseline_primary_score
+                if best_score is not None and state.baseline_primary_score is not None
+                else None
+            )
+            lines.append(
+                "| %s | %d | %d | %s | %s | %s |"
+                % (
+                    family,
+                    len(family_nodes),
+                    len(full_nodes),
+                    best.experiment_id if best is not None else "—",
+                    "%.8f" % best_score if best_score is not None else "—",
+                    "%+.8f" % baseline_delta if baseline_delta is not None else "—",
+                )
+            )
     latest_evaluations = {}
     for event in events:
         if event.payload.type == "evaluation.completed":
@@ -771,6 +843,7 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                 "status": "accepted",
                 "highest_fidelity": payload.evaluation.fidelity.value,
                 "metric_set": payload.metric_set.model_dump(mode="json"),
+                "primary_score": payload.metric_set.primary_score,
                 "trust": payload.evaluation.trust.model_dump(mode="json"),
                 "diagnostics": payload.evaluation.diagnostics.model_dump(mode="json"),
                 "metrics_artifact": (
@@ -838,6 +911,10 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                 "success_criteria": spec.success_criteria,
                 "falsification_condition": spec.falsification_condition,
                 "method_card_ids": list(spec.method_card_ids),
+                "campaign_id": spec.campaign_id,
+                "variant_id": spec.variant_id,
+                "variant_instruction": spec.variant_instruction,
+                "variant_parameters": dict(spec.variant_parameters),
                 "base_commit_sha": node.base_commit_sha,
                 "latest_commit_sha": node.latest_commit_sha,
                 "status": node.status.value,
@@ -849,6 +926,7 @@ def _graph_payload(events: Sequence[Event]) -> dict:
                     if node.metric_set is not None
                     else None
                 ),
+                "primary_score": _reported_primary_score(node),
                 "trust": (
                     node.trust.model_dump(mode="json")
                     if node.trust is not None
@@ -922,8 +1000,7 @@ def _render_graph(payload: dict) -> str:
         "| --- | --- | --- | --- | --- | ---: |",
     ]
     for node in payload["nodes"]:
-        metric_set = node["metric_set"]
-        score = metric_set["primary_score"] if metric_set is not None else None
+        score = node.get("primary_score")
         lines.append(
             "| %s | %s | %s | %s | %s | %s |"
             % (
@@ -963,6 +1040,8 @@ def _render_experiment(node: dict, events: Sequence[Event]) -> str:
             ", ".join("`%s`" % item for item in node["method_card_ids"])
             or "none"
         ),
+        "- Campaign: `%s`" % (node.get("campaign_id") or "none"),
+        "- Variant: `%s`" % (node.get("variant_id") or "none"),
         "",
         "## Hypothesis",
         "",
@@ -970,6 +1049,18 @@ def _render_experiment(node: dict, events: Sequence[Event]) -> str:
     ]
     if node.get("expected_mechanism"):
         lines.extend(("", "## Expected mechanism", "", node["expected_mechanism"]))
+    if node.get("variant_instruction"):
+        lines.extend(
+            ("", "## Campaign configuration", "", node["variant_instruction"])
+        )
+        lines.extend(
+            (
+                "",
+                "```json",
+                json.dumps(node["variant_parameters"], sort_keys=True),
+                "```",
+            )
+        )
     if node.get("timing") is not None:
         lines.extend(
             (
@@ -989,7 +1080,7 @@ def _render_experiment(node: dict, events: Sequence[Event]) -> str:
                 "",
                 "## Result",
                 "",
-                "Primary: `%.8f`" % metric_set["primary_score"],
+                "Primary: `%.8f`" % node["primary_score"],
                 "",
                 "```json",
                 json.dumps(metric_set, ensure_ascii=False, sort_keys=True, indent=2),
@@ -1086,8 +1177,7 @@ def _render_direction(direction: dict, node_by_id: Mapping[str, dict]) -> str:
     ]
     for experiment_id in direction["experiment_ids"]:
         node = node_by_id[experiment_id]
-        metric_set = node["metric_set"]
-        score = metric_set["primary_score"] if metric_set is not None else None
+        score = node.get("primary_score")
         lines.append(
             "| [%s](experiments/%s.md) | %s | %s | %s |"
             % (

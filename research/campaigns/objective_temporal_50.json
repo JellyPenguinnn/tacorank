@@ -1,0 +1,26 @@
+{
+  "campaign_id": "objective_temporal_50_v4",
+  "family_order": [
+    "objective",
+    "temporal_history"
+  ],
+  "family_budgets": {
+    "objective": 25,
+    "temporal_history": 25
+  },
+  "minimum_family_full_evaluations": 25,
+  "family_convergence_patience": 25,
+  "family_method_card_ids": {
+    "objective": [
+      "objective_pairwise_bpr",
+      "objective_listwise_user_softmax"
+    ],
+    "temporal_history": [
+      "temporal_history_compact"
+    ]
+  },
+  "family_directives": {
+    "objective": "Run all 25 objective slots unless the hard run budget or a safety failure stops the campaign. Investigate only the verified BPR and full-observed-listwise capabilities. Declare every active typed parameter, form each hypothesis from prior matched evaluation evidence, change a strict non-empty subset, and keep at least one active parameter fixed as a matched control. Adapt values from prior confidence intervals and execution-conformance diagnostics, and do not claim an implementation distinction absent from the capability contract.",
+    "temporal_history": "Run all 25 temporal-history slots unless the hard run budget or a safety failure stops the campaign. Investigate the verified strictly-past temporal-history capability. Form each hypothesis from prior matched evaluation evidence, change a strict non-empty subset of declared decay, shrinkage, residual-scale, and training-row parameters, and keep at least one active parameter fixed as a matched control. Do not vary inactive capacity or optimizer knobs."
+  }
+}

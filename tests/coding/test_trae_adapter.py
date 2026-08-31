@@ -665,6 +665,7 @@ def test_repair_is_a_direct_commit_on_the_same_branch(
         previous_repair_fingerprints=(),
         recovery_instructions="Correct the candidate module only.",
         remaining_repair_budget=1,
+        target_interface_excerpts={"entrypoint": "predict(rows)"},
         editable_roots=("solution",),
         protected_paths=("contract", "runs"),
     )
@@ -686,6 +687,67 @@ def test_repair_is_a_direct_commit_on_the_same_branch(
         (parts.repository / repaired.trajectory_artifact.path).read_bytes()
     )
     assert trajectory["tacorank_adapter"]["max_provider_tokens"] == 40
+
+
+def test_second_repair_rewinds_rejected_tip_to_last_accepted_commit(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    worker = _worker(parts)
+    initial = asyncio.run(worker.create_patch(parts.context, parts.spec))
+    recovery = SimpleNamespace(
+        context_id="context-repair-1",
+        run_id="run1",
+        experiment_id="exp1",
+        repair_attempt=1,
+        original_experiment_spec=parts.spec,
+        current_patch_commit_sha=initial.patch_commit_sha,
+        accepted_patch_receipt_id="receipt-1",
+        failure_class="code_error",
+        error_fingerprint="fingerprint-1",
+        error_summary="candidate import failed",
+        relevant_trace_tail="candidate.py:1",
+        failed_checks=({"name": "smoke", "status": "fail"},),
+        previous_repair_fingerprints=(),
+        recovery_instructions="Correct the candidate module only.",
+        remaining_repair_budget=1,
+        target_interface_excerpts={"entrypoint": "predict(rows)"},
+        editable_roots=("solution",),
+        protected_paths=("contract", "runs"),
+    )
+    rejected = asyncio.run(
+        worker.repair_patch(
+            recovery,
+            {"action": "trae_repair", "instructions": "first repair"},
+        )
+    )
+
+    parts.resolver.repair = CandidateIdentity(3, "event-spec-1")
+    retry_context = SimpleNamespace(
+        **{
+            **vars(recovery),
+            "context_id": "context-repair-2",
+            "repair_attempt": 2,
+            "error_fingerprint": "fingerprint-2",
+            "error_summary": "Gate A rejected the first repair",
+            "relevant_trace_tail": "UNAPPROVED_TARGET_FILE",
+            "remaining_repair_budget": 1,
+        }
+    )
+    repaired = asyncio.run(
+        worker.repair_patch(
+            retry_context,
+            {"action": "trae_repair", "instructions": "second repair"},
+        )
+    )
+
+    assert repaired.base_commit_sha == initial.patch_commit_sha
+    assert repaired.patch_commit_sha != rejected.patch_commit_sha
+    worktree = parts.worktrees.path_for("run1", "exp1")
+    assert _git(worktree, "rev-parse", "HEAD") == repaired.patch_commit_sha
+    assert (worktree / "solution" / "candidate.py").read_text(
+        encoding="utf-8"
+    ) == "VALUE = 1\nVALUE = 2\n"
 
 
 @pytest.mark.parametrize(

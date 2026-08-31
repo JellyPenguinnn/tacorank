@@ -16,6 +16,7 @@ from .graph_view import (
 from .linucb import LinUCBLegalChoiceRanker
 from .method_eligibility import eligible_method_cards, method_card_map
 from .playbook import REQUIRED_RULE_ORDER
+from .plans import method_is_plan_eligible, plan_for_method
 from .portfolio import HIGH_VALUE_FAMILIES
 from .search_eligibility import classify_search_eligibility
 
@@ -36,7 +37,10 @@ DEFAULT_METHOD_ORDER = {
     "temporal_history": ("temporal_history_compact",),
     "multitask": ("multitask_single_auxiliary",),
     "duration_bias": ("duration_bias_censored_watch_time",),
-    "features": ("temporal_drift_past_only",),
+    "features": (
+        "features_history_affinity",
+        "temporal_drift_past_only",
+    ),
     "model": ("model_compact_ranker",),
     "ensemble": (
         "ensemble_parallel_round_synthesis",
@@ -56,8 +60,16 @@ class PolicyChoice:
     phase: str
     reason_code: str
     reason: str
+    implementation_parent: ExperimentNodeView | None = None
     method_card_id: str | None = None
+    allowed_method_card_ids: tuple[str, ...] = ()
+    campaign_id: str | None = None
+    variant_id: str | None = None
+    campaign_directive: str | None = None
     component_experiment_ids: tuple[str, ...] = ()
+    plan_id: str | None = None
+    research_question: str | None = None
+    plan_maximum_experiments: int | None = None
 
 
 LegalChoiceRanker = Callable[[Sequence[PolicyChoice], Any], PolicyChoice]
@@ -193,6 +205,9 @@ def _method_for_family(
     eligible = {
         str(get_value(card, "method_id", "")): card
         for card in eligible_method_cards(context, family)
+        if method_is_plan_eligible(
+            context, str(get_value(card, "method_id", ""))
+        )
     }
     if preferred is None:
         # This card requires an explicit secondary component chosen by the
@@ -234,6 +249,9 @@ def _ordered_eligible_method_cards(context: Any, family: str) -> tuple[Any, ...]
     by_id = {
         str(get_value(card, "method_id", "")): card
         for card in eligible_method_cards(context, family)
+        if method_is_plan_eligible(
+            context, str(get_value(card, "method_id", ""))
+        )
     }
     ordered = [
         by_id.pop(method_id)
@@ -273,16 +291,26 @@ def _proposal(
     reason: str,
     component_experiment_ids: tuple[str, ...] = (),
 ) -> PolicyChoice:
+    method_id = str(get_value(card, "method_id", ""))
+    plan = plan_for_method(method_id)
     return PolicyChoice(
         action="propose",
         parent=parent,
+        implementation_parent=parent,
         family=family,
         cost_tier=_cost_tier(get_value(card, "cost_tier", None)),
         phase=phase,
         reason_code=reason_code,
         reason=reason,
-        method_card_id=str(get_value(card, "method_id", "")),
+        method_card_id=method_id,
         component_experiment_ids=component_experiment_ids,
+        plan_id=plan.plan_id if plan is not None else None,
+        research_question=(
+            plan.research_question if plan is not None else None
+        ),
+        plan_maximum_experiments=(
+            plan.maximum_experiments if plan is not None else None
+        ),
     )
 
 
@@ -290,11 +318,161 @@ def _blocked(reason_code: str, reason: str, *, phase: str = "playbook_gate") -> 
     return PolicyChoice(
         action="blocked",
         parent=None,
+        implementation_parent=None,
         family=None,
         cost_tier="low",
         phase=phase,
         reason_code=reason_code,
         reason=reason,
+    )
+
+
+def _campaign_choice(
+    context: Any,
+    eligible: Sequence[ExperimentNodeView],
+    allowed: tuple[str, ...],
+) -> PolicyChoice | None:
+    campaign = get_value(context, "research_campaign", None)
+    if campaign is None:
+        return None
+
+    history = as_list(get_value(context, "family_history", None))
+    latest = history[-1] if history else None
+    if latest is not None:
+        status = _normalized(get_value(latest, "status", None))
+        terminal = {"accepted", "rejected", "pruned", "retained", "invalid"}
+        if status not in terminal:
+            return _blocked(
+                "CAMPAIGN_RESULT_NOT_TERMINAL",
+                "The current campaign experiment must finish recovery and evaluation before the next slot.",
+                phase="campaign_depth",
+            )
+
+    campaign_id = str(get_value(campaign, "campaign_id", ""))
+    budgets = get_value(campaign, "family_budgets", None) or {}
+    configured_methods = get_value(campaign, "family_method_card_ids", None) or {}
+    directives = get_value(campaign, "family_directives", None) or {}
+    cards_by_family = {
+        family: {
+            str(get_value(card, "method_id", "")): card
+            for card in eligible_method_cards(context, family)
+        }
+        for family in allowed
+    }
+    parent = _depth_first_frontier(
+        GraphView.from_context(context), eligible, 1
+    )[0]
+
+    for family_value in as_list(get_value(campaign, "family_order", None)):
+        family = str(family_value)
+        family_attempted = [
+            summary
+            for summary in history
+            if str(get_value(summary, "campaign_id", "")) == campaign_id
+            and str(get_value(summary, "family", "")) == family
+        ]
+        budget = int(budgets.get(family, 0))
+        if len(family_attempted) >= budget:
+            continue
+        minimum_depth = int(
+            get_value(campaign, "minimum_family_full_evaluations", 3)
+        )
+        patience = int(get_value(campaign, "family_convergence_patience", 3))
+        full_count = 0
+        pressure = 0
+        for summary in family_attempted:
+            if not (
+                _normalized(get_value(summary, "highest_completed_fidelity", None))
+                == "full"
+                and _normalized(get_value(summary, "population", None))
+                == "public_validation"
+                and _normalized(get_value(summary, "integrity", None)) == "clean"
+                and _normalized(get_value(summary, "trust_verdict", None))
+                in {"accepted", "negative", "inconclusive", "redundant"}
+                and _normalized(get_value(summary, "status", None))
+                in {"accepted", "rejected", "pruned", "retained"}
+            ):
+                continue
+            full_count += 1
+            pressure = (
+                0
+                if bool(get_value(summary, "best_eligible", False))
+                else pressure + 1
+            )
+        if full_count >= minimum_depth and pressure >= patience:
+            continue
+        if family not in allowed:
+            return _blocked(
+                "CAMPAIGN_FAMILY_UNAVAILABLE",
+                "Campaign family %s is not allowed by the frozen contract." % family,
+                phase="campaign_depth",
+            )
+        eligible_cards = cards_by_family.get(family, {})
+        method_ids = tuple(
+            str(method_id)
+            for method_id in as_list(configured_methods.get(family, ()))
+            if str(method_id) in eligible_cards
+        )
+        if not method_ids:
+            return _blocked(
+                "CAMPAIGN_METHOD_UNAVAILABLE",
+                "Campaign family %s has no currently eligible method card." % family,
+                phase="campaign_depth",
+            )
+        card = eligible_cards[method_ids[0]]
+        sequence = len(family_attempted) + 1
+        implementation_parent = parent
+        for prior in reversed(family_attempted):
+            prior_node = ExperimentNodeView.from_summary(prior)
+            if (
+                prior_node is not None
+                and prior_node.parent_commit_sha
+                and _normalized(get_value(prior, "status", None))
+                in {"accepted", "rejected", "pruned", "retained"}
+                and _normalized(get_value(prior, "integrity", None)) != "compromised"
+                and _normalized(get_value(prior, "trust_verdict", None)) != "suspicious"
+            ):
+                implementation_parent = prior_node
+                break
+        return PolicyChoice(
+            action="propose",
+            parent=parent,
+            implementation_parent=implementation_parent,
+            family=family,
+            cost_tier=_cost_tier(get_value(card, "cost_tier", None)),
+            phase="campaign_depth",
+            reason_code="CAMPAIGN_DEPTH_SLOT",
+            reason=(
+                "Run depth slot %d/%d for family %s from the best verified parent."
+                % (sequence, budget, family)
+            ),
+            method_card_id=method_ids[0] if len(method_ids) == 1 else None,
+            allowed_method_card_ids=method_ids,
+            campaign_id=campaign_id,
+            variant_id="%s_%02d" % (family, sequence),
+            campaign_directive=str(directives.get(family, "")),
+        )
+
+    exhausted = all(
+        len(
+            [
+                summary
+                for summary in history
+                if str(get_value(summary, "campaign_id", "")) == campaign_id
+                and str(get_value(summary, "family", "")) == str(family)
+            ]
+        )
+        >= int(budgets.get(str(family), 0))
+        for family in as_list(get_value(campaign, "family_order", None))
+    )
+    return _blocked(
+        "CAMPAIGN_EXHAUSTED" if exhausted else "CAMPAIGN_CONVERGED",
+        (
+            "Every campaign family exhausted its frozen budget."
+            if exhausted
+            else "Every campaign family reached its frozen minimum depth and patience."
+        ),
+        phase="campaign_depth",
     )
 
 
@@ -491,7 +669,12 @@ def _no_op_choices(
     if not history:
         return None
     latest = history[-1]
-    if _normalized(get_value(latest, "status", None)) != "no_op":
+    status = _normalized(get_value(latest, "status", None))
+    # Older ledgers marked an exhausted no-op repair ``invalid`` without an
+    # experiment.decided event. Treat that immutable evidence as terminal for
+    # independent branching, while reserving same-mechanism reimplementation
+    # for the explicit ``no_op`` state used by the corrected controller.
+    if status not in {"no_op", "invalid", "rejected"}:
         return None
     verdict = _normalized(get_value(latest, "trust_verdict", None))
     contract = get_value(context, "contract_summary", None)
@@ -553,7 +736,8 @@ def _no_op_choices(
     # Permit one planner-selected reimplementation after the first no-op. A
     # second no-op for the same parent/family/method retires that mechanism.
     if (
-        parent is not None
+        status == "no_op"
+        and parent is not None
         and family in allowed
         and len(latest_methods) == 1
         and same_mechanism_no_ops == 1
@@ -775,11 +959,22 @@ def _playbook_choice(
                 "OUTPUT_CHECK_REJECTED",
                 "The latest output failed structural or contract validation and must recover.",
             )
-        if rule == "suspicious_or_compromised" and integrity == "compromised":
-            return _blocked(
-                "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
-                "The latest evaluation is integrity-compromised and requires "
-                "operator quarantine.",
+        if rule == "suspicious_or_compromised" and (
+            integrity == "compromised" or verdict == "suspicious"
+        ):
+            return _next_independent_choice(
+                context,
+                eligible,
+                allowed,
+                family,
+                reason_code="SUSPICIOUS_CANDIDATE_QUARANTINED",
+                reason=(
+                    "Quarantine the suspicious candidate and continue from the "
+                    "best trusted parent with an independent legal mechanism."
+                ),
+            ) or _blocked(
+                "NO_ELIGIBLE_METHOD",
+                "The suspicious candidate was quarantined and no independent method remains.",
             )
         if rule == "suspicious_or_compromised" and verdict == "suspicious":
             return _next_independent_choice(
@@ -1058,6 +1253,10 @@ class SearchPolicy:
                 "The planner context contains an invalid improvement playbook.",
                 phase="none",
             )
+
+        campaign = _campaign_choice(context, eligible, allowed)
+        if campaign is not None:
+            return campaign
 
         no_op_candidates = _no_op_choices(context, eligible, allowed)
         if no_op_candidates is not None:

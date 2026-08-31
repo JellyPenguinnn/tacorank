@@ -181,6 +181,11 @@ class PlannerAction(str, Enum):
     BLOCKED = "blocked"
 
 
+class TrialType(str, Enum):
+    IMPLEMENTATION = "implementation"
+    CONFIGURATION = "configuration"
+
+
 class RunOutcome(str, Enum):
     SUCCESS = "success"
     CODE_ERROR = "code_error"
@@ -243,6 +248,7 @@ class ExperimentDecisionKind(str, Enum):
     ACCEPT = "accept"
     REJECT = "reject"
     PRUNE = "prune"
+    RETAIN = "retain"
     INVALID = "invalid"
 
 
@@ -512,6 +518,49 @@ class LessonCandidate(StrictModel):
         )
 
 
+class ResearchCampaign(StrictModel):
+    """Frozen ordered family campaign embedded in the hash-bound run config."""
+
+    campaign_id: NonEmptyStr
+    family_order: List[NonEmptyStr]
+    family_budgets: Dict[NonEmptyStr, int]
+    family_method_card_ids: Dict[NonEmptyStr, List[NonEmptyStr]]
+    family_directives: Dict[NonEmptyStr, NonEmptyStr]
+    proxy_checkpoint_interval: int = Field(default=3, gt=0)
+    minimum_family_full_evaluations: int = Field(default=3, gt=0)
+    family_convergence_patience: int = Field(default=3, gt=0)
+
+    @field_validator("campaign_id")
+    @classmethod
+    def validate_campaign_id(cls, value: str) -> str:
+        return _validate_id(value, "campaign_id")
+
+    @model_validator(mode="after")
+    def validate_campaign(self) -> "ResearchCampaign":
+        if not self.family_order or len(self.family_order) != len(set(self.family_order)):
+            raise ValueError("campaign family_order must be non-empty and unique")
+        if set(self.family_budgets) != set(self.family_order):
+            raise ValueError("campaign family_budgets must exactly match family_order")
+        if any(value <= 0 for value in self.family_budgets.values()):
+            raise ValueError("campaign family budgets must be positive")
+        if set(self.family_method_card_ids) != set(self.family_order):
+            raise ValueError(
+                "campaign family_method_card_ids must exactly match family_order"
+            )
+        if set(self.family_directives) != set(self.family_order):
+            raise ValueError("campaign family_directives must exactly match family_order")
+        if any(
+            not methods or len(methods) != len(set(methods))
+            for methods in self.family_method_card_ids.values()
+        ):
+            raise ValueError("campaign method-card lists must be non-empty and unique")
+        return self
+
+    @property
+    def experiment_budget(self) -> int:
+        return sum(self.family_budgets.values())
+
+
 class LiteratureEvidence(StrictModel):
     """Bounded scholarly evidence exposed to the code-blind planner."""
 
@@ -563,6 +612,32 @@ class LiteratureEvidence(StrictModel):
         return value
 
 
+class HypothesisEvidence(StrictModel):
+    """Machine-checkable evidence and treatment boundary for one hypothesis."""
+
+    observation: NonEmptyStr
+    source_evaluation_event_ids: List[NonEmptyStr] = Field(min_length=1)
+    changed_factors: List[NonEmptyStr] = Field(min_length=1)
+    held_constant: List[NonEmptyStr] = Field(min_length=1)
+    expected_metric_effects: Dict[NonEmptyStr, float] = Field(min_length=1)
+
+    @field_validator(
+        "source_evaluation_event_ids", "changed_factors", "held_constant"
+    )
+    @classmethod
+    def validate_unique_evidence_lists(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("hypothesis evidence lists must not contain duplicates")
+        return values
+
+    @model_validator(mode="after")
+    def validate_treatment_boundary(self) -> "HypothesisEvidence":
+        overlap = set(self.changed_factors).intersection(self.held_constant)
+        if overlap:
+            raise ValueError("changed factors and held constants must be disjoint")
+        return self
+
+
 class ResearchProposal(StrictModel):
     """Code-blind research recommendation produced by Person 1.
 
@@ -575,15 +650,23 @@ class ResearchProposal(StrictModel):
     run_id: NonEmptyStr
     experiment_id: NonEmptyStr
     parent_experiment_id: Optional[str] = None
+    implementation_parent_experiment_id: Optional[str] = None
     parent_commit_sha: NonEmptyStr
     context_id: NonEmptyStr
     hypothesis: NonEmptyStr
     family: NonEmptyStr
+    plan_id: Optional[NonEmptyStr] = None
     change_summary: NonEmptyStr
     expected_mechanism: NonEmptyStr
     success_criteria: NonEmptyStr
     falsification_condition: NonEmptyStr
     estimated_cost: CostEstimate
+    campaign_id: Optional[NonEmptyStr] = None
+    variant_id: Optional[NonEmptyStr] = None
+    variant_instruction: Optional[NonEmptyStr] = None
+    variant_parameters: Dict[
+        NonEmptyStr, Union[bool, int, float, NonEmptyStr]
+    ] = Field(default_factory=dict)
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
     # Ensemble proposals retain one canonical Git parent and identify any
     # additional clean component experiments explicitly.  Non-ensemble plans
@@ -591,6 +674,7 @@ class ResearchProposal(StrictModel):
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
     literature_evidence: List[LiteratureEvidence] = Field(default_factory=list)
+    hypothesis_evidence: Optional[HypothesisEvidence] = None
     duplicate_key: NonEmptyStr
 
     @field_validator("run_id", "experiment_id", "context_id")
@@ -598,10 +682,34 @@ class ResearchProposal(StrictModel):
     def validate_ids(cls, value: str, info: Any) -> str:
         return _validate_id(value, info.field_name)
 
-    @field_validator("parent_experiment_id")
+    @field_validator("parent_experiment_id", "implementation_parent_experiment_id")
     @classmethod
-    def validate_optional_id(cls, value: Optional[str]) -> Optional[str]:
-        return None if value is None else _validate_id(value, "parent_experiment_id")
+    def validate_optional_id(cls, value: Optional[str], info: Any) -> Optional[str]:
+        return None if value is None else _validate_id(value, info.field_name)
+
+    @field_validator("campaign_id", "variant_id")
+    @classmethod
+    def validate_optional_campaign_ids(
+        cls, value: Optional[str], info: Any
+    ) -> Optional[str]:
+        return None if value is None else _validate_id(value, info.field_name)
+
+    @model_validator(mode="after")
+    def validate_campaign_variant(self) -> "ResearchProposal":
+        fields = (self.campaign_id, self.variant_id, self.variant_instruction)
+        if any(value is not None for value in fields) and not all(
+            value is not None for value in fields
+        ):
+            raise ValueError("campaign proposal fields must be supplied together")
+        if self.campaign_id is None and self.variant_parameters:
+            raise ValueError("non-campaign proposals cannot supply variant parameters")
+        if self.campaign_id is not None and (
+            not self.variant_parameters or "formulation" not in self.variant_parameters
+        ):
+            raise ValueError(
+                "campaign proposals require variant parameters with a formulation"
+            )
+        return self
 
     @field_validator("component_experiment_ids")
     @classmethod
@@ -628,6 +736,10 @@ class ExperimentSpec(ResearchProposal):
     target_stage: NonEmptyStr
     target_files: List[str]
     fidelity_plan: List[Fidelity]
+    trial_type: TrialType = TrialType.IMPLEMENTATION
+    implementation_id: Optional[NonEmptyStr] = None
+    implementation_sha256: Optional[str] = None
+    active_parameter_names: List[NonEmptyStr] = Field(default_factory=list)
 
     @field_validator("target_files")
     @classmethod
@@ -649,6 +761,32 @@ class ExperimentSpec(ResearchProposal):
             if order[current] <= order[previous]:
                 raise ValueError("fidelity_plan must be strictly increasing without duplicates")
         return values
+
+    @field_validator("implementation_sha256")
+    @classmethod
+    def validate_implementation_sha256(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not SHA256_RE.fullmatch(value):
+            raise ValueError("implementation_sha256 must be lowercase sha256")
+        return value
+
+    @field_validator("active_parameter_names")
+    @classmethod
+    def validate_active_parameter_names(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("active_parameter_names must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_trial_assignment(self) -> "ExperimentSpec":
+        if self.trial_type == TrialType.CONFIGURATION and (
+            self.implementation_id is None
+            or self.implementation_sha256 is None
+            or not self.active_parameter_names
+        ):
+            raise ValueError(
+                "configuration trials require a verified implementation assignment"
+            )
+        return self
 
 
 class PlannerOutput(StrictModel):
@@ -937,6 +1075,15 @@ class TrustAssessment(StrictModel):
     seed_mean: Optional[float] = None
     seed_stderr: Optional[float] = Field(default=None, ge=0.0)
     seed_count: int = Field(default=1, ge=1)
+    parent_delta_mean: Optional[float] = None
+    parent_delta_stderr: Optional[float] = Field(default=None, ge=0.0)
+    parent_delta_ci_lower: Optional[float] = None
+    parent_delta_ci_upper: Optional[float] = None
+    best_delta_mean: Optional[float] = None
+    best_delta_stderr: Optional[float] = Field(default=None, ge=0.0)
+    best_delta_ci_lower: Optional[float] = None
+    best_delta_ci_upper: Optional[float] = None
+    minimum_practical_gain: Optional[float] = Field(default=None, ge=0.0)
 
     @field_validator("flags")
     @classmethod
@@ -962,6 +1109,21 @@ class TrustAssessment(StrictModel):
             raise ValueError("seed mean and standard error must be supplied together")
         if any(supplied) and self.seed_count < 3:
             raise ValueError("seed aggregates require at least three seed results")
+        for prefix in ("parent_delta", "best_delta"):
+            interval = (
+                getattr(self, prefix + "_mean"),
+                getattr(self, prefix + "_stderr"),
+                getattr(self, prefix + "_ci_lower"),
+                getattr(self, prefix + "_ci_upper"),
+            )
+            if any(value is not None for value in interval) and not all(
+                value is not None for value in interval
+            ):
+                raise ValueError("%s uncertainty fields must be supplied together" % prefix)
+            if all(value is not None for value in interval):
+                mean, _, lower, upper = interval
+                if lower > upper or not lower <= mean <= upper:
+                    raise ValueError("%s confidence interval is invalid" % prefix)
         return self
 
 
@@ -978,6 +1140,17 @@ class EvaluationDiagnostics(StrictModel):
     proxy_full_delta_gap: Optional[float] = Field(default=None, ge=0.0)
     validation_arm_deltas: Dict[str, float] = Field(default_factory=dict)
     validation_arm_gap: Optional[float] = Field(default=None, ge=0.0)
+    paired_parent_delta_stderr: Optional[float] = Field(default=None, ge=0.0)
+    paired_parent_delta_ci_lower: Optional[float] = None
+    paired_parent_delta_ci_upper: Optional[float] = None
+    paired_best_delta_stderr: Optional[float] = Field(default=None, ge=0.0)
+    paired_best_delta_ci_lower: Optional[float] = None
+    paired_best_delta_ci_upper: Optional[float] = None
+    val_b_delta_ci_lower: Optional[float] = None
+    val_b_delta_ci_upper: Optional[float] = None
+    val_a_delta_ci_lower: Optional[float] = None
+    val_a_delta_ci_upper: Optional[float] = None
+    paired_bootstrap_samples: Optional[int] = Field(default=None, ge=20)
     temporal_delta_slope: Optional[float] = None
     gain_concentration_top10pct: Optional[float] = Field(
         default=None, ge=0.0, le=1.0
@@ -1020,6 +1193,29 @@ class EvaluationDiagnostics(StrictModel):
             assert self.validation_arm_gap is not None
             if abs(expected_gap - self.validation_arm_gap) > 1e-12:
                 raise ValueError("validation arm gap does not match arm deltas")
+        for prefix in ("paired_parent_delta", "paired_best_delta"):
+            interval = (
+                getattr(self, prefix + "_stderr"),
+                getattr(self, prefix + "_ci_lower"),
+                getattr(self, prefix + "_ci_upper"),
+            )
+            if any(value is not None for value in interval) and not all(
+                value is not None for value in interval
+            ):
+                raise ValueError("%s interval fields must be supplied together" % prefix)
+            if interval[1] is not None and interval[1] > interval[2]:
+                raise ValueError("%s confidence interval is invalid" % prefix)
+        for arm in ("val_a", "val_b"):
+            interval = (
+                getattr(self, arm + "_delta_ci_lower"),
+                getattr(self, arm + "_delta_ci_upper"),
+            )
+            if any(value is not None for value in interval) and not all(
+                value is not None for value in interval
+            ):
+                raise ValueError("%s confidence interval must be supplied together" % arm)
+            if interval[0] is not None and interval[0] > interval[1]:
+                raise ValueError("%s confidence interval is invalid" % arm)
         for field_name in ("best_slice", "worst_slice"):
             name = getattr(self, field_name)
             if name is not None and name not in self.slice_deltas:
@@ -1369,6 +1565,8 @@ class PlannerMethodCardSummary(StrictModel):
     expected_effect: NonEmptyStr
     falsifier: NonEmptyStr
     prohibition_conditions: List[NonEmptyStr] = Field(default_factory=list)
+    capability_status: NonEmptyStr = "unverified"
+    active_parameters: List[NonEmptyStr] = Field(default_factory=list)
     implementation_targets: List[str] = Field(default_factory=list)
     source_path: NonEmptyStr
 
@@ -1379,6 +1577,13 @@ class PlannerMethodCardSummary(StrictModel):
         if len(normalized) != len(set(normalized)):
             raise ValueError("implementation_targets must be unique")
         return normalized
+
+    @field_validator("active_parameters")
+    @classmethod
+    def validate_active_parameters(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("active_parameters must be unique")
+        return values
 
 
 class PlannerPlaybookSummary(StrictModel):
@@ -1436,9 +1641,12 @@ class PlannerExperimentSummary(StrictModel):
 
     experiment_id: NonEmptyStr
     parent_experiment_id: Optional[str] = None
+    implementation_parent_experiment_id: Optional[str] = None
     commit_sha: NonEmptyStr
     family: Optional[str] = None
+    plan_id: Optional[NonEmptyStr] = None
     hypothesis_summary: str = ""
+    evaluation_event_id: Optional[NonEmptyStr] = None
     trust_verdict: Optional[TrustVerdict] = None
     stability: Optional[Stability] = None
     integrity: Optional[Integrity] = None
@@ -1471,9 +1679,42 @@ class PlannerExperimentSummary(StrictModel):
     best_eligible: bool = False
     status: NonEmptyStr
     duplicate_key: str = ""
+    campaign_id: Optional[NonEmptyStr] = None
+    variant_id: Optional[NonEmptyStr] = None
+    variant_instruction: Optional[NonEmptyStr] = None
+    variant_parameters: Dict[
+        NonEmptyStr, Union[bool, int, float, NonEmptyStr]
+    ] = Field(default_factory=dict)
+    trial_type: Optional[TrialType] = None
+    implementation_id: Optional[NonEmptyStr] = None
+    execution_conformant: bool = False
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+
+
+class PlannerResearchPlanSummary(StrictModel):
+    """Ledger-derived status for one conditional multi-experiment plan."""
+
+    plan_id: NonEmptyStr
+    research_question: NonEmptyStr
+    families: List[NonEmptyStr]
+    method_card_ids: List[NonEmptyStr]
+    maximum_experiments: int = Field(gt=0)
+    experiments_attempted: int = Field(ge=0)
+    valid_full_experiments: int = Field(ge=0)
+    confirmed_improvements: int = Field(ge=0)
+    confirmed_regressions: int = Field(ge=0)
+    status: Literal["unstarted", "active", "falsified", "exhausted"]
+    conditional_followups: Dict[NonEmptyStr, NonEmptyStr]
+
+    @model_validator(mode="after")
+    def validate_plan_counts(self) -> "PlannerResearchPlanSummary":
+        if self.experiments_attempted > self.maximum_experiments:
+            raise ValueError("research plan attempts exceed its frozen ceiling")
+        if self.valid_full_experiments > self.experiments_attempted:
+            raise ValueError("valid plan results exceed attempted experiments")
+        return self
 
 
 class PlannerLessonSummary(StrictModel):
@@ -1530,7 +1771,9 @@ class PlannerContext(ContextDocument):
     # Long-term memory contains only active controller-recorded lessons.
     active_lessons: List[PlannerLessonSummary] = Field(default_factory=list)
     method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
+    research_plans: List[PlannerResearchPlanSummary] = Field(default_factory=list)
     playbook: PlannerPlaybookSummary
+    research_campaign: Optional[ResearchCampaign] = None
     # Retained as an empty, backward-compatible field so historical schema-v1
     # ledgers still replay. New planner contexts never carry implementation
     # interfaces; those belong exclusively to the coder boundary.
@@ -1626,6 +1869,7 @@ class RecoveryContext(ContextDocument):
     previous_repair_fingerprints: List[NonEmptyStr] = Field(default_factory=list)
     recovery_instructions: NonEmptyStr
     remaining_repair_budget: int = Field(ge=0)
+    target_interface_excerpts: Dict[str, str] = Field(default_factory=dict)
     editable_roots: List[str]
     protected_paths: List[str]
 
@@ -1673,6 +1917,7 @@ class EvaluationDecisionContext(StrictModel):
     baseline_score: float
     parent_score: Optional[float] = None
     previous_best_score: Optional[float] = None
+    promote_inconclusive_proxy: bool = True
 
 
 class EventType(str, Enum):
@@ -1707,6 +1952,7 @@ class RunStartedPayload(StrictModel):
     contract_sha256: str
     protected_paths_sha256: str
     max_experiments: int = Field(gt=0)
+    run_mode: Literal["discovery", "submission"] = "submission"
     parallel_directions: int = Field(default=1, gt=0, le=7)
     synthesize_parallel_improvements: bool = True
     deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)

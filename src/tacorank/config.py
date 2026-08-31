@@ -14,6 +14,7 @@ from pydantic import Field, field_validator, model_validator
 from .schemas import (
     MetricSet,
     NonEmptyStr,
+    ResearchCampaign,
     SHA256_RE,
     StrictModel,
     _validate_runtime_mapping,
@@ -26,67 +27,95 @@ class ContractError(RuntimeError):
 
 
 DEFAULT_TARGET_INTERFACE_EXCERPTS = {
-    "solution/candidate.py": (
-        "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
-        "-> None; this is the stable production entrypoint and must remain wired "
-        "to every approved helper edited by the experiment. Read only "
-        "invocation.input_root and write exactly invocation.output_path as "
-        "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
-        "invocation.seed; return None. fm_baseline_predictions.csv contains "
-        "unconstrained real-valued FM ranking scores, not probabilities. Never "
-        "sigmoid, clip to [0,1], normalize, or rescale the FM parent or the "
-        "parent-plus-residual result. Bound only the residual on the parent's "
-        "original score scale and preserve the exact parent score when no "
-        "supported residual is available."
+    "solution/official_fm.py": (
+        "Editable adaptation of the frozen official five-field NumPy FM. "
+        "Preserve controller-owned split selection, evaluation, and submission "
+        "boundaries. Research trials may change model mathematics only when the "
+        "ExperimentSpec authorizes this file."
+    ),
+    "solution/losses.py": (
+        "Candidate-owned objective functions. Losses may consume training labels "
+        "only and must not select checkpoints or read validation/test labels."
     ),
     "solution/features.py": (
-        "Candidate-owned feature boundary. Preserve the strict train.csv and "
-        "score.csv schemas and the fitted-on-training-only FeatureEncoder API. "
-        "Scoring rows never contain long_view. Any new aggregate must be "
-        "deterministic and use only interactions earlier than the row it scores."
+        "Candidate-owned feature boundary. Fit on training data only; scoring "
+        "rows never contain long_view and past-only features must not leak future "
+        "interactions."
     ),
     "solution/model.py": (
-        "Candidate-owned model components. FactorizationMachine is the compact "
-        "pointwise starting implementation. Approved experiments may add or "
-        "replace trainable components here, but must preserve deterministic seeds, "
-        "finite unconstrained ranking scores, and non-zero trainable gradients."
+        "Candidate-owned model components. Preserve deterministic seeds, finite "
+        "unconstrained ranking scores, and non-zero trainable gradients."
     ),
     "solution/train.py": (
-        "Candidate-owned training orchestration. fit_pointwise is a helper, not an "
-        "entrypoint. Training may read train.csv only, must respect the supplied "
-        "fidelity and seed, and must not evaluate, select, or early-stop on public "
-        "validation or score-population labels."
+        "Candidate-owned training orchestration. Read train.csv only, respect "
+        "fidelity and seed, and never select using validation or test labels."
     ),
     "solution/inference.py": (
-        "Candidate-owned scoring and output helpers. Preserve authenticated, "
-        "row-aligned FM parent scores, add only the approved bounded residual on "
-        "the original score scale, retain exact parent fallback, and create exactly "
-        "one ordered finite output CSV exclusively."
+        "Candidate-owned scoring helpers. Preserve row order and write exactly "
+        "one finite output CSV exclusively."
+    ),
+    "solution/experiment_config.py": (
+        "Edit only the scalar values in CONFIG. The stable scaffold supports "
+        "formulation=official_fm|pointwise|bpr|listwise|temporal_history and validates: "
+        "embedding_dim integer 2..32, learning_rate 1e-5..0.2, epochs 1..40, "
+        "negative_count integer 1..16, l2 0..0.1, residual_scale 0..0.5, "
+        "max_train_rows integer 1000..1141112, history_decay_days 1..180, "
+        "history_shrinkage 0..1000, and listwise_strategy=full_observed. Set "
+        "CONFIG family to the ExperimentSpec "
+        "family and copy every approved variant_parameters value into its "
+        "matching CONFIG key; do not edit executable code."
+    ),
+    "solution/research_scaffold.py": (
+        "Implementation trials may add or repair one reviewed research capability. "
+        "Preserve the candidate entrypoint, frozen FM parent, deterministic seeds, "
+        "finite outputs, and training-diagnostics execution receipt. Configuration "
+        "trials must not edit this file."
+    ),
+    "solution/candidate.py": (
+        "Implementation trials may change the reviewed solution.candidate:run "
+        "entrypoint only when the selected unverified method card authorizes it. "
+        "Preserve the candidate output and data-boundary contracts."
     ),
 }
 
+
+# Production contains both the stable typed campaign scaffold and the modular
+# implementation surface merged from main. Development fixtures may provide
+# only the smaller default surface, so keep this expansion production-only.
 PRODUCTION_TARGET_INTERFACE_EXCERPTS = {
     **DEFAULT_TARGET_INTERFACE_EXCERPTS,
     "solution/candidate.py": (
         "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
-        "-> None; this is the stable production entrypoint and must remain wired "
-        "to every approved helper edited by the experiment. Read only "
-        "invocation.input_root and write exactly invocation.output_path as "
-        "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
-        "invocation.seed; return None. train.csv columns are exactly "
-        "date,user_id,video_id,author_id,tab,duration_ms,long_view; score.csv "
-        "columns are exactly row_id,date,user_id,video_id,author_id,tab,duration_ms "
-        "and never expose long_view. fm_baseline_predictions.csv contains the "
-        "setup-verified official FM score aligned one-to-one with score.csv; its "
-        ".sha256 file authenticates it. These are unconstrained real-valued "
-        "ranking scores, not probabilities. Never sigmoid, clip to [0,1], "
-        "normalize, or rescale the FM parent or the parent-plus-residual result. "
-        "Bound only the residual on the parent's original score scale and preserve "
-        "the exact parent when no supported residual is available. duration_ms is "
-        "video duration, never watch time. Training dates strictly precede score "
-        "dates. Preserve contiguous row_id order, duplicate rows, finite "
-        "deterministic scores, and exclusive output creation. Use all training rows "
-        "or an explicit deterministic representative sample."
+        "-> None. Read only invocation.input_root and write exactly "
+        "invocation.output_path as row_id,user_id,video_id,score CSV. Preserve "
+        "the authenticated, row-aligned, unconstrained real-valued FM parent; "
+        "never sigmoid, clip, normalize, or rescale it. Training dates strictly "
+        "precede score dates, score rows never expose long_view, and duration_ms "
+        "is video duration rather than watch time. Preserve deterministic finite "
+        "scores, row order, duplicates, and exact parent fallback."
+    ),
+    "solution/features.py": (
+        "Candidate-owned feature boundary. Fit on training data only. Any history "
+        "aggregate must be deterministic and use only interactions earlier than "
+        "the row it scores; scoring rows never contain long_view."
+    ),
+    "solution/model.py": (
+        "Candidate-owned model components. Preserve deterministic seeds, finite "
+        "unconstrained ranking scores, and non-zero trainable gradients."
+    ),
+    "solution/official_fm.py": DEFAULT_TARGET_INTERFACE_EXCERPTS[
+        "solution/official_fm.py"
+    ],
+    "solution/losses.py": DEFAULT_TARGET_INTERFACE_EXCERPTS["solution/losses.py"],
+    "solution/train.py": (
+        "Candidate-owned training orchestration. Read train.csv only, respect "
+        "fidelity and seed, and never early-stop or select using public-validation "
+        "or score-population labels."
+    ),
+    "solution/inference.py": (
+        "Candidate-owned scoring helpers. Add only the approved bounded residual "
+        "on the original FM scale, preserve exact parent fallback, and create one "
+        "ordered finite output CSV exclusively."
     ),
 }
 
@@ -105,6 +134,7 @@ class RunConfig(StrictModel):
     evaluator_sha256: str
     baseline_commit_sha: NonEmptyStr
     max_experiments: int = Field(default=50, gt=0)
+    run_mode: Literal["discovery", "submission"] = "submission"
     parallel_directions: int = Field(default=1, gt=0, le=7)
     synthesize_parallel_improvements: bool = True
     wall_time_limit_seconds: int = Field(default=21_600, gt=0)
@@ -154,6 +184,7 @@ class RunConfig(StrictModel):
     )
     research_capabilities: List[NonEmptyStr] = Field(default_factory=list)
     active_research_prohibitions: List[NonEmptyStr] = Field(default_factory=list)
+    research_campaign: Optional[ResearchCampaign] = None
     prediction_change_no_op_threshold: float = Field(default=0.001, ge=0.0, le=1.0)
     max_single_score_fraction: float = Field(default=0.5, gt=0.0, le=1.0)
     target_interface_excerpts: Dict[str, str] = Field(
@@ -243,6 +274,13 @@ class RunConfig(StrictModel):
             raise ValueError("allowed_research_families must not be empty")
         if not self.allowed_research_data:
             raise ValueError("allowed_research_data must not be empty")
+        if self.research_campaign is not None:
+            campaign = self.research_campaign
+            unknown = set(campaign.family_order) - set(self.allowed_research_families)
+            if unknown:
+                raise ValueError("campaign contains a research family not allowed by the run")
+            if campaign.experiment_budget > self.max_experiments:
+                raise ValueError("campaign experiment budget exceeds max_experiments")
         if (
             self.literature_research_enabled
             and self.literature_provider == "paper_bank"

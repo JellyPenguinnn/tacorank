@@ -372,6 +372,12 @@ def default_command_registry(
         kind="predictions",
         content_type="text/csv",
     )
+    training_diagnostics = ExpectedArtifact(
+        role="checkpoint",
+        relative_path="training-diagnostics.json",
+        kind="checkpoint",
+        content_type="application/json",
+    )
 
     def pipeline_environment(
         command_id: str, entrypoint_key: str, entrypoint_value: str
@@ -424,7 +430,7 @@ def default_command_registry(
                 pipeline_inputs.candidate_entrypoint,
             ),
             allowed_fidelities=("smoke",),
-            expected_artifacts=(prediction,),
+            expected_artifacts=(prediction, training_diagnostics),
             container_executable=container_python_executable,
         ),
         CommandProfile(
@@ -447,7 +453,7 @@ def default_command_registry(
                 pipeline_inputs.candidate_entrypoint,
             ),
             allowed_fidelities=("proxy",),
-            expected_artifacts=(prediction,),
+            expected_artifacts=(prediction, training_diagnostics),
             container_executable=container_python_executable,
         ),
         CommandProfile(
@@ -470,7 +476,7 @@ def default_command_registry(
                 pipeline_inputs.candidate_entrypoint,
             ),
             allowed_fidelities=("full",),
-            expected_artifacts=(prediction,),
+            expected_artifacts=(prediction, training_diagnostics),
             container_executable=container_python_executable,
         ),
         CommandProfile(
@@ -493,7 +499,7 @@ def default_command_registry(
                 pipeline_inputs.candidate_entrypoint,
             ),
             allowed_fidelities=("full",),
-            expected_artifacts=(prediction,),
+            expected_artifacts=(prediction, training_diagnostics),
             container_executable=container_python_executable,
         ),
         CommandProfile(

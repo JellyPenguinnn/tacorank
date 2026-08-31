@@ -11,6 +11,11 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const MAX_API_KEY_LENGTH = 4096;
+const CAMPAIGNS = {
+  objective_temporal_50: 'research/campaigns/objective_temporal_50.json',
+  standard: null,
+} as const;
+const RUN_MODES = new Set(['discovery', 'submission']);
 
 export async function POST(request: Request) {
   const root = repositoryRoot();
@@ -23,12 +28,25 @@ export async function POST(request: Request) {
   const apiKey = body && typeof body === 'object' && 'api_key' in body && typeof body.api_key === 'string'
     ? body.api_key.trim()
     : '';
+  const campaignId = body && typeof body === 'object' && 'campaign_id' in body && typeof body.campaign_id === 'string'
+    ? body.campaign_id
+    : 'standard';
+  const runMode = body && typeof body === 'object' && 'run_mode' in body && typeof body.run_mode === 'string'
+    ? body.run_mode
+    : 'discovery';
   if (!apiKey) {
     return NextResponse.json({ error: 'Enter a DeepSeek API key to start the run.' }, { status: 400 });
   }
   if (apiKey.length > MAX_API_KEY_LENGTH || apiKey.includes('\0') || apiKey.includes('\n') || apiKey.includes('\r')) {
     return NextResponse.json({ error: 'The DeepSeek API key is invalid.' }, { status: 400 });
   }
+  if (!(campaignId in CAMPAIGNS)) {
+    return NextResponse.json({ error: 'The selected research campaign is invalid.' }, { status: 400 });
+  }
+  if (!RUN_MODES.has(runMode)) {
+    return NextResponse.json({ error: 'The selected run mode is invalid.' }, { status: 400 });
+  }
+  const campaignPath = CAMPAIGNS[campaignId as keyof typeof CAMPAIGNS];
   const tacorankDirectory = path.join(root, '.tacorank');
   await fs.mkdir(tacorankDirectory, { recursive: true });
   const startLock = path.join(tacorankDirectory, 'dashboard-start.lock');
@@ -63,6 +81,7 @@ export async function POST(request: Request) {
         schema_version: 'tacorank.dashboard-launch.v1' as const,
         launch_id: launchId,
         run_id: runId,
+        run_mode: runMode as 'discovery' | 'submission',
         started_at: startedAt,
         pid: null,
         stop_requested_at: null,
@@ -74,6 +93,8 @@ export async function POST(request: Request) {
         DEEPSEEK_API_KEY: apiKey,
         PYTHONDONTWRITEBYTECODE: '1',
         TACORANK_RUN_ID: runId,
+        TACORANK_RUN_MODE: runMode,
+        TACORANK_RESEARCH_CAMPAIGN: campaignPath ?? undefined,
       };
       if (windows) {
         // A detached Windows child cannot reliably inherit Node's file handle:
@@ -84,7 +105,7 @@ export async function POST(request: Request) {
         const powershellCommand = [
           '$code=0',
           'try {',
-          '& $env:TACORANK_LAUNCH_SCRIPT -RunId $env:TACORANK_RUN_ID -DownloadData *>&1 | Out-File -LiteralPath $env:TACORANK_LAUNCH_LOG -Append -Encoding utf8',
+          '& $env:TACORANK_LAUNCH_SCRIPT -RunId $env:TACORANK_RUN_ID -RunMode $env:TACORANK_RUN_MODE -DownloadData *>&1 | Out-File -LiteralPath $env:TACORANK_LAUNCH_LOG -Append -Encoding utf8',
           '$code = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }',
           '} catch {',
           '($_ | Out-String) | Out-File -LiteralPath $env:TACORANK_LAUNCH_LOG -Append -Encoding utf8',
@@ -108,8 +129,6 @@ export async function POST(request: Request) {
           windowsHide: true,
           env: {
             ...childEnvironment,
-            TACORANK_LAUNCH_SCRIPT: script,
-            TACORANK_LAUNCH_LOG: logPath,
           },
           shell: false,
           stdio: 'ignore',
@@ -146,7 +165,7 @@ export async function POST(request: Request) {
         }
         throw error;
       }
-      return NextResponse.json({ status: 'started', launch_id: launchId, run_id: runId, pid: child.pid });
+      return NextResponse.json({ status: 'started', launch_id: launchId, run_id: runId, run_mode: runMode, campaign_id: campaignId, pid: child.pid });
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : 'Could not start the live run.' }, { status: 500 });
     }

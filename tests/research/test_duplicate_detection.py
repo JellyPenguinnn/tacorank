@@ -61,6 +61,31 @@ def test_method_and_ensemble_components_are_semantic_identity():
     assert compute_duplicate_key(first_blend) != compute_duplicate_key(second_blend)
 
 
+def test_campaign_variants_are_distinct_on_the_same_parent():
+    first = make_spec(
+        campaign_id="objective_temporal_50_v1",
+        variant_id="objective_01",
+        variant_instruction="Use one negative per positive.",
+        variant_parameters={"formulation": "bpr", "negative_count": 1},
+    )
+    second = make_spec(
+        campaign_id="objective_temporal_50_v1",
+        variant_id="objective_02",
+        variant_instruction="Use four negatives per positive.",
+        variant_parameters={"formulation": "bpr", "negative_count": 4},
+    )
+
+    assert compute_duplicate_key(first) != compute_duplicate_key(second)
+
+    repeated_under_new_slot = make_spec(
+        campaign_id="objective_temporal_50_v1",
+        variant_id="objective_03",
+        variant_instruction="Pair every positive with a single negative.",
+        variant_parameters={"negative_count": 1, "formulation": "bpr"},
+    )
+    assert compute_duplicate_key(first) == compute_duplicate_key(repeated_under_new_slot)
+
+
 def test_detector_rejects_seen_key_and_validates_supplied_key():
     first = make_spec()
     detector = DuplicateDetector([first])

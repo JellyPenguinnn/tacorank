@@ -17,15 +17,16 @@ from solution.candidate import run as run_candidate
 from benchmarks.kuairand_pure.pipeline import check_submission
 from tacorank import deployment as deployment_module
 from tacorank.config import ContractError
+from tacorank.research.eda import PlannerEdaToolbox
 from tacorank.orchestrator.live import (
     _verify_data_manifest,
     _verify_executable_baseline_parity,
 )
 
 
-def _row(index: int, label: int):
+def _row(index: int, label: int, date: int = 20220408):
     return (
-        20220408 + index,
+        date,
         "user_%d" % (index % 3),
         "video_%d" % index,
         "author_%d" % index,
@@ -33,6 +34,40 @@ def _row(index: int, label: int):
         float(1000 + index),
         label,
     )
+
+
+def _write_feature_raw_data(
+    data: Path, train, valid, test
+) -> None:
+    metadata = data / "video_features_basic_pure.csv"
+    with metadata.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("video_id", "author_id", "upload_dt", "tag"))
+        for row in (*train, *valid, *test):
+            writer.writerow((row[2], row[3], "2022-01-01", "1,2"))
+    header = (
+        "user_id", "video_id", "date", "hourmin", "time_ms", "long_view",
+        "duration_ms", "tab", "is_click", "play_time_ms", "is_like",
+        "is_follow", "is_comment", "is_forward", "is_hate",
+        "is_profile_enter",
+    )
+    for name, rows in (
+        ("log_standard_4_08_to_4_21_pure.csv", train),
+        ("log_standard_4_22_to_5_08_pure.csv", (*valid, *test)),
+    ):
+        time_offset = 0 if name.startswith("log_standard_4_08") else 1_000_000
+        with (data / name).open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(header)
+            for index, row in enumerate(rows):
+                writer.writerow(
+                    (
+                        row[1], row[2], row[0], 1200,
+                        1_650_000_000_000 + time_offset + index,
+                        row[6], row[5], row[4], 1, row[5] * row[6], 0, 0, 0,
+                        0, 0, 0,
+                    )
+                )
 
 
 def test_download_data_uses_certifi_and_extracts_pinned_archive(
@@ -121,13 +156,24 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
         ),
         encoding="utf-8",
     )
+    for name in (
+        "experiment_config.py",
+        "research_scaffold.py",
+        "official_fm.py",
+        "losses.py",
+    ):
+        (root / "solution" / name).write_text(
+            (Path(__file__).parents[2] / "solution" / name).read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
     deployment.mkdir(parents=True)
     data.mkdir(parents=True)
-    for name in deployment_module.RAW_REQUIRED:
-        (data / name).write_text("header\n", encoding="utf-8")
-    train = [_row(index, index % 2) for index in range(6)]
-    valid = [_row(index + 10, index % 2) for index in range(4)]
-    test = [_row(index + 20, 0) for index in range(3)]
+    train = [_row(index, index % 2, 20220408 + index) for index in range(6)]
+    valid = [_row(index + 10, index % 2, 20220422) for index in range(4)]
+    test = [_row(index + 20, 0, 20220429) for index in range(3)]
+    _write_feature_raw_data(data, train, valid, test)
     monkeypatch.setattr(
         deployment_module,
         "_load_official_splits",
@@ -155,6 +201,17 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
     monkeypatch.setattr(deployment_module, "_run", fake_run)
 
     result = deployment_module._prepare_data(root, deployment, data)
+
+    data_profile = PlannerEdaToolbox(
+        result["input_roots"]["candidate_full"]
+    ).inspect()
+    assert data_profile.train_rows == len(train)
+    assert data_profile.train_columns == [
+        "date", "time_ms", "hourmin", "user_id", "video_id", "author_id",
+        "tab", "duration_ms", "long_view", "is_click", "play_time_ms",
+        "is_like", "is_follow", "is_comment", "is_forward", "is_hate",
+        "is_profile_enter",
+    ]
 
     smoke_header = (result["input_roots"]["candidate_smoke"] / "score.csv").read_text(
         encoding="utf-8"
@@ -185,6 +242,14 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
     ).relative_to(root).as_posix() in attested
     assert result["population_csvs"]["full"].relative_to(root).as_posix() in attested
     assert submission_rows.relative_to(root).as_posix() in attested
+    feature_manifest = (
+        result["input_roots"]["candidate_full"]
+        / "history-feature-manifest.json"
+    )
+    assert feature_manifest.relative_to(root).as_posix() in attested
+    assert (
+        result["input_roots"]["candidate_full"] / "history_score.csv"
+    ).is_file()
 
     config = SimpleNamespace(
         repository_root=root,

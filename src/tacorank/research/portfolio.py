@@ -26,6 +26,7 @@ ALL_FAMILIES: tuple[str, ...] = HIGH_VALUE_FAMILIES + (
 )
 METHOD_STATUSES = {"candidate", "blocked", "known_negative", "forbidden"}
 METHOD_COST_TIERS = {"low", "medium", "high"}
+CAPABILITY_STATUSES = {"unverified", "verified"}
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,10 @@ class MethodCard:
     falsifier: str = ""
     prohibition_conditions: tuple[str, ...] = ()
     implementation_targets: tuple[str, ...] = ()
+    configuration_target: str | None = None
+    capability_status: str = "unverified"
+    implementation_id: str | None = None
+    active_parameters: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
     source_path: str | None = None
 
@@ -86,12 +91,12 @@ def default_portfolio() -> ExperimentPortfolio:
                 falsifier="No stable primary-score improvement over the pointwise parent.",
                 prohibition_conditions=("evaluator_or_split_change_required",),
                 implementation_targets=(
-                    "solution/candidate.py",
-                    "solution/features.py",
-                    "solution/model.py",
+                    "solution/official_fm.py",
+                    "solution/losses.py",
                     "solution/train.py",
-                    "solution/inference.py",
+                    "solution/candidate.py",
                 ),
+                capability_status="unverified",
             ),
             MethodCard(
                 method_id="temporal_history_compact",
@@ -111,9 +116,69 @@ def default_portfolio() -> ExperimentPortfolio:
                 expected_effect="Improve preference modeling for users with useful history.",
                 falsifier="No gain over a no-history control or evidence of temporal leakage.",
                 implementation_targets=(
-                    "solution/candidate.py",
                     "solution/features.py",
+                    "solution/model.py",
+                    "solution/train.py",
                     "solution/inference.py",
+                    "solution/candidate.py",
+                ),
+                capability_status="unverified",
+            ),
+            MethodCard(
+                method_id="features_history_affinity",
+                family="features",
+                summary=(
+                    "Use candidate-conditioned point-in-time history affinities."
+                ),
+                tags=("history", "affinity", "point-in-time", "regularized"),
+                cost_tier="medium",
+                mechanism=(
+                    "Fit a bounded regularized residual over tag, author, duration, "
+                    "and request-context affinities from strictly earlier events."
+                ),
+                prerequisites=(
+                    "baseline_parity",
+                    "strict_temporal_cutoff",
+                    "history_affinity_features_legal",
+                ),
+                allowed_data=(
+                    "train_interactions",
+                    "date",
+                    "time_ms",
+                    "hourmin",
+                    "user_id",
+                    "video_id",
+                    "author_id",
+                    "tab",
+                    "duration_ms",
+                    "long_view",
+                    "item_tags",
+                    "upload_date",
+                    "point_in_time_history_features",
+                ),
+                expected_effect=(
+                    "Improve within-user ordering through candidate-dependent "
+                    "history matches without raw-ID memorization."
+                ),
+                falsifier=(
+                    "No stable full-evaluation gain or a gain confined to one "
+                    "date/history cohort."
+                ),
+                prohibition_conditions=(
+                    "future_aggregate_required",
+                ),
+                implementation_targets=("solution/research_scaffold.py",),
+                configuration_target="solution/experiment_config.py",
+                capability_status="verified",
+                implementation_id="features_history_affinity_v1",
+                active_parameters=(
+                    "formulation",
+                    "learning_rate",
+                    "epochs",
+                    "l2",
+                    "residual_scale",
+                    "max_train_rows",
+                    "history_shrinkage",
                 ),
             ),
             MethodCard(
@@ -419,6 +484,10 @@ def load_method_cards(directory: str | Path) -> ExperimentPortfolio:
         allowed_data = list_value("allowed_data") or ((section_value("Allowed data"),) if section_value("Allowed data") else ())
         prohibition = list_value("prohibition_conditions") or ((section_value("Do not use when"),) if section_value("Do not use when") else ())
         implementation_targets = list_value("implementation_targets")
+        configuration_target = text_value("configuration_target") or None
+        capability_status = text_value("capability_status", "unverified")
+        implementation_id = text_value("implementation_id") or None
+        active_parameters = list_value("active_parameters")
         sources = list_value("sources")
         if not sources and section_value("Sources"):
             sources = (section_value("Sources"),)
@@ -435,10 +504,20 @@ def load_method_cards(directory: str | Path) -> ExperimentPortfolio:
             or family not in set(ALL_FAMILIES)
             or status not in METHOD_STATUSES
             or cost_tier not in METHOD_COST_TIERS
+            or capability_status not in CAPABILITY_STATUSES
             or not mechanism
             or not allowed_data
             or not expected_effect
             or not falsifier
+            or (
+                capability_status == "verified"
+                and (
+                    not implementation_id
+                    or not implementation_targets
+                    or not configuration_target
+                    or not active_parameters
+                )
+            )
         ):
             continue
         cards.append(
@@ -457,6 +536,10 @@ def load_method_cards(directory: str | Path) -> ExperimentPortfolio:
                 falsifier=falsifier,
                 prohibition_conditions=prohibition,
                 implementation_targets=implementation_targets,
+                configuration_target=configuration_target,
+                capability_status=capability_status,
+                implementation_id=implementation_id,
+                active_parameters=active_parameters,
                 sources=sources,
                 source_path=str(path),
             )

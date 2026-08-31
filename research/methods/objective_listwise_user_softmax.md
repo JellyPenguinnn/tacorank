@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"objective_listwise_user_softmax","family":"objective","status":"candidate","tags":["listwise","within_user","top_k"],"cost_tier":"medium","prerequisites":["pairwise_tested","user_impression_groups"],"allowed_data":["train_interactions","user_id","long_view"],"prohibition_conditions":["uninformative_lists_unhandled"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":["https://mlanthology.org/icml/2007/cao2007icml-learning/"]}
+{"schema_version":"1.0","method_id":"objective_listwise_user_softmax","family":"objective","status":"candidate","tags":["listwise","within_user","top_k"],"cost_tier":"medium","prerequisites":["pairwise_tested","user_impression_groups"],"allowed_data":["train_interactions","user_id","long_view"],"prohibition_conditions":["uninformative_lists_unhandled"],"capability_status":"unverified","implementation_targets":["solution/official_fm.py","solution/losses.py","solution/train.py","solution/candidate.py"],"sources":["https://mlanthology.org/icml/2007/cao2007icml-learning/"]}
 ```
 
 ## Mechanism
@@ -33,8 +33,9 @@ all-positive/all-negative lists an invented ordering signal.
 
 ## Minimal implementation
 
-Keep the current representation fixed and add a bounded user-list softmax or a
-small pairwise-plus-listwise hybrid with explicit handling of uninformative lists.
+Keep the current representation fixed and apply softmax to each complete informative
+user list. Normalize target mass uniformly across every positive item in that list;
+skip all-positive and all-negative lists rather than inventing an ordering signal.
 
 ## Sources
 

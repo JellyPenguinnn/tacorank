@@ -16,6 +16,7 @@ from tacorank.providers.deepseek import DeepSeekResearchProvider
 from tacorank.providers.research_provider import ProviderError, ProviderRequest
 from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.research.literature import OpenAlexLiteratureSkill
+from tacorank.research.plan_validation import PlanValidator
 from tacorank.research.paper_bank import PaperBankLiteratureSkill
 from tacorank.research.search_policy import SearchPolicy
 from tacorank.schemas import LiteratureEvidence, ResearchProposal, TokenMeasurement
@@ -237,43 +238,390 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert provider.resource_delta.token_measurement == TokenMeasurement.PROVIDER
 
 
-def test_deepseek_provider_grounds_plan_in_retrieved_literature(planner_context):
+def test_deepseek_provider_binds_campaign_variant(planner_context):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = {
+        "campaign_id": "depth_test",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 2},
+        "family_method_card_ids": {
+            "objective": ["objective_pairwise_bpr"],
+        },
+        "family_directives": {
+            "objective": "Adapt the next objective from prior evidence.",
+        },
+    }
+    objective_history = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    objective_history.campaign_id = "depth_test"
+    objective_history.variant_id = "objective_00"
+    objective_history.variant_instruction = "Use one negative per positive."
+    temporal_history = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0000",
+        family="temporal_history",
+        method_card_ids=["temporal_history_compact"],
+    )
+    temporal_history.campaign_id = "other_campaign"
+    temporal_history.variant_id = "temporal_history_01"
+    temporal_history.variant_instruction = "Use a seven-day author history."
+    planner_context.family_history = [temporal_history, objective_history]
     calls = []
-    evidence = literature_evidence()
 
     def transport(url, headers, payload, timeout):
-        del url, headers, timeout
         calls.append(payload)
         return response(
             candidate(
-                literature_evidence_ids=[
-                    evidence.evidence_id,
-                    "lit_invented_id",
-                ]
+                variant_instruction="Use four uniform negatives per positive.",
+                    variant_parameters={
+                        "formulation": "bpr",
+                        "negative_sampling": "uniform",
+                        "negative_count": 4,
+                    },
+                    hypothesis_evidence={
+                        "observation": "There is no prior experiment yet.",
+                        "source_evaluation_event_ids": ["evt_999999"],
+                        "changed_factors": ["negative_count"],
+                        "held_constant": ["formulation"],
+                        "expected_metric_effects": {"GAUC": 0.001},
+                    },
+                )
+            )
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(
+            ProviderRequest(context=planner_context, policy_choice=choice)
+        )
+    )
+
+    assert result["campaign_id"] == "depth_test"
+    assert result["variant_id"] == "objective_02"
+    assert result["variant_instruction"] == (
+        "Use four uniform negatives per positive."
+    )
+    assert result["variant_parameters"] == {
+        "formulation": "bpr",
+            "embedding_dim": 16,
+            "learning_rate": 0.001,
+            "epochs": 40,
+        "negative_count": 4,
+            "l2": 0.000001,
+        "residual_scale": 0.05,
+            "max_train_rows": 1141112,
+    }
+    assert result["hypothesis_evidence"] is None
+    prompt = json.loads(calls[0]["messages"][1]["content"])
+    assert [item["family"] for item in prompt["context"]["family_history"]] == [
+        "objective"
+    ]
+    assert prompt["policy"]["variant_id"] == "objective_02"
+    assert prompt["policy"]["campaign_directive"] == (
+        "Adapt the next objective from prior evidence."
+    )
+    bpr = next(
+        item
+        for item in prompt["context"]["method_cards"]
+        if item["method_id"] == "objective_pairwise_bpr"
+    )
+    assert bpr["active_parameters"] == [
+        "formulation",
+        "embedding_dim",
+        "learning_rate",
+        "epochs",
+        "negative_count",
+        "l2",
+        "residual_scale",
+        "max_train_rows",
+    ]
+    assert bpr["parameter_defaults"]["negative_count"] == 2
+    validation = PlanValidator().validate(
+        result, planner_context, choice=choice
+    )
+    assert validation.accepted, validation.errors
+
+
+def test_deepseek_provider_derives_later_campaign_treatment_boundary(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = {
+        "campaign_id": "depth_test",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 3},
+        "family_method_card_ids": {"objective": ["objective_pairwise_bpr"]},
+        "family_directives": {"objective": "Adapt from prior evidence."},
+    }
+    prior = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    prior.campaign_id = "depth_test"
+    prior.variant_id = "objective_01"
+    prior.evaluation_event_id = "evt_000010"
+    prior.variant_parameters = {
+        "formulation": "bpr",
+        "embedding_dim": 8,
+        "learning_rate": 0.01,
+        "epochs": 2,
+        "negative_count": 2,
+        "l2": 0.0001,
+        "residual_scale": 0.05,
+        "max_train_rows": 100000,
+    }
+    planner_context.family_history = [prior]
+    planner_context.source_event_ids.append("evt_000010")
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, payload, timeout
+        return response(
+            candidate(
+                variant_instruction="Increase BPR negatives from two to four.",
+                variant_parameters={"negative_count": 4},
+                hypothesis_evidence={
+                    "observation": "The prior BPR result remained within noise.",
+                    "source_evaluation_event_ids": ["evt_000010"],
+                    "changed_factors": ["epochs"],
+                    "held_constant": ["negative_count"],
+                    "expected_metric_effects": {"GAUC": 0.001},
+                },
             )
         )
 
     choice = SearchPolicy().choose(planner_context)
     provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
     result = asyncio.run(
-        provider.generate(
-            ProviderRequest(
-                planner_context,
-                choice,
-                literature_evidence=(evidence,),
-            )
-        )
+        provider.generate(ProviderRequest(planner_context, choice))
     )
 
-    assert result["literature_evidence"] == [evidence.model_dump(mode="json")]
-    ResearchProposal.model_validate(result)
-    prompt = json.loads(calls[0]["messages"][1]["content"])
-    assert prompt["literature_research"]["required"] is True
-    assert prompt["literature_research"]["papers"] == [
-        evidence.model_dump(mode="json")
+    assert result["variant_parameters"]["negative_count"] == 4
+    assert result["variant_parameters"]["learning_rate"] == 0.01
+    assert result["hypothesis_evidence"]["changed_factors"] == [
+        "negative_count"
     ]
-    assert "untrusted scientific evidence" in calls[0]["messages"][0]["content"]
-    assert "lit_invented_id" not in json.dumps(result)
+    assert set(result["hypothesis_evidence"]["held_constant"]) == {
+        "formulation",
+        "embedding_dim",
+        "learning_rate",
+        "epochs",
+        "l2",
+        "residual_scale",
+        "max_train_rows",
+    }
+    assert "evt_000010" in result["evidence_event_ids"]
+    validation = PlanValidator().validate(
+        result, planner_context, choice=choice
+    )
+    assert validation.accepted, validation.errors
+
+
+def test_deepseek_provider_binds_latest_prior_evaluation_when_citation_is_invalid(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = {
+        "campaign_id": "depth_test",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 3},
+        "family_method_card_ids": {"objective": ["objective_pairwise_bpr"]},
+        "family_directives": {"objective": "Adapt from prior evidence."},
+    }
+    prior = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    prior.campaign_id = "depth_test"
+    prior.variant_id = "objective_01"
+    prior.evaluation_event_id = "evt_000010"
+    prior.variant_parameters = {
+        "formulation": "bpr",
+        "embedding_dim": 8,
+        "learning_rate": 0.01,
+        "epochs": 2,
+        "negative_count": 2,
+        "l2": 0.0001,
+        "residual_scale": 0.05,
+        "max_train_rows": 100000,
+    }
+    planner_context.family_history = [prior]
+    planner_context.source_event_ids.append("evt_000010")
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, payload, timeout
+        return response(
+            candidate(
+                variant_instruction="Increase BPR negatives from two to four.",
+                variant_parameters={"negative_count": 4},
+                hypothesis_evidence={
+                    "observation": "The prior BPR result remained within noise.",
+                    "source_evaluation_event_ids": ["evt_999999"],
+                    "expected_metric_effects": {"GAUC": 0.001},
+                },
+            )
+        )
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(ProviderRequest(planner_context, choice))
+    )
+
+    assert result["hypothesis_evidence"]["source_evaluation_event_ids"] == [
+        "evt_000010"
+    ]
+    assert "evt_000010" in result["evidence_event_ids"]
+    validation = PlanValidator().validate(
+        result, planner_context, choice=choice
+    )
+    assert validation.accepted, validation.errors
+
+
+def test_deepseek_provider_enforces_control_when_all_treatment_values_change(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = ["temporal_history"]
+    planner_context.contract_summary.research_capabilities.append(
+        "strict_temporal_cutoff"
+    )
+    planner_context.research_campaign = {
+        "campaign_id": "temporal_depth_test",
+        "family_order": ["temporal_history"],
+        "family_budgets": {"temporal_history": 25},
+        "family_method_card_ids": {
+            "temporal_history": ["temporal_history_compact"]
+        },
+        "family_directives": {
+            "temporal_history": "Adapt from prior matched evidence."
+        },
+        "minimum_family_full_evaluations": 25,
+        "family_convergence_patience": 25,
+    }
+    prior = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    prior.evaluation_event_id = "evt_000010"
+    planner_context.family_history = [prior]
+    planner_context.source_event_ids.append("evt_000010")
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, payload, timeout
+        return response(
+            candidate(
+                method_card_ids=["temporal_history_compact"],
+                variant_instruction="Test longer, more strongly shrunk history.",
+                variant_parameters={
+                    "formulation": "temporal_history",
+                    "residual_scale": 0.2,
+                    "max_train_rows": 200000,
+                    "history_decay_days": 30.0,
+                    "history_shrinkage": 50.0,
+                },
+                hypothesis_evidence={
+                    "observation": "The prior objective result remained within noise.",
+                    "source_evaluation_event_ids": ["evt_000010"],
+                    "changed_factors": ["history_decay_days"],
+                    "held_constant": ["max_train_rows"],
+                    "expected_metric_effects": {"GAUC": 0.001},
+                },
+            )
+        )
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(ProviderRequest(planner_context, choice))
+    )
+
+    assert result["variant_parameters"]["max_train_rows"] == 1141112
+    assert "matched control(s)" in result["variant_instruction"]
+    assert result["hypothesis_evidence"]["source_evaluation_event_ids"] == [
+        "evt_000010"
+    ]
+    assert result["hypothesis_evidence"]["held_constant"] == [
+        "max_train_rows"
+    ]
+    assert set(result["hypothesis_evidence"]["changed_factors"]) == {
+        "formulation",
+        "residual_scale",
+        "history_decay_days",
+        "history_shrinkage",
+    }
+    validation = PlanValidator().validate(
+        result, planner_context, choice=choice
+    )
+    assert validation.accepted, validation.errors
+
+
+def test_deepseek_provider_does_not_fabricate_missing_hypothesis_evidence(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = {
+        "campaign_id": "objective_depth_test",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 25},
+        "family_method_card_ids": {"objective": ["objective_pairwise_bpr"]},
+        "family_directives": {"objective": "Adapt from prior evidence."},
+        "minimum_family_full_evaluations": 25,
+        "family_convergence_patience": 25,
+    }
+    prior = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    prior.campaign_id = "objective_depth_test"
+    prior.evaluation_event_id = "evt_000010"
+    prior.variant_parameters = {
+        "formulation": "bpr",
+        "embedding_dim": 8,
+        "learning_rate": 0.01,
+        "epochs": 2,
+        "negative_count": 2,
+        "l2": 0.0001,
+        "residual_scale": 0.05,
+        "max_train_rows": 100000,
+    }
+    planner_context.family_history = [prior]
+    planner_context.source_event_ids.append("evt_000010")
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, payload, timeout
+        return response(
+            candidate(
+                variant_instruction="Increase BPR negatives.",
+                variant_parameters={"negative_count": 4},
+                hypothesis_evidence=None,
+            )
+        )
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(ProviderRequest(planner_context, choice))
+    )
+
+    assert result["hypothesis_evidence"] is None
+    validation = PlanValidator().validate(
+        result, planner_context, choice=choice
+    )
+    assert not validation.accepted
+    assert "HYPOTHESIS_EVIDENCE_REQUIRED_AFTER_PRIOR_EVALUATION" in (
+        validation.errors
+    )
 
 
 def test_deepseek_provider_exposes_bank_papers_as_advisory(planner_context):
@@ -409,7 +757,13 @@ def test_deepseek_provider_discards_unsolicited_implementation_details(
 
 def test_research_planner_repairs_code_specific_narrative(planner_context):
     responses = [
-        response(candidate(change_summary="Edit solution/candidate.py.")),
+        response(
+            candidate(
+                change_summary=(
+                    "Compare pairwise/listwise objectives in solution/candidate.py."
+                )
+            )
+        ),
         response(
             candidate(
                 change_summary=(
@@ -441,26 +795,18 @@ def test_research_planner_repairs_code_specific_narrative(planner_context):
         "validation_errors"
     ]
     assert "solution/candidate.py" not in json.dumps(repair_prompt)
+    assert "pairwise/listwise" in json.dumps(repair_prompt)
     assert "Remove repository paths" in repair_prompt["repair"]["instruction"]
 
 
-def test_research_planner_retries_empty_repair_completion(planner_context):
+def test_research_planner_persists_code_reference_diagnostic(planner_context):
     responses = [
         response(candidate(change_summary="Edit solution/candidate.py.")),
-        empty_response(prompt_tokens=90),
-        response(
-            candidate(
-                change_summary=(
-                    "Compare positive/negative preference ordering for user/item "
-                    "ranking."
-                )
-            )
-        ),
+        response(candidate(change_summary="Edit src/tacorank/training.")),
     ]
-    requests = []
 
     def transport(url, headers, payload, timeout):
-        requests.append(payload)
+        del url, headers, payload, timeout
         return responses.pop(0)
 
     provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
@@ -473,11 +819,12 @@ def test_research_planner_retries_empty_repair_completion(planner_context):
 
     result = asyncio.run(planner.propose(planner_context))
 
-    assert result["action"] == "propose"
-    assert len(requests) == 3
-    assert requests[1]["thinking"] == {"type": "enabled"}
-    assert requests[2]["thinking"] == {"type": "disabled"}
-    assert "unusable" in requests[2]["messages"][0]["content"]
+    assert result["action"] == "blocked"
+    assert result["reason_code"] == "INVALID_PROVIDER_PLAN"
+    assert "CODE_SPECIFIC_PLAN_FORBIDDEN" in result["reason"]
+    assert "field=change_summary" in result["reason"]
+    assert "category=source_path" in result["reason"]
+    assert 'token="src/tacorank/training"' in result["reason"]
 
 
 def test_deepseek_provider_rejects_truncated_completion(planner_context):

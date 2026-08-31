@@ -94,6 +94,15 @@ class TrustAssessment:
     seed_mean: Optional[float] = None
     seed_stderr: Optional[float] = None
     seed_count: int = 1
+    parent_delta_mean: Optional[float] = None
+    parent_delta_stderr: Optional[float] = None
+    parent_delta_ci_lower: Optional[float] = None
+    parent_delta_ci_upper: Optional[float] = None
+    best_delta_mean: Optional[float] = None
+    best_delta_stderr: Optional[float] = None
+    best_delta_ci_lower: Optional[float] = None
+    best_delta_ci_upper: Optional[float] = None
+    minimum_practical_gain: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +164,15 @@ class EvaluationResult:
                 seed_mean=self.trust.seed_mean,
                 seed_stderr=self.trust.seed_stderr,
                 seed_count=self.trust.seed_count,
+                parent_delta_mean=self.trust.parent_delta_mean,
+                parent_delta_stderr=self.trust.parent_delta_stderr,
+                parent_delta_ci_lower=self.trust.parent_delta_ci_lower,
+                parent_delta_ci_upper=self.trust.parent_delta_ci_upper,
+                best_delta_mean=self.trust.best_delta_mean,
+                best_delta_stderr=self.trust.best_delta_stderr,
+                best_delta_ci_lower=self.trust.best_delta_ci_lower,
+                best_delta_ci_upper=self.trust.best_delta_ci_upper,
+                minimum_practical_gain=self.trust.minimum_practical_gain,
             ),
             seed_evidence_event_ids=list(self.seed_evidence_event_ids),
             diagnostics=self.diagnostics,

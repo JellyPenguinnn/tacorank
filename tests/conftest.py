@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import shutil
+import subprocess
 
 import pytest
 
@@ -61,23 +62,72 @@ def repository(tmp_path: Path) -> Path:
     )
     shutil.copytree(source_research / "methods", tmp_path / "research/methods")
     (tmp_path / "solution").mkdir()
-    source_solution = Path(__file__).parents[1] / "solution"
-    for name in (
-        "__init__.py",
-        "candidate.py",
+    (tmp_path / "solution/candidate.py").write_text(
+        "def run(invocation):\n    return None\n", encoding="utf-8"
+    )
+    (tmp_path / "solution/experiment_config.py").write_text(
+        "CONFIG = {'formulation': 'passthrough'}\n", encoding="utf-8"
+    )
+    shutil.copy2(
+        Path(__file__).parents[1] / "solution/research_scaffold.py",
+        tmp_path / "solution/research_scaffold.py",
+    )
+    for candidate_module in (
+        "official_fm.py",
+        "losses.py",
         "features.py",
         "model.py",
         "train.py",
         "inference.py",
     ):
-        shutil.copy2(source_solution / name, tmp_path / "solution" / name)
+        shutil.copy2(
+            Path(__file__).parents[1] / "solution" / candidate_module,
+            tmp_path / "solution" / candidate_module,
+        )
     (tmp_path / "artifacts").mkdir()
     (tmp_path / "runs").mkdir()
+    subprocess.run(
+        ["git", "init", "-q", str(tmp_path)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "."],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=TacoRank Tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixture baseline",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     return tmp_path
 
 
 @pytest.fixture
 def config(repository: Path) -> RunConfig:
+    baseline_commit_sha = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
     return RunConfig(
         run_id="run_test",
         repository_root=repository,
@@ -86,11 +136,11 @@ def config(repository: Path) -> RunConfig:
         primary_metric_name="primary",
         data_manifest_sha256=sha(b"data"),
         evaluator_sha256=sha(b"evaluator"),
-        baseline_commit_sha="b" * 40,
+        baseline_commit_sha=baseline_commit_sha,
         research_provider="deepseek",
         max_experiments=3,
         seed_schedule=[11, 22, 33, 44],
-        context_token_limit=2000,
+        context_token_limit=3000,
         research_capabilities=[
             "baseline_parity",
             "objective_data_frame_verified",

@@ -13,7 +13,7 @@ from typing import Optional
 import numpy as np
 
 from solution.features import FeatureEncoder, TrainingRow, read_training_rows
-from solution.model import FactorizationMachine
+from solution.official_fm import OfficialFactorizationMachine
 
 
 @dataclass(frozen=True)
@@ -23,11 +23,13 @@ class TrainingConfig:
     l2: float = 1e-6
     batch_size: int = 8192
     duration_buckets: int = 10
+    maximum_rows: Optional[int] = None
+    epochs: Optional[int] = None
 
 
 @dataclass(frozen=True)
 class TrainedCandidate:
-    model: FactorizationMachine
+    model: OfficialFactorizationMachine
     encoder: FeatureEncoder
     training_rows: int
     available_rows: int
@@ -44,7 +46,8 @@ class _FidelityBudget:
 _FIDELITY_BUDGETS = {
     "smoke": _FidelityBudget(maximum_rows=25_000, epochs=1),
     "proxy": _FidelityBudget(maximum_rows=250_000, epochs=2),
-    "full": _FidelityBudget(maximum_rows=None, epochs=4),
+    "full": _FidelityBudget(maximum_rows=None, epochs=40),
+    "final": _FidelityBudget(maximum_rows=None, epochs=40),
 }
 
 
@@ -63,11 +66,21 @@ def fit_pointwise(
         raise ValueError("batch_size must be positive")
     available = read_training_rows(train_path)
     budget = _FIDELITY_BUDGETS[fidelity]
-    rows = _representative_rows(available, budget.maximum_rows, seed)
+    maximum_rows = budget.maximum_rows
+    if config.maximum_rows is not None:
+        maximum_rows = (
+            config.maximum_rows
+            if maximum_rows is None
+            else min(maximum_rows, config.maximum_rows)
+        )
+    epochs = budget.epochs if config.epochs is None else min(
+        budget.epochs, config.epochs
+    )
+    rows = _representative_rows(available, maximum_rows, seed)
     encoder = FeatureEncoder.fit(rows, duration_buckets=config.duration_buckets)
     features = encoder.transform(rows)
     labels = np.asarray([row.long_view for row in rows], dtype=np.float32)
-    model = FactorizationMachine(
+    model = OfficialFactorizationMachine(
         encoder.dimension,
         rank=config.rank,
         learning_rate=config.learning_rate,
@@ -75,7 +88,7 @@ def fit_pointwise(
         seed=seed,
     )
     generator = np.random.default_rng(seed)
-    for _ in range(budget.epochs):
+    for _ in range(epochs):
         indices = generator.permutation(len(rows))
         for start in range(0, len(indices), config.batch_size):
             batch = indices[start : start + config.batch_size]
@@ -86,7 +99,7 @@ def fit_pointwise(
         training_rows=len(rows),
         available_rows=len(available),
         coverage_fraction=len(rows) / len(available),
-        epochs=budget.epochs,
+        epochs=epochs,
     )
 
 

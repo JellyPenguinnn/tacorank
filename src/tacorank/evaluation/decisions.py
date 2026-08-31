@@ -25,6 +25,7 @@ class DecisionContext:
     supporting_event_ids: Sequence[str]
     seed_evidence_event_ids: Sequence[str] = ()
     confirmations_remaining: int = 0
+    promote_inconclusive_proxy: bool = True
 
 
 def decide(
@@ -130,17 +131,24 @@ def decide(
         and trust.stability == Stability.CONFIRMED
         and trust.integrity == Integrity.CLEAN
     ):
-        current_best = (
-            result.metric_set.primary_score - result.previous_best_delta.primary
-        )
-        candidate_primary = (
-            trust.seed_mean
-            if trust.seed_mean is not None
-            else result.metric_set.primary_score
-        )
-        best_eligible = (
-            candidate_primary - current_best > (trust.eta_applied or 0.0)
-        )
+        if trust.best_delta_mean is None or trust.best_delta_ci_lower is None:
+            current_best = (
+                result.metric_set.primary_score - result.previous_best_delta.primary
+            )
+            candidate_primary = (
+                trust.seed_mean
+                if trust.seed_mean is not None
+                else result.metric_set.primary_score
+            )
+            best_eligible = (
+                candidate_primary - current_best > (trust.eta_applied or 0.0)
+            )
+        else:
+            practical_gain = trust.minimum_practical_gain or 0.0
+            best_eligible = bool(
+                trust.best_delta_ci_lower > 0
+                and trust.best_delta_mean > practical_gain
+            )
         reason = "TRUSTED_IMPROVEMENT" if best_eligible else "TRUSTED_PARENT_ONLY"
         return _decision(
             result,
@@ -180,6 +188,16 @@ def decide(
                 False,
                 None,
             )
+        if aggregate_parent_delta <= 0.0:
+            return _decision(
+                result,
+                context,
+                Decision.REJECT,
+                "WITHIN_NOISE",
+                False,
+                False,
+                None,
+            )
 
     reason_by_verdict = {
         Verdict.INCONCLUSIVE: (
@@ -192,11 +210,10 @@ def decide(
         Verdict.SUSPICIOUS: "INTEGRITY_UNVERIFIED",
     }
     reason = reason_by_verdict.get(trust.verdict, "INTEGRITY_UNVERIFIED")
-    action = (
-        Decision.INVALID
-        if trust.verdict == Verdict.SUSPICIOUS
-        else Decision.REJECT
-    )
+    action = {
+        Verdict.SUSPICIOUS: Decision.INVALID,
+        Verdict.INCONCLUSIVE: Decision.RETAIN,
+    }.get(trust.verdict, Decision.REJECT)
     return _decision(result, context, action, reason, False, False, None)
 
 

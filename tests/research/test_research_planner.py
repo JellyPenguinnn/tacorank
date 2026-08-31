@@ -209,10 +209,6 @@ def test_planner_returns_blocked_when_no_parent(planner_context):
     ("overrides", "reason_code"),
     [
         ({"output_accepted": False}, "OUTPUT_CHECK_REJECTED"),
-        (
-            {"trust_verdict": "suspicious", "integrity": "compromised"},
-            "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
-        ),
         ({"stability": "unstable"}, "UNSTABLE_RESULT_REQUIRES_CONFIRMATION"),
         (
             {"fidelity": "proxy", "population": "internal_proxy"},
@@ -267,7 +263,7 @@ def test_suspicious_result_is_quarantined_without_stopping_planner(
     result = asyncio.run(planner.propose(planner_context))
 
     assert result["action"] == "propose"
-    assert result["reason_code"] == "SUSPICIOUS_RESULT_QUARANTINED"
+    assert result["reason_code"] == "SUSPICIOUS_CANDIDATE_QUARANTINED"
     assert result["spec"].family == "temporal_history"
     assert result["spec"].parent_experiment_id == "exp_0000"
     assert len(provider.requests) == 1

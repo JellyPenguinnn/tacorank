@@ -39,11 +39,124 @@ def make_spec(planner_context, **overrides):
     return spec
 
 
+def add_prior_hypothesis_evidence(planner_context, latest, spec):
+    latest.evaluation_event_id = "evt_000010"
+    planner_context.source_event_ids.append("evt_000010")
+    spec.evidence_event_ids = ["evt_000010"]
+    spec.hypothesis_evidence = SimpleNamespace(
+        observation="The prior evaluation exposed a controlled metric tradeoff.",
+        source_evaluation_event_ids=["evt_000010"],
+        changed_factors=["objective"],
+        held_constant=["validation_split", "seed"],
+        expected_metric_effects={"GAUC": 0.002},
+    )
+    return spec
+
+
 def test_validator_accepts_contract_compatible_plan(planner_context):
     result = PlanValidator().validate(make_spec(planner_context), planner_context)
 
     assert result.accepted
     assert result.errors == ()
+
+
+def test_validator_requires_exact_prior_evaluation_evidence_after_first_result(
+    planner_context,
+):
+    latest = SimpleNamespace(
+        experiment_id="exp_0001",
+        evaluation_event_id="evt_000010",
+        family="objective",
+    )
+    planner_context.family_history = [latest]
+    planner_context.source_event_ids.append("evt_000010")
+    spec = make_spec(planner_context, experiment_id="exp_0002")
+
+    missing = PlanValidator().validate(spec, planner_context)
+    assert "HYPOTHESIS_EVIDENCE_REQUIRED_AFTER_PRIOR_EVALUATION" in missing.errors
+
+    add_prior_hypothesis_evidence(planner_context, latest, spec)
+    accepted = PlanValidator().validate(spec, planner_context)
+    assert accepted.accepted, accepted.errors
+
+
+def test_validator_does_not_require_evaluation_evidence_when_none_exists(
+    planner_context,
+):
+    planner_context.family_history = [
+        SimpleNamespace(experiment_id="exp_0001", family="objective")
+    ]
+
+    result = PlanValidator().validate(
+        make_spec(planner_context, experiment_id="exp_0002"),
+        planner_context,
+    )
+
+    assert result.accepted, result.errors
+
+
+def test_validator_accepts_distinct_agent_chosen_campaign_variant(planner_context):
+    from tacorank.research.search_policy import SearchPolicy
+
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = {
+        "campaign_id": "adaptive_depth",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 25},
+        "family_method_card_ids": {
+            "objective": [
+                "objective_pairwise_bpr",
+                "objective_listwise_user_softmax",
+            ]
+        },
+        "family_directives": {"objective": "Adapt from prior evidence."},
+    }
+    choice = SearchPolicy().choose(planner_context)
+    spec = make_spec(
+        planner_context,
+        campaign_id=choice.campaign_id,
+        variant_id=choice.variant_id,
+        variant_instruction=(
+            "Use a pairwise/listwise hybrid with four deterministic "
+            "positive/negative comparisons and learning rate 0.02."
+        ),
+            variant_parameters={
+                "formulation": "bpr",
+                "embedding_dim": 16,
+                "negative_count": 4,
+                "learning_rate": 0.02,
+                "epochs": 3,
+                "l2": 0.001,
+                "residual_scale": 0.1,
+                "max_train_rows": 100000,
+            },
+    )
+
+    result = PlanValidator().validate(spec, planner_context, choice=choice)
+
+    assert result.accepted, result.errors
+
+
+def test_validator_rejects_omitted_active_campaign_parameter(planner_context):
+    planner_context.research_campaign = {
+        "campaign_id": "adaptive_depth",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 25},
+        "family_method_card_ids": {"objective": ["objective_pairwise_bpr"]},
+        "family_directives": {"objective": "Adapt from prior evidence."},
+    }
+    spec = make_spec(
+        planner_context,
+        campaign_id="adaptive_depth",
+        variant_id="objective_01",
+        variant_instruction="Use deterministic BPR with four negatives.",
+        variant_parameters={"formulation": "bpr", "negative_count": 4},
+    )
+
+    result = PlanValidator().validate(spec, planner_context)
+
+    assert not result.accepted
+    assert "VARIANT_ACTIVE_PARAMETER_MISMATCH" in result.errors
 
 
 def test_validator_allows_policy_authorized_soft_refinement(planner_context):
@@ -87,6 +200,7 @@ def test_validator_allows_policy_authorized_soft_refinement(planner_context):
         change_summary="Add one listwise refinement.",
         method_card_ids=["objective_listwise_user_softmax"],
     )
+    add_prior_hypothesis_evidence(planner_context, latest, spec)
 
     result = PlanValidator().validate(spec, planner_context, choice=choice)
 
@@ -140,6 +254,7 @@ def test_validator_accepts_soft_component_for_bounded_ensemble(planner_context):
             cost_tier="low",
         ),
     )
+    add_prior_hypothesis_evidence(planner_context, latest, spec)
 
     result = PlanValidator().validate(spec, planner_context, choice=choice)
 
@@ -271,6 +386,26 @@ def test_validator_rejects_code_specific_narrative(
 
     assert not result.accepted
     assert "CODE_SPECIFIC_PLAN_FORBIDDEN" in result.errors
+    assert result.diagnostics == (
+        'code_reference field=change_summary category=source_path '
+        'token="solution/candidate.py"',
+    )
+
+
+def test_validator_rejects_explicit_extensionless_source_path(planner_context):
+    spec = make_spec(
+        planner_context,
+        change_summary="Change the objective in src/tacorank/training.",
+    )
+
+    result = PlanValidator().validate(spec, planner_context)
+
+    assert not result.accepted
+    assert "CODE_SPECIFIC_PLAN_FORBIDDEN" in result.errors
+    assert result.diagnostics == (
+        'code_reference field=change_summary category=source_path '
+        'token="src/tacorank/training"',
+    )
 
 
 def test_validator_allows_slash_joined_research_terms(planner_context):

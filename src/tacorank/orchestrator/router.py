@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-import logging
-import re
-from typing import Awaitable, Callable, Deque, Optional, Sequence, Tuple, TypeVar
+from dataclasses import replace
+from typing import Deque, Optional, Sequence, Tuple
 
 from ..config import RunConfig, VerifiedContract
 from ..coding import CodingWorkerError
 from ..coding.redaction import SecretRedactor
 from ..context.builder import ContextBuilder
+from ..evaluation.final_selection import rank_finalists, select_final
 from ..memory.canonical_json import canonical_sha256
 from ..memory.event_store import DuplicateIdempotencyKey, EventStore, LedgerError
 from ..memory.projections import project
@@ -38,6 +38,7 @@ from ..schemas import (
     ExperimentDecision,
     ExperimentDecisionKind,
     ExperimentProposedPayload,
+    ExperimentSpec,
     ExecutionFinishedPayload,
     ExecutionStartedPayload,
     Fidelity,
@@ -73,6 +74,7 @@ from .finalize import (
     FinalizationError,
     baseline_reproduction_event_id,
     candidate_finalization_plan,
+    finalization_candidates,
 )
 from .state_machine import TransitionError
 from .ports import (
@@ -109,8 +111,31 @@ class ResumablePlanningError(OrchestrationError):
     """
 
 
-logger = logging.getLogger(__name__)
-PlannerResult = TypeVar("PlannerResult")
+MAX_CONSECUTIVE_INVALID_PROVIDER_PLANS = 3
+
+
+def _is_search_space_exhaustion(reason_code: str) -> bool:
+    """Return true only for planner outcomes that prove no legal choice remains."""
+
+    normalized = reason_code.strip().upper()
+    return (
+        "EXHAUSTED" in normalized
+        or normalized.startswith("NO_LEGAL_")
+        or normalized in {"NO_METHOD_CARDS", "NO_ELIGIBLE_METHOD"}
+    )
+
+
+def _consecutive_invalid_provider_plans(events: Sequence[Event]) -> int:
+    count = 0
+    for event in reversed(events):
+        if event.event_type == EventType.EXPERIMENT_PROPOSED:
+            break
+        if event.event_type != EventType.PLANNER_RECOMMENDED:
+            continue
+        if event.payload.output.reason_code != "INVALID_PROVIDER_PLAN":
+            break
+        count += 1
+    return count
 
 
 class Harness:
@@ -270,6 +295,7 @@ class Harness:
                 contract_sha256=self.verified_contract.contract_sha256,
                 protected_paths_sha256=self.verified_contract.protected_paths_sha256,
                 max_experiments=self.config.max_experiments,
+                run_mode=self.config.run_mode,
                 parallel_directions=self.config.parallel_directions,
                 synthesize_parallel_improvements=(
                     self.config.synthesize_parallel_improvements
@@ -416,9 +442,11 @@ class Harness:
         raise OrchestrationError("recovery experiment specification is missing")
 
     def _contract_summary(self) -> str:
-        contract_path = self.config.repository_root / self.config.contract_path
-        text = contract_path.read_text(encoding="utf-8").strip()
-        return text[:2_000]
+        return (
+            "the frozen benchmark split and evaluator, protected labels and data, "
+            "protected paths, command configuration, baseline identity, and "
+            "submission contract"
+        )
 
     def _remaining_run_budget(self, state) -> dict:
         totals = state.resource_totals
@@ -631,7 +659,7 @@ class Harness:
                 run_id=self.config.run_id,
                 experiment_id=experiment_id,
                 original_experiment_spec=self._experiment_spec(experiment_id),
-                current_patch_commit_sha=node.latest_commit_sha or node.base_commit_sha,
+                current_patch_commit_sha=context.current_patch_commit_sha,
                 failure_event_id=failure_event.event_id,
                 failure_stage=getattr(
                     getattr(failed_value, "failure_stage", None), "value", None
@@ -664,6 +692,60 @@ class Harness:
             causation_event_id=context_event.event_id,
             resource_delta=decision.resource_delta,
         )
+        if decision.action in {
+            RecoveryAction.ABANDON,
+            RecoveryAction.ROLLBACK,
+        }:
+            # Recovery is operational evidence, but a proxy/full evaluation
+            # still needs a terminal scientific decision.  Without one, the
+            # next planner correctly sees an unresolved fidelity result and
+            # blocks forever on FIDELITY_PROMOTION_REQUIRED.
+            evaluation_event = next(
+                (
+                    event
+                    for event in reversed(self.events())
+                    if event.event_type == EventType.EVALUATION_COMPLETED
+                    and event.payload.result.experiment_id == experiment_id
+                ),
+                None,
+            )
+            terminal_decision_exists = any(
+                event.event_type == EventType.EXPERIMENT_DECIDED
+                and event.payload.decision.experiment_id == experiment_id
+                and event.payload.decision.decision
+                != ExperimentDecisionKind.PROMOTE
+                for event in self.events()
+            )
+            if evaluation_event is not None and not terminal_decision_exists:
+                evaluation = evaluation_event.payload.result
+                self._append(
+                    ExperimentDecidedPayload(
+                        decision=ExperimentDecision(
+                            run_id=self.config.run_id,
+                            experiment_id=experiment_id,
+                            evaluation_event_id=evaluation_event.event_id,
+                            decision=ExperimentDecisionKind.REJECT,
+                            reason_code="recovery_%s_%s"
+                            % (decision.action.value, decision.reason_code.lower()),
+                            fidelity_completed=evaluation.fidelity,
+                            parent_eligible=False,
+                            best_eligible=False,
+                            supporting_event_ids=list(
+                                dict.fromkeys(
+                                    [
+                                        evaluation_event.event_id,
+                                        failure_event.event_id,
+                                        decision_event.event_id,
+                                    ]
+                                )
+                            ),
+                        )
+                    ),
+                    stage="recovery_terminal_decision",
+                    experiment_id=experiment_id,
+                    attempt=decision.repair_attempt,
+                    causation_event_id=decision_event.event_id,
+                )
         if decision.lesson_candidate is not None:
             lesson_number = 1 + sum(
                 event.payload.type == "lesson.recorded" for event in self.events()
@@ -769,6 +851,9 @@ class Harness:
                         if event.payload.context.role == "recovery"
                         else "coding"
                     )
+            elif event.event_type == EventType.EXPERIMENT_PROPOSED:
+                if event.payload.spec.experiment_id == experiment_id:
+                    return "coding"
         return "recovery"
 
     async def _handle_unexpected_adapter_failure(self, error: Exception) -> object:
@@ -812,9 +897,14 @@ class Harness:
             failure_event.payload.result,
             experiment_id,
         )
-        # An exception means the normal continuation point is unknown. Even
-        # when policy records a repair/retry action, stop rather than guessing
-        # which side effects completed. Resume can inspect the durable evidence.
+        # A terminal recovery action has already quarantined the experiment and
+        # restored the deterministic planning boundary. Retry/repair actions
+        # still stop because their continuation point may contain unknown side
+        # effects and must not be guessed.
+        if action in (RecoveryAction.ABANDON, RecoveryAction.ROLLBACK):
+            recovered = self.state()
+            if recovered.phase == "planning":
+                return recovered
         self.stop(
             StopDecision(
                 True,
@@ -864,35 +954,91 @@ class Harness:
             stage="planner_context",
             causation_event_id=events[-1].event_id,
         )
-        try:
-            planner_output = await self.planner.propose(planner_context)
-        except Exception as error:
-            self._record_planning_failure(
-                context_id=planner_context.context_id,
-                error=error,
-                causation_event_id=planner_context_event.event_id,
-            )
-            self.stop(
-                StopDecision(
-                    True,
-                    "PLANNER_PROVIDER_FAILURE",
-                    "The research planner failed before proposing a new experiment; "
-                    "the run was stopped with durable failure evidence.",
+        invalid_plan_attempts = _consecutive_invalid_provider_plans(self.events())
+        while True:
+            try:
+                planner_output = await self._request_planner_with_retry(
+                    lambda: self.planner.propose(planner_context),
+                    label="sequential_experiment",
                 )
+            except Exception as error:
+                self._record_planning_failure(
+                    context_id=planner_context.context_id,
+                    error=error,
+                    causation_event_id=planner_context_event.event_id,
+                )
+                self.stop(
+                    StopDecision(
+                        True,
+                        "PLANNER_PROVIDER_FAILURE",
+                        "The research planner failed before proposing a new experiment; "
+                        "the run was stopped with durable failure evidence.",
+                    )
+                )
+                return None
+            if planner_output.action == PlannerAction.PROPOSE:
+                proposal = planner_output.spec
+                assert proposal is not None
+                if proposal.context_id != planner_context.context_id:
+                    raise ResumablePlanningError(
+                        "planner proposal cites a different context; "
+                        "resume from the persisted planner checkpoint"
+                    )
+                try:
+                    spec = self.context_builder.bind_implementation(proposal)
+                except Exception as error:
+                    self._record_planning_failure(
+                        context_id=planner_context.context_id,
+                        error=error,
+                        causation_event_id=planner_context_event.event_id,
+                    )
+                    self.stop(
+                        StopDecision(
+                            True,
+                            "PLANNER_BINDING_FAILURE",
+                            "The accepted research proposal could not be bound to "
+                            "immutable implementation evidence; the run was stopped "
+                            "with durable failure evidence.",
+                        )
+                    )
+                    return None
+                break
+            invalid_provider_plan = (
+                planner_output.action == PlannerAction.BLOCKED
+                and planner_output.reason_code == "INVALID_PROVIDER_PLAN"
             )
-            return None
-        if planner_output.action != PlannerAction.PROPOSE:
+            recommendation_stage = (
+                "planner_recommended_invalid_%02d" % (invalid_plan_attempts + 1)
+                if invalid_provider_plan
+                else "planner_recommended"
+            )
             self._append(
                 PlannerRecommendedPayload(output=planner_output),
-                stage="planner_recommended",
+                stage=recommendation_stage,
                 causation_event_id=planner_context_event.event_id,
                 resource_delta=planner_output.resource_delta,
             )
             if planner_output.action == PlannerAction.BLOCKED:
                 if planner_output.reason_code == "INVALID_PROVIDER_PLAN":
+                    invalid_plan_attempts += 1
+                    if (
+                        invalid_plan_attempts
+                        < MAX_CONSECUTIVE_INVALID_PROVIDER_PLANS
+                    ):
+                        # Retry against the exact same immutable context. Rebuilding
+                        # it would duplicate a context artifact and could turn a
+                        # recoverable invalid proposal into an adapter failure.
+                        continue
                     raise ResumablePlanningError(
-                        "research provider failed bounded plan validation; "
+                        "research provider failed bounded plan validation %d times; "
                         "resume from the persisted planner checkpoint"
+                        % invalid_plan_attempts
+                    )
+                if not _is_search_space_exhaustion(planner_output.reason_code):
+                    raise ResumablePlanningError(
+                        "planner blocked on %s without proving search-space exhaustion; "
+                        "resume from the persisted planner checkpoint"
+                        % planner_output.reason_code
                     )
                 decision = self.deterministic_stop(no_legal_proposal=True)
             else:
@@ -905,14 +1051,6 @@ class Harness:
             self.stop(decision)
             return None
 
-        proposal = planner_output.spec
-        assert proposal is not None
-        if proposal.context_id != planner_context.context_id:
-            raise ResumablePlanningError(
-                "planner proposal cites a different context; "
-                "resume from the persisted planner checkpoint"
-            )
-        spec = self.context_builder.bind_implementation(proposal)
         proposal_event = self._append(
             ExperimentProposedPayload(spec=spec),
             stage="proposed",
@@ -1573,6 +1711,9 @@ class Harness:
                 baseline_score=baseline[self.config.primary_metric_name],
                 parent_score=parent[self.config.primary_metric_name],
                 previous_best_score=best[self.config.primary_metric_name],
+                # Clean uncertain proxy results are evidence-bearing candidates.
+                # Promotion is based on trust, never the experiment sequence number.
+                promote_inconclusive_proxy=True,
             )
             experiment_decision_causation_event_id = evaluation_event.event_id
             try:
@@ -1683,16 +1824,21 @@ class Harness:
                 continue
             if decision.best_eligible:
                 current = self.state()
+                aggregate_score = (
+                    evaluation.trust.seed_mean
+                    if evaluation.trust.seed_mean is not None
+                    else evaluation.metric_set.primary_score
+                )
                 if (
                     current.best_primary_score is None
-                    or evaluation.metric_set.primary_score > current.best_primary_score
+                    or aggregate_score > current.best_primary_score
                 ):
                     self._append(
                         BestUpdatedPayload(
                             experiment_id=spec.experiment_id,
                             commit_sha=patch.patch_commit_sha,
                             primary_metric_name=evaluation.metric_set.primary_metric_name,
-                            primary_score=evaluation.metric_set.primary_score,
+                            primary_score=aggregate_score,
                             decision_event_id=decision_event.event_id,
                         ),
                         stage="best_updated",
@@ -1845,20 +1991,41 @@ class Harness:
             )
             raise error
 
-        prepared = []
-        for experiment_id, output in zip(
-            self._parallel_experiment_ids(count), outputs
-        ):
-            proposal = output.spec
-            assert proposal is not None
-            if proposal.context_id != planner_context.context_id:
-                raise ResumablePlanningError(
-                    "parallel planner proposal cites a different context"
+        bound_specs = []
+        try:
+            for experiment_id, output in zip(
+                self._parallel_experiment_ids(count), outputs
+            ):
+                proposal = output.spec
+                assert proposal is not None
+                if proposal.context_id != planner_context.context_id:
+                    raise ResumablePlanningError(
+                        "parallel planner proposal cites a different context"
+                    )
+                proposal = proposal.model_copy(
+                    update={"experiment_id": experiment_id}
                 )
-            proposal = proposal.model_copy(
-                update={"experiment_id": experiment_id}
+                bound_specs.append(
+                    (self.context_builder.bind_implementation(proposal), output)
+                )
+        except Exception as error:
+            self._record_planning_failure(
+                context_id=planner_context.context_id,
+                error=error,
+                causation_event_id=context_event.event_id,
             )
-            spec = self.context_builder.bind_implementation(proposal)
+            self.stop(
+                StopDecision(
+                    True,
+                    "PLANNER_BINDING_FAILURE",
+                    "A parallel proposal could not be bound to immutable "
+                    "implementation evidence.",
+                )
+            )
+            return []
+
+        prepared = []
+        for spec, output in bound_specs:
             proposal_event = self._append(
                 ExperimentProposedPayload(spec=spec),
                 stage="parallel_proposed",
@@ -2036,7 +2203,23 @@ class Harness:
         proposal = proposal.model_copy(
             update={"experiment_id": self._parallel_experiment_ids(1)[0]}
         )
-        spec = self.context_builder.bind_implementation(proposal)
+        try:
+            spec = self.context_builder.bind_implementation(proposal)
+        except Exception as error:
+            self._record_planning_failure(
+                context_id=planner_context.context_id,
+                error=error,
+                causation_event_id=context_event.event_id,
+            )
+            self.stop(
+                StopDecision(
+                    True,
+                    "PLANNER_BINDING_FAILURE",
+                    "The synthesis proposal could not be bound to immutable "
+                    "implementation evidence.",
+                )
+            )
+            return self.state()
         proposal_event = self._append(
             ExperimentProposedPayload(spec=spec),
             stage="synthesis_proposed",
@@ -2082,7 +2265,12 @@ class Harness:
                 raise OrchestrationError("outer loop made no durable ledger progress")
 
     async def run_to_completion(self) -> object:
-        """Drive research to a deterministic stop and finalize its selected best."""
+        """Drive research to its configured terminal boundary.
+
+        Discovery runs preserve a stopped research ledger for inspection and
+        never enter test inference or submission checking automatically.
+        Submission runs retain the complete competition workflow.
+        """
 
         state = await self.run_until_stopped()
         if state.status.value != "stopped":
@@ -2090,6 +2278,8 @@ class Harness:
                 "run stopped abnormally: %s"
                 % (state.stop_reason_code or state.status.value)
             )
+        if self.config.run_mode == "discovery":
+            return state
         return await self.finalize()
 
     async def _run_final_execution(
@@ -2159,7 +2349,7 @@ class Harness:
         return output, checked
 
     async def finalize(self) -> object:
-        """Reproduce and select the validation best, then check its submission."""
+        """Select by protected evidence, reproduce, and check the submission."""
 
         events = self.events()
         state = project(events)
@@ -2172,32 +2362,17 @@ class Harness:
                 "finalization requires a normal deterministic stop reason"
             )
 
-        if state.best_experiment_id == "baseline":
-            if self.final_submission_provider is None:
-                raise FinalizationError(
-                    "selected baseline requires a protected final submission provider"
-                )
-            reproduction_event_id = baseline_reproduction_event_id(events, state)
-            submission = await self.final_submission_provider.prepare_baseline()
-            selected = self._append(
-                FinalSelectedPayload(
-                    experiment_id="baseline",
-                    commit_sha=state.best_commit_sha,
-                    reproduction_evaluation_event_id=reproduction_event_id,
-                ),
-                stage="final_selected",
-                experiment_id="baseline",
-                causation_event_id=reproduction_event_id,
+        candidates = finalization_candidates(events, state)
+        finalists = rank_finalists(candidates)
+        if not finalists or finalists[0].experiment_id == "baseline":
+            return await self._finalize_baseline(
+                events, state, causation_event_id=events[-1].event_id
             )
-            self._append(
-                submission,
-                stage="submission_checked",
-                experiment_id="baseline",
-                causation_event_id=selected.event_id,
-            )
-            return self.state()
 
-        plan = candidate_finalization_plan(events, state)
+        preliminary = finalists[0]
+        plan = candidate_finalization_plan(
+            events, state, experiment_id=preliminary.experiment_id
+        )
         stopped_event_id = events[-1].event_id
         _, reproduction_run, reproduction_finished = await self._run_final_execution(
             experiment_id=plan.experiment_id,
@@ -2251,6 +2426,20 @@ class Harness:
         ):
             raise FinalizationError(
                 "clean reproduction did not exactly reproduce the trusted best score"
+            )
+
+        reproduced = replace(preliminary, clean_reproduction_passed=True)
+        baseline_candidate = next(
+            candidate
+            for candidate in candidates
+            if candidate.experiment_id == "baseline"
+        )
+        strict_selection = select_final((baseline_candidate, reproduced))
+        if strict_selection.experiment_id == "baseline":
+            return await self._finalize_baseline(
+                self.events(),
+                self.state(),
+                causation_event_id=reproduction_event.event_id,
             )
 
         final_attempt = plan.next_attempt + 1
@@ -2323,6 +2512,42 @@ class Harness:
             submission,
             stage="submission_checked",
             experiment_id=plan.experiment_id,
+            causation_event_id=selected.event_id,
+        )
+        return self.state()
+
+    async def _finalize_baseline(
+        self,
+        events: Sequence[Event],
+        state: object,
+        *,
+        causation_event_id: str,
+    ) -> object:
+        if self.final_submission_provider is None:
+            raise FinalizationError(
+                "selected baseline requires a protected final submission provider"
+            )
+        reproduction_event_id = baseline_reproduction_event_id(events, state)
+        baseline = next(
+            event
+            for event in events
+            if event.event_type == EventType.BASELINE_VERIFIED
+        )
+        submission = await self.final_submission_provider.prepare_baseline()
+        selected = self._append(
+            FinalSelectedPayload(
+                experiment_id="baseline",
+                commit_sha=baseline.payload.commit_sha,
+                reproduction_evaluation_event_id=reproduction_event_id,
+            ),
+            stage="final_selected",
+            experiment_id="baseline",
+            causation_event_id=causation_event_id,
+        )
+        self._append(
+            submission,
+            stage="submission_checked",
+            experiment_id="baseline",
             causation_event_id=selected.event_id,
         )
         return self.state()

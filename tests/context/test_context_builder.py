@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from types import SimpleNamespace
 
 import pytest
 
 from tacorank.context.builder import (
     ContextBuildError,
+    _execution_conformant,
+    _mentions_protected_validation_arm,
+    _planner_primary_score,
     _planner_parent_metric_deltas,
     _planner_primary_score,
 )
 from tacorank.context.redaction import redact
+from tacorank.git.refs import read_blob_at_commit
 from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.schemas import (
     ArtifactKind,
@@ -41,6 +46,14 @@ def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_e
     assert first.playbook.method_order["objective"][0] == "objective_pairwise_bpr"
     assert first.refinement_frontier_ids == []
     assert first.ensemble_candidate_ids == []
+    assert [plan.plan_id for plan in first.research_plans] == [
+        "objective_alignment",
+        "behavioral_history",
+        "auxiliary_learning",
+        "temporal_robustness",
+        "model_and_ensemble",
+    ]
+    assert all(plan.status == "unstarted" for plan in first.research_plans)
     pairwise = next(
         card for card in first.method_cards if card.method_id == "objective_pairwise_bpr"
     )
@@ -55,6 +68,17 @@ def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_e
     assert "fidelity_plan" not in first.content
     assert "implementation_targets" not in first.content
     assert "commit_sha" not in first.content
+
+
+def test_planner_uses_training_conformance_and_aggregate_seed_score():
+    evaluation = SimpleNamespace(
+        diagnostic_metrics={"training_implementation_conformant": 1.0},
+        trust=SimpleNamespace(seed_mean=0.6123),
+    )
+    metric_set = SimpleNamespace(primary_score=0.6010)
+
+    assert _execution_conformant(evaluation) is True
+    assert _planner_primary_score(evaluation, metric_set) == 0.6123
 
 
 def test_planner_history_preserves_complete_evaluation_evidence(
@@ -81,7 +105,9 @@ def test_planner_history_preserves_complete_evaluation_evidence(
     assert latest.diagnostic_metrics["spearman_vs_fm_baseline"] == 0.8
     assert latest.diagnostic_metrics["user_rankable_fraction"] == 1.0
     assert latest.trust_flags == []
-    assert latest.diagnostic_metrics["validation_arm_gap"] == 0.01
+    assert "validation_arm_gap" not in latest.diagnostic_metrics
+    assert "val_b_parent_delta" not in latest.diagnostic_metrics
+    assert "val_a_parent_delta" not in latest.diagnostic_metrics
     assert latest.diagnostic_metrics["temporal_delta_slope"] == -0.003
     assert latest.metric_deltas == {
         "gauc": pytest.approx(0.02),
@@ -97,12 +123,21 @@ def test_planner_history_preserves_complete_evaluation_evidence(
     assert context.refinement_frontier_ids == []
     assert context.ensemble_candidate_ids == []
     assert proposed.target_stage == proposed.family
-    assert proposed.target_files == ["solution/candidate.py"]
+    assert proposed.target_files == ["solution/experiment_config.py"]
+    assert proposed.trial_type.value == "implementation"
     assert [fidelity.value for fidelity in proposed.fidelity_plan] == [
         "smoke",
         "proxy",
         "full",
     ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["val_b_parent_delta", "Val-B regression", "validation arm gap"],
+)
+def test_planner_redacts_all_protected_validation_arm_spellings(value):
+    assert _mentions_protected_validation_arm(value)
 
 
 def test_planner_metric_deltas_are_authoritative_and_route_safe() -> None:
@@ -173,7 +208,7 @@ def test_implementation_binding_rejects_missing_configured_entrypoint(
     harness, baseline_evaluation
 ):
     harness.bootstrap(baseline_evaluation)
-    (harness.config.repository_root / "solution/candidate.py").unlink()
+    (harness.config.repository_root / "solution/experiment_config.py").unlink()
     context = harness.context_builder.build_planner(harness.events())
     values = {
         "run_id": context.run_id,
@@ -252,17 +287,83 @@ def test_controller_binds_codeblind_proposal_to_coder_contract(
     assert spec.target_stage == "objective"
     assert spec.target_files == [
         "solution/candidate.py",
-        "solution/features.py",
-        "solution/model.py",
+        "solution/losses.py",
+        "solution/official_fm.py",
         "solution/train.py",
-        "solution/inference.py",
     ]
-    assert spec.literature_evidence == [literature]
+    assert spec.trial_type.value == "implementation"
     assert [fidelity.value for fidelity in spec.fidelity_plan] == [
         "smoke",
         "proxy",
         "full",
     ]
+
+
+def test_controller_hash_binds_verified_configuration_capability(
+    harness, baseline_evaluation
+):
+    harness.bootstrap(baseline_evaluation)
+    context = harness.context_builder.build_planner(harness.events())
+    parameters = {
+        "formulation": "bpr",
+        "embedding_dim": 16,
+        "learning_rate": 0.01,
+        "epochs": 3,
+        "negative_count": 4,
+        "l2": 0.001,
+        "residual_scale": 0.1,
+        "max_train_rows": 100000,
+    }
+    values = {
+        "run_id": context.run_id,
+        "experiment_id": "exp_001",
+        "parent_experiment_id": "baseline",
+        "parent_commit_sha": harness.config.baseline_commit_sha,
+        "context_id": context.context_id,
+        "hypothesis": "Pairwise ranking may improve within-user ordering.",
+        "family": "objective",
+        "change_summary": "Configure verified pairwise preference learning.",
+        "expected_mechanism": "Improve relative positive-negative ordering.",
+        "success_criteria": "Trusted primary score improves beyond uncertainty.",
+        "falsification_condition": "No stable gain over the parent.",
+        "estimated_cost": CostEstimate(
+            llm_tokens_upper_bound=500,
+            wall_time_seconds_upper_bound=60,
+            gpu_seconds_upper_bound=0,
+            cost_tier="medium",
+        ),
+        "campaign_id": "campaign_1",
+        "variant_id": "objective_01",
+        "variant_instruction": "Use the complete typed BPR configuration.",
+        "variant_parameters": parameters,
+        "method_card_ids": ["objective_pairwise_bpr"],
+        "evidence_event_ids": list(context.source_event_ids),
+    }
+    values["duplicate_key"] = compute_duplicate_key(values)
+
+    implementation_path = "solution/research_scaffold.py"
+    immutable_bytes = read_blob_at_commit(
+        harness.config.repository_root,
+        harness.config.baseline_commit_sha,
+        implementation_path,
+    )
+    checkout_path = harness.config.repository_root / implementation_path
+    checkout_path.write_text(
+        checkout_path.read_text(encoding="utf-8")
+        + "\n# Concurrent checkout edit must not affect run identity.\n",
+        encoding="utf-8",
+    )
+
+    spec = harness.context_builder.bind_implementation(ResearchProposal(**values))
+
+    assert spec.target_files == ["solution/experiment_config.py"]
+    assert spec.trial_type.value == "configuration"
+    assert spec.implementation_id == "objective_bpr_v2"
+    assert spec.implementation_sha256 == hashlib.sha256(immutable_bytes).hexdigest()
+    assert spec.implementation_sha256 != hashlib.sha256(
+        checkout_path.read_bytes()
+    ).hexdigest()
+    assert set(spec.active_parameter_names) == set(parameters)
 
 
 def test_secret_redaction():
@@ -308,8 +409,8 @@ def test_coder_context_contains_the_real_worker_contract(harness, baseline_evalu
     assert context.token_limit == harness.config.coding_token_limit
     assert context.estimated_tokens <= harness.config.context_token_limit
     assert context.target_interface_excerpts == {
-        "solution/candidate.py": (
-            harness.config.target_interface_excerpts["solution/candidate.py"]
+        "solution/experiment_config.py": (
+            harness.config.target_interface_excerpts["solution/experiment_config.py"]
         )
     }
     assert "solution/model.py" not in context.content

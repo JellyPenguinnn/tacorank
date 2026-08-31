@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from tacorank.coding import CodingWorkerError
+from tacorank.context.builder import ContextBuildError
 from tacorank.orchestrator.convergence import StopDecision
 from tacorank.orchestrator.fakes import (
     FakeCodingWorker,
@@ -24,9 +25,7 @@ from tacorank.schemas import (
     CostEstimate,
     CostTier,
     EventType,
-    ExperimentDecision,
     ExperimentDecisionKind,
-    Fidelity,
     PlannerAction,
     PlannerOutput,
     PatchCheckResult,
@@ -39,6 +38,8 @@ from tacorank.schemas import (
     SubmissionCheckedPayload,
     TrustVerdict,
     Violation,
+    ResearchCampaign,
+    TrustVerdict,
 )
 
 
@@ -58,6 +59,18 @@ class SequentialPlanner:
         spec = output.spec.model_copy(
             update={"duplicate_key": "feature_cross:user_item:v%d" % number}
         )
+        if context.research_campaign is not None:
+            campaign = context.research_campaign
+            family = campaign.family_order[0]
+            spec = spec.model_copy(
+                update={
+                    "campaign_id": campaign.campaign_id,
+                    "family": family,
+                    "variant_id": "%s_%02d" % (family, number),
+                    "variant_instruction": campaign.family_directives[family],
+                    "variant_parameters": {"formulation": "bpr"},
+                }
+            )
         return output.model_copy(update={"spec": spec})
 
 
@@ -192,154 +205,71 @@ class NonImprovingEvaluator(FakeEvaluator):
         return result
 
 
-class AllImprovingEvaluator(FakeEvaluator):
+class NegativeNonImprovingEvaluator(NonImprovingEvaluator):
+    async def evaluate(self, request):
+        result = await super().evaluate(request)
+        if request.fidelity.value == "full":
+            result = result.model_copy(
+                update={
+                    "trust": result.trust.model_copy(
+                        update={"verdict": TrustVerdict.NEGATIVE}
+                    )
+                }
+            )
+        return result
+
     async def decide(self, result, context):
         decision = await super().decide(result, context)
-        if (
-            result.fidelity == Fidelity.FULL
-            and result.trust.stability.value == "confirmed"
-        ):
-            return decision.model_copy(update={"best_eligible": True})
+        if result.fidelity.value == "full":
+            decision = decision.model_copy(
+                update={
+                    "decision": ExperimentDecisionKind.REJECT,
+                    "best_eligible": False,
+                    "next_fidelity": None,
+                }
+            )
         return decision
 
 
-def test_parallel_round_runs_independent_lanes_and_serializes_public_queries(
-    harness, baseline_evaluation
-):
-    harness.config = harness.config.model_copy(
-        update={
-            "max_experiments": 3,
-            "parallel_directions": 3,
-            "synthesize_parallel_improvements": False,
-        }
-    )
-    harness.planner = ParallelPlanner(harness.config.baseline_commit_sha)
-    worker = ConcurrentCodingWorker(harness.coding_worker)
-    harness.coding_worker = worker
-    harness.bootstrap(baseline_evaluation)
-
-    state = asyncio.run(harness.run_parallel_round())
-
-    assert state.experiments_proposed == 3
-    assert worker.max_active == 3
-    assert state.stop_reason_code == "experiment_budget"
-    proposals = [
-        event.payload.spec
-        for event in harness.events()
-        if event.event_type == EventType.EXPERIMENT_PROPOSED
-    ]
-    assert [spec.experiment_id for spec in proposals] == [
-        "exp_001",
-        "exp_002",
-        "exp_003",
-    ]
-    public_indices = [
-        event.payload.result.public_query_index
-        for event in harness.events()
-        if event.event_type == EventType.EVALUATION_COMPLETED
-        and event.payload.result.population.value == "public_validation"
-    ]
-    assert public_indices == list(range(1, len(public_indices) + 1))
-
-
-def test_parallel_round_synthesizes_all_independent_improvements(
-    harness, baseline_evaluation
-):
-    harness.config = harness.config.model_copy(
-        update={
-            "max_experiments": 4,
-            "parallel_directions": 3,
-            "synthesize_parallel_improvements": True,
-        }
-    )
-    harness.planner = ParallelPlanner(harness.config.baseline_commit_sha)
-    harness.evaluator = AllImprovingEvaluator(
-        harness.config.metric_names,
-        harness.config.primary_metric_name,
-        harness.event_store,
-    )
-    harness.bootstrap(baseline_evaluation)
-
-    state = asyncio.run(harness.run_parallel_round())
-
-    assert state.experiments_proposed == 4
-    synthesis = next(
-        event.payload.spec
-        for event in harness.events()
-        if event.event_type == EventType.EXPERIMENT_PROPOSED
-        and event.payload.spec.family == "ensemble"
-    )
-    assert synthesis.experiment_id == "exp_004"
-    assert synthesis.parent_experiment_id == "exp_001"
-    assert synthesis.component_experiment_ids == ["exp_002", "exp_003"]
-    coder_context = next(
-        event.payload.context
-        for event in harness.events()
-        if event.event_type == EventType.CONTEXT_CREATED
-        and event.payload.context.role == "coder"
-        and event.payload.context.experiment_id == "exp_004"
-    )
-    assert [item["experiment_id"] for item in coder_context.component_patches] == [
-        "exp_002",
-        "exp_003",
-    ]
-
-
-class NoOpEvaluator(FakeEvaluator):
-    """Return a structurally valid evaluation with unchanged predictions."""
-
+class NegativeAuditEvaluator(FakeEvaluator):
     async def evaluate(self, request):
         result = await super().evaluate(request)
-        return result.__class__.model_validate(
-            {
-                **result.model_dump(mode="json"),
-                "prediction_change": {
-                    "spearman_vs_parent": 1.0,
-                    "changed_row_fraction": 0.0,
-                },
-                "seed_evidence_event_ids": [],
-                "trust": {
-                    **result.trust.model_dump(mode="json"),
-                    "verdict": TrustVerdict.NO_OP,
-                    "stability": Stability.NOT_APPLICABLE,
-                    "flags": ["NO_PREDICTION_CHANGE"],
-                    "seed_mean": None,
-                    "seed_stderr": None,
-                    "seed_count": 1,
-                },
-            }
-        )
+        if request.fidelity.value == "full":
+            result = result.model_copy(
+                update={
+                    "diagnostics": result.diagnostics.model_copy(
+                        update={
+                            "validation_arm_deltas": {
+                                "val_a": 0.02,
+                                "val_b": -0.01,
+                            },
+                            "validation_arm_gap": 0.03,
+                        }
+                    )
+                }
+            )
+        return result
 
 
-class NoOpRepairingCodingWorker(FakeCodingWorker):
-    def __init__(self, artifacts):
-        super().__init__(artifacts)
-        self.initial_patch = None
-        self.repair_calls = []
-
-    async def create_patch(self, context, spec):
-        self.initial_patch = await super().create_patch(context, spec)
-        return self.initial_patch
-
-    async def repair_patch(self, context, decision):
-        self.repair_calls.append((context, decision))
-        values = self.initial_patch.model_dump(mode="json")
-        values.update(
-            {
-                "context_id": context.context_id,
-                "base_commit_sha": self.initial_patch.patch_commit_sha,
-                "patch_commit_sha": "c" * 40,
-            }
-        )
-        return self.initial_patch.__class__.model_validate(values)
-
-
-class ExhaustedNoOpRepairingCodingWorker(FakeCodingWorker):
-    async def repair_patch(self, context, decision):
-        raise CodingWorkerError(
-            "TRAE_STEP_LIMIT_EXCEEDED",
-            "Trae exhausted the bounded 20-step no-op repair task",
-        )
+class AuditRankingEvaluator(FakeEvaluator):
+    async def evaluate(self, request):
+        result = await super().evaluate(request)
+        if request.fidelity.value == "full":
+            val_b = 0.02 if request.experiment_id == "exp_002" else 0.01
+            result = result.model_copy(
+                update={
+                    "diagnostics": result.diagnostics.model_copy(
+                        update={
+                            "validation_arm_deltas": {
+                                "val_a": 0.02,
+                                "val_b": val_b,
+                            },
+                            "validation_arm_gap": abs(0.02 - val_b),
+                        }
+                    )
+                }
+            )
+        return result
 
 
 class BlockedPlanner:
@@ -362,35 +292,21 @@ class InvalidProviderPlanner:
         )
 
 
-class PruneThenProviderFailurePlanner:
-    def __init__(self, parent_commit_sha: str) -> None:
-        self.parent_commit_sha = parent_commit_sha
+class InvalidOncePlanner:
+    def __init__(self):
         self.calls = 0
 
     async def propose(self, context):
         self.calls += 1
-        if self.calls == 2:
-            raise ProviderError(
-                "DeepSeek request timed out after 120 seconds; "
-                "Authorization: Bearer abcdefghijklmnop"
-            )
-        return await FakeResearchPlanner(self.parent_commit_sha).propose(context)
+        if self.calls == 1:
+            return await InvalidProviderPlanner().propose(context)
+        return await BlockedPlanner().propose(context)
 
 
-class ProxyPruningEvaluator(FakeEvaluator):
-    async def decide(self, result, context):
-        if result.fidelity == Fidelity.PROXY:
-            return ExperimentDecision(
-                run_id=result.run_id,
-                experiment_id=result.experiment_id,
-                evaluation_event_id="evt_pending",
-                decision=ExperimentDecisionKind.PRUNE,
-                reason_code="negative_proxy",
-                fidelity_completed=Fidelity.PROXY,
-                parent_eligible=False,
-                best_eligible=False,
-            )
-        return await super().decide(result, context)
+class RaisingPlanner:
+    async def propose(self, context):
+        del context
+        raise ProviderError("planner transport returned malformed JSON")
 
 
 class IntegrityRejectingPatchGate:
@@ -474,94 +390,79 @@ def test_outer_loop_uses_memory_and_counts_distinct_terminal_iterations(
     assert harness.events()[-1].event_type == EventType.RUN_STOPPED
 
 
-def test_no_op_repairs_once_then_returns_evidence_to_planner(
+def test_negative_full_results_consume_convergence_patience(
     harness, baseline_evaluation
 ):
     planner = SequentialPlanner(harness.config.baseline_commit_sha)
+    harness.config.max_experiments = 10
     harness.planner = planner
-    worker = NoOpRepairingCodingWorker(harness.event_store.artifact_store)
-    harness.coding_worker = worker
-    harness.evaluator = NoOpEvaluator(
+    harness.evaluator = NegativeNonImprovingEvaluator(
         harness.config.metric_names,
         harness.config.primary_metric_name,
         harness.event_store,
     )
-    harness.recovery_manager = RecoveryManager()
     harness.bootstrap(baseline_evaluation)
 
-    state = asyncio.run(harness.run_one_experiment())
+    state = asyncio.run(harness.run_until_stopped())
 
-    assert state.phase == "planning"
-    assert state.experiments["exp_001"].status == ExperimentStatus.NO_OP
-    assert len(worker.repair_calls) == 1
-    recovery_decisions = [
-        event.payload.decision
-        for event in harness.events()
-        if event.event_type == EventType.RECOVERY_DECIDED
-    ]
-    assert [decision.action for decision in recovery_decisions] == [
-        RecoveryAction.TRAE_REPAIR,
-        RecoveryAction.RETURN_TO_PLANNER,
-    ]
-    assert not any(
-        event.event_type == EventType.EXPERIMENT_DECIDED
-        and event.payload.decision.decision.value == "prune"
-        for event in harness.events()
-    )
-    planner_context = harness.context_builder.build_planner(harness.events())
-    summary = planner_context.family_history[0]
-    assert summary.trust_verdict == TrustVerdict.NO_OP
-    assert summary.decision is None
-    assert summary.status == ExperimentStatus.NO_OP.value
-
-    # Recovery did not decide the branch outcome: a planner-selected modified
-    # plan with the same semantic key is admitted exactly once after the
-    # return-to-planner evidence.
-    harness.planner = SameMechanismReimplementationPlanner(
-        harness.config.baseline_commit_sha
-    )
-    second_state = asyncio.run(harness.run_one_experiment())
-    assert second_state.experiments["exp_002"].status == ExperimentStatus.NO_OP
-    assert len(worker.repair_calls) == 2
+    assert state.stop_reason_code == "converged"
+    assert state.experiments_proposed == 3
+    assert state.consecutive_non_improving_full_evaluations == 3
 
 
-def test_exhausted_no_op_repair_returns_to_planner_without_stopping_run(
+def test_discovery_mode_ignores_early_convergence_and_never_auto_finalizes(
     harness, baseline_evaluation
 ):
-    harness.planner = SequentialPlanner(harness.config.baseline_commit_sha)
-    harness.coding_worker = ExhaustedNoOpRepairingCodingWorker(
-        harness.event_store.artifact_store
-    )
-    harness.evaluator = NoOpEvaluator(
+    planner = SequentialPlanner(harness.config.baseline_commit_sha)
+    harness.config.run_mode = "discovery"
+    harness.config.max_experiments = 4
+    harness.planner = planner
+    harness.evaluator = NonImprovingEvaluator(
         harness.config.metric_names,
         harness.config.primary_metric_name,
         harness.event_store,
     )
-    harness.recovery_manager = RecoveryManager()
     harness.bootstrap(baseline_evaluation)
 
-    state = asyncio.run(harness.run_one_experiment())
+    state = asyncio.run(harness.run_to_completion())
 
-    assert state.status.value == "running"
-    assert state.phase == "planning"
-    assert state.experiments["exp_001"].status == ExperimentStatus.NO_OP
-    assert not any(
-        event.event_type == EventType.RUN_STOPPED for event in harness.events()
+    assert state.status.value == "stopped"
+    assert state.stop_reason_code == "experiment_budget"
+    assert state.experiments_proposed == 4
+    assert state.consecutive_non_improving_full_evaluations == 4
+    assert state.final_experiment_id is None
+    assert EventType.FINAL_SELECTED not in [event.event_type for event in harness.events()]
+    assert EventType.SUBMISSION_CHECKED not in [
+        event.event_type for event in harness.events()
+    ]
+
+
+def test_global_patience_still_bounds_explicit_depth_campaign(
+    harness, baseline_evaluation
+):
+    planner = SequentialPlanner(harness.config.baseline_commit_sha)
+    harness.config.max_experiments = 10
+    harness.config.research_campaign = ResearchCampaign(
+        campaign_id="objective_depth_4",
+        family_order=["objective"],
+        family_budgets={"objective": 4},
+        family_method_card_ids={"objective": ["objective_pairwise_bpr"]},
+        family_directives={"objective": "Adapt objective parameters from evidence."},
+        proxy_checkpoint_interval=3,
     )
-    decisions = [
-        event.payload.decision
-        for event in harness.events()
-        if event.event_type == EventType.RECOVERY_DECIDED
-    ]
-    assert [decision.action for decision in decisions] == [
-        RecoveryAction.TRAE_REPAIR,
-        RecoveryAction.RETURN_TO_PLANNER,
-    ]
-    assert decisions[-1].reason_code == "NO_OP_REPAIR_WORKER_EXHAUSTED"
-    planner_context = harness.context_builder.build_planner(harness.events())
-    assert planner_context.family_history[-1].trust_flags == [
-        "NO_PREDICTION_CHANGE"
-    ]
+    harness.planner = planner
+    harness.evaluator = NonImprovingEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_until_stopped())
+
+    assert state.stop_reason_code == "converged"
+    assert state.experiments_proposed == 3
+    assert len(planner.contexts) == 3
 
 
 def test_blocked_planner_stops_without_spinning(harness, baseline_evaluation):
@@ -590,55 +491,75 @@ def test_invalid_provider_plan_is_resumable_and_not_a_false_convergence(
     assert harness.state().status.value == "ready"
     assert harness.state().phase == "planner_context"
     assert harness.state().stop_reason_code is None
+    assert len(
+        [
+            event
+            for event in harness.events()
+            if event.event_type == EventType.PLANNER_RECOMMENDED
+        ]
+    ) == 3
 
     harness.planner = BlockedPlanner()
     state = asyncio.run(harness.run_until_stopped())
     assert state.stop_reason_code == "no_legal_proposal"
 
 
-def test_provider_failure_after_prune_is_run_level_and_preserves_original_error(
+def test_one_invalid_provider_plan_does_not_interrupt_campaign(
     harness, baseline_evaluation
 ):
-    planner = PruneThenProviderFailurePlanner(harness.config.baseline_commit_sha)
+    planner = InvalidOncePlanner()
     harness.planner = planner
-    harness.evaluator = ProxyPruningEvaluator(
-        harness.config.metric_names,
-        harness.config.primary_metric_name,
-        harness.event_store,
-    )
     harness.bootstrap(baseline_evaluation)
 
-    pruned = asyncio.run(harness.run_one_experiment())
+    state = asyncio.run(harness.run_until_stopped())
 
-    assert pruned.experiments["exp_001"].status == ExperimentStatus.PRUNED
-    assert pruned.active_experiment_id is None
-    assert pruned.active_attempt is None
-    assert pruned.active_fidelity is None
+    assert planner.calls == 2
+    assert state.status.value == "stopped"
+    assert state.stop_reason_code == "no_legal_proposal"
 
-    with pytest.raises(
-        OrchestrationError, match="PLANNER_PROVIDER_FAILURE"
-    ):
-        asyncio.run(harness.run_to_completion())
-    state = harness.state()
-    events = list(harness.events())
-    planning_failure = next(
-        event for event in events if event.event_type == EventType.PLANNING_FAILED
-    )
 
-    assert state.status.value == "failed"
+def test_planner_provider_failure_is_recorded_before_specific_stop(
+    harness, baseline_evaluation
+):
+    harness.planner = RaisingPlanner()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
     assert state.stop_reason_code == "PLANNER_PROVIDER_FAILURE"
-    assert planning_failure.payload.result.error_class == "ProviderError"
-    assert "DeepSeek request timed out after 120 seconds" in (
-        planning_failure.payload.result.error_summary
+    assert state.experiments_proposed == 0
+    assert [event.event_type for event in harness.events()][-2:] == [
+        EventType.PLANNING_FAILED,
+        EventType.RUN_STOPPED,
+    ]
+    failure = harness.events()[-2].payload.result
+    assert failure.error_class == "ProviderError"
+    assert failure.error_summary == "planner transport returned malformed JSON"
+
+
+def test_binding_failure_is_durable_and_never_becomes_generic_adapter_stop(
+    harness, baseline_evaluation, monkeypatch
+):
+    harness.bootstrap(baseline_evaluation)
+
+    def fail_binding(proposal):
+        del proposal
+        raise ContextBuildError("immutable parent implementation is unavailable")
+
+    monkeypatch.setattr(harness.context_builder, "bind_implementation", fail_binding)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert state.stop_reason_code == "PLANNER_BINDING_FAILURE"
+    assert state.experiments_proposed == 0
+    assert [event.event_type for event in harness.events()][-2:] == [
+        EventType.PLANNING_FAILED,
+        EventType.RUN_STOPPED,
+    ]
+    assert (
+        harness.events()[-2].payload.result.error_summary
+        == "immutable parent implementation is unavailable"
     )
-    assert "abcdefghijklmnop" not in planning_failure.payload.result.error_summary
-    assert "[REDACTED]" in planning_failure.payload.result.error_summary
-    assert not hasattr(planning_failure.payload.result, "experiment_id")
-    assert not any(event.event_type == EventType.ADAPTER_FAILED for event in events)
-    assert events[-2].event_type == EventType.PLANNING_FAILED
-    assert events[-1].event_type == EventType.RUN_STOPPED
-    assert not any(event.event_type == EventType.FINAL_SELECTED for event in events)
-    assert state.experiments["exp_001"].terminal_event_id is not None
 
 
 def test_integrity_violation_is_recorded_and_stops_the_run(
@@ -709,3 +630,56 @@ def test_baseline_best_uses_protected_official_submission(harness, baseline_eval
         if event.event_type == EventType.BASELINE_VERIFIED
     )
     assert final.payload.reproduction_evaluation_event_id == baseline.event_id
+
+
+def test_protected_audit_can_override_public_best_with_baseline(
+    harness, baseline_evaluation
+):
+    runner = FinalAwareFakeRunner(harness.event_store.artifact_store)
+    harness.runner = runner
+    harness.evaluator = NegativeAuditEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.final_submission_provider = FakeBaselineFinalSubmission(
+        harness.event_store.artifact_store, harness.config.run_id
+    )
+    harness.bootstrap(baseline_evaluation)
+    asyncio.run(harness.run_one_experiment())
+    harness.stop(StopDecision(True, "experiment_budget", "Finish the test search."))
+    request_count = len(runner.requests)
+
+    state = asyncio.run(harness.finalize())
+
+    assert state.best_experiment_id == "exp_001"
+    assert state.final_experiment_id == "baseline"
+    assert len(runner.requests) == request_count
+
+
+def test_protected_audit_can_select_trusted_candidate_beyond_public_best(
+    harness, baseline_evaluation
+):
+    planner = SequentialPlanner(harness.config.baseline_commit_sha)
+    runner = FinalAwareFakeRunner(harness.event_store.artifact_store)
+    harness.planner = planner
+    harness.runner = runner
+    harness.evaluator = AuditRankingEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.bootstrap(baseline_evaluation)
+    asyncio.run(harness.run_one_experiment())
+    asyncio.run(harness.run_one_experiment())
+    harness.stop(StopDecision(True, "experiment_budget", "Finish the test search."))
+
+    state = asyncio.run(harness.finalize())
+
+    assert state.best_experiment_id == "exp_001"
+    assert state.final_experiment_id == "exp_002"
+    assert [request.command_id for request in runner.requests[-3:]] == [
+        "clean_reproduce",
+        "candidate_final_infer",
+        "submission_check",
+    ]

@@ -11,7 +11,7 @@ import csv
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from typing import Iterable, Sequence, Tuple, Union
+from typing import Iterable, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -24,6 +24,18 @@ TRAIN_COLUMNS = (
     "tab",
     "duration_ms",
     "long_view",
+)
+TRAIN_AUXILIARY_COLUMNS = (
+    "time_ms",
+    "hourmin",
+    "is_click",
+    "play_time_ms",
+    "is_like",
+    "is_follow",
+    "is_comment",
+    "is_forward",
+    "is_hate",
+    "is_profile_enter",
 )
 SCORE_COLUMNS = (
     "row_id",
@@ -46,6 +58,16 @@ class TrainingRow:
     tab: str
     duration_ms: float
     long_view: int
+    time_ms: Optional[int] = None
+    hourmin: Optional[int] = None
+    is_click: Optional[int] = None
+    play_time_ms: Optional[float] = None
+    is_like: Optional[int] = None
+    is_follow: Optional[int] = None
+    is_comment: Optional[int] = None
+    is_forward: Optional[int] = None
+    is_hate: Optional[int] = None
+    is_profile_enter: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -66,21 +88,44 @@ def read_training_rows(path: Path) -> list[TrainingRow]:
     """Read the controller-created training view with strict schema checks."""
 
     rows: list[TrainingRow] = []
-    for raw in _read_dict_rows(path, TRAIN_COLUMNS):
-        label = raw["long_view"]
-        if label not in {"0", "1"}:
-            raise ValueError("long_view must be encoded as 0 or 1")
-        rows.append(
-            TrainingRow(
-                date=_date(raw["date"]),
-                user_id=_category(raw["user_id"], "user_id"),
-                video_id=_category(raw["video_id"], "video_id"),
-                author_id=_category(raw["author_id"], "author_id"),
-                tab=_category(raw["tab"], "tab"),
-                duration_ms=_duration(raw["duration_ms"]),
-                long_view=int(label),
+    candidate = Path(path)
+    if candidate.is_symlink() or not candidate.is_file():
+        raise ValueError("candidate input must be a regular file")
+    with candidate.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, strict=True)
+        fields = tuple(reader.fieldnames or ())
+        allowed = set(TRAIN_COLUMNS).union(TRAIN_AUXILIARY_COLUMNS)
+        if not set(TRAIN_COLUMNS).issubset(fields) or set(fields) - allowed:
+            raise ValueError("candidate training input has an unexpected schema")
+        for raw in reader:
+            label = raw["long_view"]
+            if label not in {"0", "1"}:
+                raise ValueError("long_view must be encoded as 0 or 1")
+            rows.append(
+                TrainingRow(
+                    date=_date(raw["date"]),
+                    user_id=_category(raw["user_id"], "user_id"),
+                    video_id=_category(raw["video_id"], "video_id"),
+                    author_id=_category(raw["author_id"], "author_id"),
+                    tab=_category(raw["tab"], "tab"),
+                    duration_ms=_duration(raw["duration_ms"]),
+                    long_view=int(label),
+                    time_ms=_optional_int(raw.get("time_ms")),
+                    hourmin=_optional_int(raw.get("hourmin")),
+                    is_click=_optional_binary(raw.get("is_click"), "is_click"),
+                    play_time_ms=_optional_nonnegative(
+                        raw.get("play_time_ms"), "play_time_ms"
+                    ),
+                    is_like=_optional_binary(raw.get("is_like"), "is_like"),
+                    is_follow=_optional_binary(raw.get("is_follow"), "is_follow"),
+                    is_comment=_optional_binary(raw.get("is_comment"), "is_comment"),
+                    is_forward=_optional_binary(raw.get("is_forward"), "is_forward"),
+                    is_hate=_optional_binary(raw.get("is_hate"), "is_hate"),
+                    is_profile_enter=_optional_binary(
+                        raw.get("is_profile_enter"), "is_profile_enter"
+                    ),
+                )
             )
-        )
     if not rows:
         raise ValueError("training population is empty")
     return rows
@@ -201,3 +246,25 @@ def _category(value: str, name: str) -> str:
     if not value:
         raise ValueError("%s must not be empty" % name)
     return value
+
+
+def _optional_int(value: Optional[str]) -> Optional[int]:
+    return None if value in (None, "") else int(value)
+
+
+def _optional_binary(value: Optional[str], name: str) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    parsed = int(float(value))
+    if parsed not in (0, 1):
+        raise ValueError("%s must be binary" % name)
+    return parsed
+
+
+def _optional_nonnegative(value: Optional[str], name: str) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise ValueError("%s must be finite and non-negative" % name)
+    return parsed

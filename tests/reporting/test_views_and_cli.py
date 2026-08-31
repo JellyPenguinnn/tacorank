@@ -141,6 +141,12 @@ def test_run_command_requires_live_configuration():
         build_parser().parse_args(["run", "--config", "run-config.json"])
 
 
+def test_new_live_deployments_default_to_discovery_mode():
+    args = build_parser().parse_args(["setup-live"])
+
+    assert args.run_mode == "discovery"
+
+
 def test_fake_runtime_configuration_is_rejected(config):
     payload = config.model_dump(mode="python")
     payload["adapter_mode"] = "fake"

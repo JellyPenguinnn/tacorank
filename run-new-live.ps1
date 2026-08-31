@@ -4,6 +4,8 @@ param(
     [switch]$DownloadData,
     [switch]$SkipInstall,
     [string]$RunId,
+    [ValidateSet("discovery", "submission")]
+    [string]$RunMode = "discovery",
     [string]$Python312,
     [string]$Docker
 )
@@ -144,12 +146,13 @@ try {
     $liveConfig = Join-Path $deploymentDir "live-adapters.json"
     Write-Output "Starting new TacoRank live run: $RunId"
     Write-Output "Repository: $repoRoot"
+    Write-Output "Run mode: $RunMode"
 
     $setupArgs = @(
         "setup-live", "--repository-root", $repoRoot,
         "--deployment-dir", $deploymentDir, "--runtime-dir", $runtimeDir,
         "--data-dir", $dataDir, "--python312", $Python312,
-        "--docker", $Docker, "--run-id", $RunId
+        "--docker", $Docker, "--run-id", $RunId, "--run-mode", $RunMode
     )
     if ($DownloadData) { $setupArgs += "--download-data" }
     Invoke-Checked $taco $setupArgs
@@ -167,15 +170,26 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail "could not read final run status" }
     $status = ($statusLines -join "`n") | ConvertFrom-Json
     Write-Output ($statusLines -join "`n")
-    if ($status.status -ne "finalized" -or $status.phase -ne "finalized") {
-        Fail "run did not finalize: status=$($status.status) phase=$($status.phase)"
-    }
-    if ([string]::IsNullOrWhiteSpace([string]$status.final_experiment_id)) {
-        Fail "run finalized without final_experiment_id"
+    if ($status.run_mode -eq "discovery") {
+        if ($status.status -ne "stopped" -or $status.phase -ne "stopped") {
+            Fail "discovery run did not stop cleanly: status=$($status.status) phase=$($status.phase)"
+        }
+        if ($null -ne $status.final_experiment_id) {
+            Fail "discovery run unexpectedly selected a final experiment"
+        }
+    } elseif ($status.run_mode -eq "submission") {
+        if ($status.status -ne "finalized" -or $status.phase -ne "finalized") {
+            Fail "submission run did not finalize: status=$($status.status) phase=$($status.phase)"
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$status.final_experiment_id)) {
+            Fail "submission run finalized without final_experiment_id"
+        }
+    } else {
+        Fail "run status has invalid run_mode=$($status.run_mode)"
     }
     Invoke-Checked $taco @("validate-ledger", "--run-id", $RunId, "--repository-root", $repoRoot)
     Invoke-Checked $taco @("rebuild-views", "--run-id", $RunId, "--repository-root", $repoRoot)
-    Write-Output "TacoRank live run completed and validated: $RunId"
+    Write-Output "TacoRank $RunMode run completed and validated: $RunId"
 }
 finally {
     if ($lockOwned -and (Test-Path $lockDir)) {

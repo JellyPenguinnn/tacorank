@@ -250,15 +250,22 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
                 or spec.parent_experiment_id == "baseline",
                 "unknown parent experiment",
             )
-        if spec.parent_experiment_id in (None, "baseline"):
+        implementation_parent_id = (
+            spec.implementation_parent_experiment_id or spec.parent_experiment_id
+        )
+        if implementation_parent_id in (None, "baseline"):
             baseline = _events_of(events, EventType.BASELINE_VERIFIED)[-1]
             expected_parent_commit = baseline.payload.commit_sha
         else:
-            parent = state.experiments[spec.parent_experiment_id]
+            _require(
+                implementation_parent_id in state.experiments,
+                "unknown implementation parent experiment",
+            )
+            parent = state.experiments[implementation_parent_id]
             expected_parent_commit = parent.latest_commit_sha
             _require(
                 expected_parent_commit is not None,
-                "selected parent experiment has no patch commit",
+                "selected implementation parent experiment has no patch commit",
             )
         _require(
             spec.parent_commit_sha == expected_parent_commit,
@@ -314,10 +321,17 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         request = payload.request
         node = state.experiments.get(request.experiment_id)
         if state.status == RunStatus.STOPPED:
+            from ..evaluation.final_selection import rank_finalists
+            from .finalize import finalization_candidates
+
+            finalists = rank_finalists(finalization_candidates(events, state))
+            selected = finalists[0] if finalists else None
             _require(
                 node is not None
-                and request.experiment_id == state.best_experiment_id
-                and request.patch_commit_sha == state.best_commit_sha
+                and selected is not None
+                and selected.experiment_id != "baseline"
+                and request.experiment_id == selected.experiment_id
+                and request.patch_commit_sha == selected.commit_sha
                 and request.fidelity == Fidelity.FULL
                 and request.command_id
                 in {"clean_reproduce", "candidate_final_infer", "submission_check"},
@@ -572,7 +586,30 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             _require(node.status == ExperimentStatus.OUTPUT_VERIFIED, "smoke decision requires Gate B")
             _require(decision.evaluation_event_id is None, "smoke decision cannot cite evaluation")
         else:
-            _require(node.status == ExperimentStatus.EVALUATED, "decision requires evaluation")
+            latest_recovery = _last_for_experiment(
+                events, EventType.RECOVERY_DECIDED, decision.experiment_id
+            )
+            recovery_terminated_evaluation = bool(
+                node.status == ExperimentStatus.INVALID
+                and latest_recovery is not None
+                and latest_recovery.payload.decision.action
+                in {RecoveryAction.ABANDON, RecoveryAction.ROLLBACK}
+            )
+            if recovery_terminated_evaluation:
+                _require(
+                    decision.decision
+                    in {
+                        ExperimentDecisionKind.REJECT,
+                        ExperimentDecisionKind.INVALID,
+                        ExperimentDecisionKind.PRUNE,
+                    },
+                    "terminal recovery cannot accept or promote an experiment",
+                )
+            _require(
+                node.status == ExperimentStatus.EVALUATED
+                or recovery_terminated_evaluation,
+                "decision requires evaluation",
+            )
             evaluation = _last_for_experiment(events, EventType.EVALUATION_COMPLETED, decision.experiment_id)
             _require(
                 evaluation is not None and evaluation.event_id == decision.evaluation_event_id,
@@ -713,8 +750,45 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         _require(state.status not in (RunStatus.STOPPED, RunStatus.FINALIZING), "run already stopped")
     elif event_type == EventType.FINAL_SELECTED:
         _require(state.status == RunStatus.STOPPED, "final selection requires stopped run")
-        _require(payload.experiment_id == state.best_experiment_id, "must select latest verified best")
-        _require(payload.commit_sha == state.best_commit_sha, "final commit must match verified best")
+        baseline = _events_of(events, EventType.BASELINE_VERIFIED)[-1]
+        if payload.experiment_id == "baseline":
+            expected_commit = baseline.payload.commit_sha
+            expected_score = state.baseline_primary_score
+        else:
+            selected_node = state.experiments.get(payload.experiment_id)
+            _require(selected_node is not None, "final selection cites unknown experiment")
+            expected_commit = selected_node.latest_commit_sha
+            terminal = next(
+                (
+                    item
+                    for item in reversed(events)
+                    if item.event_type == EventType.EXPERIMENT_DECIDED
+                    and item.payload.decision.experiment_id == payload.experiment_id
+                    and item.payload.decision.decision
+                    == ExperimentDecisionKind.ACCEPT
+                    and item.payload.decision.parent_eligible
+                ),
+                None,
+            )
+            _require(terminal is not None, "selected candidate was not trusted eligible")
+            terminal_evaluation = next(
+                (
+                    item
+                    for item in events
+                    if item.event_type == EventType.EVALUATION_COMPLETED
+                    and item.event_id == terminal.payload.decision.evaluation_event_id
+                ),
+                None,
+            )
+            _require(
+                terminal_evaluation is not None,
+                "selected candidate has no terminal evaluation",
+            )
+            expected_score = terminal_evaluation.payload.result.metric_set.primary_score
+        _require(
+            payload.commit_sha == expected_commit,
+            "final commit must match selected trusted evidence",
+        )
         reproduction = next(
             (
                 event
@@ -737,8 +811,8 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             and result.population == Population.PUBLIC_VALIDATION
             and result.trust.verdict == TrustVerdict.ACCEPTED
             and result.trust.integrity == Integrity.CLEAN
-            and result.metric_set.primary_score == state.best_primary_score,
-            "final reproduction is not trusted evidence for the verified best",
+            and result.metric_set.primary_score == expected_score,
+            "final reproduction is not trusted evidence for the selection",
         )
         if reproduction.event_type == EventType.BASELINE_VERIFIED:
             _require(

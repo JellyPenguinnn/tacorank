@@ -37,6 +37,32 @@ def select_final(candidates: Sequence[CandidateEvidence]) -> CandidateEvidence:
     )
 
 
+def rank_finalists(candidates: Sequence[CandidateEvidence]) -> Tuple[CandidateEvidence, ...]:
+    """Rank trusted selection candidates before clean reproduction."""
+
+    eligible = [
+        candidate
+        for candidate in candidates
+        if candidate.trust_verdict == Verdict.ACCEPTED
+        and candidate.stability == Stability.CONFIRMED
+        and candidate.integrity == Integrity.CLEAN
+        and candidate.internal_holdout_agrees
+        and candidate.unbiased_audit_agrees
+        and candidate.val_b_score is not None
+    ]
+    return tuple(
+        sorted(
+            eligible,
+            key=lambda candidate: (
+                candidate.val_b_score,
+                candidate.public_score,
+                candidate.experiment_id,
+            ),
+            reverse=True,
+        )
+    )
+
+
 def rank_average(predictions: Sequence[Sequence[float]]) -> Tuple[float, ...]:
     if not predictions:
         raise ValueError("at least one prediction vector is required")

@@ -47,13 +47,14 @@ class ArtifactStore:
             raise ArtifactError("artifact path escapes the repository") from exc
         return candidate
 
-    def verify(self, ref: ArtifactRef) -> None:
+    def verify(self, ref: ArtifactRef) -> Path:
         path = self._resolve(ref.path)
         data = path.read_bytes()
         if len(data) != ref.size_bytes:
             raise ArtifactError("artifact size mismatch for %s" % ref.artifact_id)
         if self.sha256_bytes(data) != ref.sha256:
             raise ArtifactError("artifact hash mismatch for %s" % ref.artifact_id)
+        return path
 
     def write(
         self,

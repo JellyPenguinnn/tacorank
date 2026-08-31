@@ -6,7 +6,7 @@ from tacorank.research.portfolio import load_method_cards
 def test_schema_v1_method_cards_load_with_markdown_sections():
     portfolio = load_method_cards(Path(__file__).parents[2] / "research" / "methods")
 
-    assert len(portfolio.cards) == 15
+    assert len(portfolio.cards) == 17
     card = next(card for card in portfolio.cards if card.method_id == "objective_pairwise_bpr")
     assert card.schema_version == "1.0"
     assert card.family == "objective"
@@ -24,22 +24,15 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
     }
     assert card.prohibition_conditions == ("evaluator_or_split_change_required",)
     assert card.implementation_targets == (
-        "solution/candidate.py",
-        "solution/features.py",
-        "solution/model.py",
+        "solution/official_fm.py",
+        "solution/losses.py",
         "solution/train.py",
-        "solution/inference.py",
+        "solution/candidate.py",
     )
-
-    loss_aligned = next(
-        card
-        for card in portfolio.cards
-        if card.method_id == "objective_loss_aligned_features"
-    )
-    assert loss_aligned.family == "objective"
-    assert loss_aligned.prerequisites == ("pairwise_tested",)
-    assert "user_id" in loss_aligned.allowed_data
-    assert "simultaneous_loss_change" in loss_aligned.prohibition_conditions
+    assert card.configuration_target is None
+    assert card.capability_status == "unverified"
+    assert card.implementation_id is None
+    assert card.active_parameters == ()
 
     residual = next(
         card
@@ -58,21 +51,27 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
         "solution/inference.py",
     )
 
-    synthesis = next(
+    affinity = next(
         card
         for card in portfolio.cards
-        if card.method_id == "ensemble_parallel_round_synthesis"
+        if card.method_id == "features_history_affinity"
     )
-    assert synthesis.prerequisites == ("two_confirmed_clean_members",)
-    assert "solution/candidate.py" in synthesis.implementation_targets
+    assert affinity.capability_status == "verified"
+    assert affinity.implementation_id == "features_history_affinity_v1"
+    assert "history_shrinkage" in affinity.active_parameters
 
-    history = next(
+    loss_aligned = next(
         card
         for card in portfolio.cards
-        if card.method_id == "temporal_history_compact"
+        if card.method_id == "objective_loss_aligned_features"
     )
-    assert history.implementation_targets == (
-        "solution/candidate.py",
-        "solution/features.py",
-        "solution/inference.py",
+    assert loss_aligned.family == "objective"
+    assert loss_aligned.prerequisites == ("pairwise_tested",)
+    assert "simultaneous_loss_change" in loss_aligned.prohibition_conditions
+
+    static = next(
+        card
+        for card in portfolio.cards
+        if card.method_id == "static_feature_expansion_known_negative"
     )
+    assert static.status == "known_negative"

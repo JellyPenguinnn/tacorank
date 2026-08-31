@@ -15,11 +15,15 @@ import tarfile
 import tempfile
 import urllib.request
 from pathlib import Path, PurePosixPath
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, Iterable, Mapping, Sequence, Tuple
 
 import certifi
 
+from .candidate_schema import (
+    CANDIDATE_SCORE_COLUMNS,
+    CANDIDATE_TRAIN_COLUMNS,
+)
 from .coding import (
     TRAE_DEEPSEEK_REASONING_MARKER,
     TRAE_DEEPSEEK_TOOL_JSON_MARKER,
@@ -30,6 +34,12 @@ from .coding import (
 from .config import PRODUCTION_TARGET_INTERFACE_EXCERPTS
 from .docker_host import normalize_local_docker_host
 from .evaluation.proxy import split_validation_indices
+from .feature_materialization import (
+    HISTORY_FEATURE_COLUMNS,
+    SCORE_FEATURE_COLUMNS,
+    materialize_history_features,
+)
+from .schemas import ResearchCampaign
 
 
 TRAE_SOURCE_REVISION = "e839e559ac61bdd0e057c375dd1dee391fee797d"
@@ -106,8 +116,43 @@ def setup_trae_deployment(
             "candidate_proxy",
             "candidate_full",
         ],
-
-        "target_interface_excerpts": dict(PRODUCTION_TARGET_INTERFACE_EXCERPTS),
+        "target_interface_excerpts": {
+            "solution/official_fm.py": (
+                "Editable adaptation of the frozen official five-field NumPy FM. "
+                "Preserve controller-owned data splits, evaluator, and submission "
+                "logic; implement only the approved model mechanism."
+            ),
+            "solution/losses.py": (
+                "Candidate-owned training objectives. Read training labels only; "
+                "never compute protected metrics or perform validation selection."
+            ),
+            "candidate": (
+                "def run(invocation: PipelineInvocation) -> None; read only "
+                "invocation.input_root and write exactly invocation.output_path as "
+                "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
+                "invocation.seed; return None. train.csv uses the controller-owned "
+                "KuaiRand training schema with the base ranking fields plus approved "
+                "timestamps and auxiliary engagement labels; date is an integer "
+                "YYYYMMDD value; "
+                "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
+                "and never exposes long_view. CSV values arrive as text, and numeric "
+                "fields may use integral decimal notation such as duration_ms=209900.0; "
+                "validate numerically rather than assuming integer string syntax. "
+                "fm_baseline_predictions.csv is the "
+                "setup-verified official FM score for every score.csv row. These are "
+                "unconstrained real-valued ranking scores, not probabilities. Never "
+                "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
+                "parent-plus-residual result. Preserve it as the strong parent and "
+                "add only a bounded train-only residual on the original score scale "
+                "unless the approved hypothesis explicitly replaces the parent. "
+                "Training dates strictly precede score dates. Preserve contiguous "
+                "score row_id order, duplicate rows, finite deterministic scores, "
+                "and exclusive output creation. The production loader imports "
+                "solution.candidate:run. Keep the implementation in candidate.py "
+                "unless every helper path and its import pattern are explicitly "
+                "authorized by the ExperimentSpec target_files."
+            )
+        },
         "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
@@ -142,10 +187,14 @@ def setup_live_deployment(
     python312: Path,
     docker_executable: Path,
     run_id: str,
+    run_mode: str = "discovery",
     download_data: bool,
+    research_campaign_path: Path | None = None,
 ) -> Mapping[str, Any]:
     """Build an exact production deployment and return its generated paths."""
 
+    if run_mode not in {"discovery", "submission"}:
+        raise DeploymentError("run_mode must be discovery or submission")
     root = Path(repository_root).resolve(strict=True)
     deployment = _new_directory_inside(root, deployment_directory)
     runtime = _new_external_directory(root, runtime_directory)
@@ -154,6 +203,7 @@ def setup_live_deployment(
     docker_host = _discover_docker_host(docker, root)
     _require_python312(python)
     _require_clean_tracked_checkout(root)
+    research_campaign = _load_research_campaign(root, research_campaign_path)
     paper_bank_path = root / "research" / "paper_bank.json"
     if paper_bank_path.is_symlink() or not paper_bank_path.is_file():
         raise DeploymentError(
@@ -251,15 +301,15 @@ def setup_live_deployment(
         "baseline_parity_receipt_path": str(
             generated_data["baseline_parity_receipt_path"]
         ),
-        "candidate_allowed_columns": [
-            "date",
-            "user_id",
-            "video_id",
-            "author_id",
-            "tab",
-            "duration_ms",
-            "long_view",
-        ],
+        "candidate_allowed_columns": list(
+            dict.fromkeys(
+                (
+                    *CANDIDATE_TRAIN_COLUMNS,
+                    *CANDIDATE_SCORE_COLUMNS,
+                    *HISTORY_FEATURE_COLUMNS,
+                )
+            )
+        ),
         "protected_columns": ["label"],
         "hidden_path_tokens": ["hidden_labels", "final_labels", "test_labels"],
         "future_column_patterns": ["(?:^|_)future(?:_|$)"],
@@ -268,6 +318,9 @@ def setup_live_deployment(
         "allowed_dependency_changes": [],
     }
     _write_json_exclusive(live_path, live_payload)
+    campaign_budget = (
+        research_campaign.experiment_budget if research_campaign is not None else 50
+    )
     run_payload = {
         "schema_version": "1.0",
         "run_id": run_id,
@@ -281,7 +334,8 @@ def setup_live_deployment(
         "data_manifest_sha256": _sha256_file(manifest_path),
         "evaluator_sha256": evaluator_hash,
         "baseline_commit_sha": baseline_commit,
-        "max_experiments": 50,
+        "max_experiments": campaign_budget,
+        "run_mode": run_mode,
         "parallel_directions": 2,
         "synthesize_parallel_improvements": True,
         "wall_time_limit_seconds": 21600,
@@ -292,23 +346,27 @@ def setup_live_deployment(
         "timeout_profiles": {"standard": 600, "extended": 900},
         "max_confirmation_attempts": 2,
         "seed_schedule": [11, 22, 33, 44, 55],
-        "context_token_limit": 6000,
+        "context_token_limit": 12000 if research_campaign is not None else 6000,
         "synthesis_context_token_limit": 16000,
         "adapter_mode": "live",
         "live_adapter_config_sha256": _sha256_file(live_path),
         "editable_roots": ["solution"],
-        "allowed_research_families": [
-            "objective",
-            "temporal_history",
-            "multitask",
-            "duration_bias",
-            "features",
-            "model",
-            "sampling",
-            "ensemble",
-            "evaluation",
-            "other",
-        ],
+        "allowed_research_families": (
+            list(research_campaign.family_order)
+            if research_campaign is not None
+            else [
+                "objective",
+                "temporal_history",
+                "multitask",
+                "duration_bias",
+                "features",
+                "model",
+                "sampling",
+                "ensemble",
+                "evaluation",
+                "other",
+            ]
+        ),
         "allowed_research_data": [
             "train_interactions",
             "public_validation",
@@ -319,17 +377,91 @@ def setup_live_deployment(
             "date",
             "duration_ms",
             "long_view",
+            "time_ms",
+            "hourmin",
+            "item_tags",
+            "upload_date",
+            "point_in_time_history_features",
+            "auxiliary_engagement_labels",
+            "is_click",
+            "play_time_ms",
+            "is_like",
+            "is_follow",
+            "is_comment",
+            "is_forward",
             "verified_predictions",
         ],
         "research_capabilities": [
             "baseline_parity",
             "objective_data_frame_verified",
+            "history_affinity_features_legal",
+            "strict_temporal_cutoff",
             "verified_best_prediction",
+            "legal_auxiliary_label",
+            "duration_features_legal",
         ],
-        "active_research_prohibitions": [],
+        "active_research_prohibitions": ["static_feature_expansion"],
+        "research_campaign": (
+            research_campaign.model_dump(mode="json")
+            if research_campaign is not None
+            else None
+        ),
         "prediction_change_no_op_threshold": 0.001,
         "max_single_score_fraction": 0.5,
-        "target_interface_excerpts": dict(PRODUCTION_TARGET_INTERFACE_EXCERPTS),
+        "target_interface_excerpts": {
+            "solution/official_fm.py": (
+                "Editable copy of the official five-field NumPy FM model. Preserve "
+                "controller-owned split, evaluation, and submission boundaries."
+            ),
+            "solution/losses.py": (
+                "Candidate-owned objective functions over training rows only."
+            ),
+            "solution/features.py": PRODUCTION_TARGET_INTERFACE_EXCERPTS[
+                "solution/features.py"
+            ],
+            "solution/model.py": PRODUCTION_TARGET_INTERFACE_EXCERPTS[
+                "solution/model.py"
+            ],
+            "solution/train.py": PRODUCTION_TARGET_INTERFACE_EXCERPTS[
+                "solution/train.py"
+            ],
+            "solution/inference.py": PRODUCTION_TARGET_INTERFACE_EXCERPTS[
+                "solution/inference.py"
+            ],
+            "solution/experiment_config.py": (
+                "Edit only scalar values in CONFIG, set family to the ExperimentSpec "
+                "family, and copy the approved variant_parameters exactly. "
+                "Supported formulation values are "
+                "official_fm, pointwise, bpr, listwise, temporal_history, and history_affinity. "
+                "history_affinity consumes only the setup-generated, hash-bound "
+                "point-in-time history feature views; it must not add raw static "
+                "CWM fields or current-row outcomes. Bounds: "
+                "embedding_dim integer 2..32; learning_rate 1e-5..0.2; epochs "
+                "1..40; negative_count integer 1..16; l2 0..0.1; residual_scale "
+                "0..0.5; max_train_rows integer 1000..1141112; "
+                "history_decay_days 1..180; history_shrinkage 0..1000; "
+                "listwise_strategy must be full_observed. The "
+                "history_affinity formulation additionally requires "
+                "history_shrinkage >=5, l2 >=1e-6, epochs <=5, and "
+                "residual_scale <=0.2 to bound overfitting. The "
+                "controller-owned stable scaffold preserves the official FM parent, "
+                "trains the requested residual, and records diagnostics. Do not edit "
+                "candidate.py or research_scaffold.py during configuration trials."
+            ),
+            "solution/research_scaffold.py": (
+                "Implementation trials may add or repair one reviewed capability. "
+                "Preserve the frozen FM parent, deterministic seeds, finite outputs, "
+                "and emit a machine-checkable training-diagnostics receipt containing "
+                "implementation_id, implementation_sha256, effective_parameters, and "
+                "training_semantics. Configuration trials must not edit this file."
+            ),
+            "solution/candidate.py": (
+                "Implementation trials may change solution.candidate:run only when "
+                "the selected unverified method card authorizes it. Preserve the "
+                "reviewed data boundary, output schema, deterministic seed behavior, "
+                "and frozen FM parent score contract."
+            ),
+        },
         "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
@@ -359,7 +491,31 @@ def setup_live_deployment(
         "data_manifest": str(manifest_path),
         "runtime": str(runtime),
         "docker_image": image,
+        "research_campaign": (
+            research_campaign.campaign_id if research_campaign is not None else None
+        ),
+        "run_mode": run_mode,
     }
+
+
+def _load_research_campaign(
+    root: Path, path: Path | None
+) -> ResearchCampaign | None:
+    if path is None:
+        return None
+    candidate = path if path.is_absolute() else root / path
+    if candidate.is_symlink() or not candidate.is_file():
+        raise DeploymentError("research campaign must be a regular repository file")
+    resolved = candidate.resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as error:
+        raise DeploymentError("research campaign must be inside repository_root") from error
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+        return ResearchCampaign.model_validate(payload)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise DeploymentError("research campaign is invalid: %s" % error) from error
 
 
 def _prepare_trae_runtime(
@@ -535,7 +691,14 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     common = views / "common"
     common.mkdir(mode=0o700)
     train_path = common / "train.csv"
-    _write_train(train_path, train)
+    _write_train(train_path, data, expected_rows=len(train))
+    feature_materialization = materialize_history_features(
+        data_directory=data,
+        official_train=train,
+        official_valid=valid,
+        official_test=test,
+        output_directory=common / "history-features",
+    )
     command_directories = {
         "candidate_smoke": views / "candidate-smoke",
         "candidate_proxy": views / "candidate-proxy",
@@ -557,11 +720,42 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     for command_id, directory in command_directories.items():
         directory.mkdir(mode=0o700)
         os.link(train_path, directory / "train.csv")
+        history_train = directory / "history_train.csv"
+        os.link(feature_materialization["files"]["train"], history_train)
         rows, indices = index_sets[command_id]
         selected: Iterable[Sequence[Any]] = rows
         if indices is not None:
             selected = (rows[index] for index in indices)
         _write_score(directory / "score.csv", selected)
+        score_feature_source = feature_materialization["files"][
+            "test" if command_id == "candidate_final_infer" else "valid"
+        ]
+        history_score = directory / "history_score.csv"
+        if indices is None:
+            os.link(score_feature_source, history_score)
+        else:
+            _write_history_feature_subset(history_score, score_feature_source, indices)
+        _write_json_exclusive(
+            directory / "history-feature-manifest.json",
+            {
+                "schema_version": feature_materialization["schema_version"],
+                "train_file": "history_train.csv",
+                "train_sha256": _sha256_file(history_train),
+                "score_file": "history_score.csv",
+                "score_sha256": _sha256_file(history_score),
+                "train_columns": feature_materialization["train_columns"],
+                "score_columns": feature_materialization["score_columns"],
+                "feature_columns": feature_materialization["feature_columns"],
+                "cutoff_time_ms": feature_materialization["cutoff_time_ms"],
+                "cutoff_date": feature_materialization["cutoff_date"],
+                "history_update_policy": feature_materialization[
+                    "history_update_policy"
+                ],
+                "static_feature_policy": feature_materialization[
+                    "static_feature_policy"
+                ],
+            },
+        )
         fm_view = directory / "fm_baseline_predictions.csv"
         _copy_exclusive(fm_prediction_sources[command_id], fm_view)
         _write_text_exclusive(
@@ -630,8 +824,14 @@ def _candidate_baseline_parity_receipt(
     """Execute the editable parent and prove exact FM bytes at every route."""
 
     source = root / "solution" / "candidate.py"
+    package_name = "_tacorank_candidate_%s" % hashlib.sha256(
+        str(root).encode("utf-8")
+    ).hexdigest()[:16]
+    package = ModuleType(package_name)
+    package.__path__ = [str(source.parent)]
+    sys.modules[package_name] = package
     specification = importlib.util.spec_from_file_location(
-        "tacorank_setup_verified_candidate", source
+        package_name + ".candidate", source
     )
     if specification is None or specification.loader is None:
         raise DeploymentError("candidate baseline entrypoint could not be loaded")
@@ -642,6 +842,9 @@ def _candidate_baseline_parity_receipt(
         specification.loader.exec_module(module)
     finally:
         sys.dont_write_bytecode = previous
+        for module_name in tuple(sys.modules):
+            if module_name == package_name or module_name.startswith(package_name + "."):
+                sys.modules.pop(module_name, None)
     implementation = getattr(module, "run", None)
     if not callable(implementation):
         raise DeploymentError("candidate baseline does not define callable run")
@@ -683,6 +886,15 @@ def _candidate_baseline_parity_receipt(
         "candidate_entrypoint": "solution.candidate:run",
         "candidate_source_path": "solution/candidate.py",
         "candidate_source_sha256": _sha256_file(source),
+        "candidate_support_sha256": {
+            relative: _sha256_file(root / relative)
+            for relative in (
+                "solution/experiment_config.py",
+                "solution/research_scaffold.py",
+                "solution/official_fm.py",
+                "solution/losses.py",
+            )
+        },
         "routes": routes,
     }
 
@@ -704,22 +916,59 @@ def _load_official_splits(root: Path, data: Path) -> Mapping[str, Any]:
     return module.load(str(data))
 
 
-def _write_train(path: Path, rows: Sequence[Sequence[Any]]) -> None:
+def _write_train(path: Path, data: Path, *, expected_rows: int) -> None:
+    """Materialize the label-bearing training view with legal auxiliaries only."""
+
+    authors: Dict[str, str] = {}
+    with (data / "video_features_basic_pure.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        for row in csv.DictReader(handle, strict=True):
+            authors[str(row["video_id"])] = str(row["author_id"])
+    source = data / "log_standard_4_08_to_4_21_pure.csv"
+    count = 0
     with _exclusive_csv(path) as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            ("date", "user_id", "video_id", "author_id", "tab", "duration_ms", "long_view")
+        fieldnames = CANDIDATE_TRAIN_COLUMNS
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        with source.open(newline="", encoding="utf-8") as source_handle:
+            for row in csv.DictReader(source_handle, strict=True):
+                date = int(row["date"])
+                if not 20220408 <= date <= 20220421:
+                    continue
+                video_id = str(row["video_id"])
+                writer.writerow(
+                    {
+                        "date": row["date"],
+                        "time_ms": row["time_ms"],
+                        "hourmin": row["hourmin"],
+                        "user_id": row["user_id"],
+                        "video_id": video_id,
+                        "author_id": authors.get(video_id, "UNK"),
+                        "tab": row["tab"],
+                        "duration_ms": row["duration_ms"],
+                        "long_view": "1" if row["long_view"] != "0" else "0",
+                        "is_click": row["is_click"],
+                        "play_time_ms": row["play_time_ms"],
+                        "is_like": row["is_like"],
+                        "is_follow": row["is_follow"],
+                        "is_comment": row["is_comment"],
+                        "is_forward": row["is_forward"],
+                        "is_hate": row["is_hate"],
+                        "is_profile_enter": row["is_profile_enter"],
+                    }
+                )
+                count += 1
+    if count != expected_rows:
+        raise DeploymentError(
+            "candidate training view does not match the official train split"
         )
-        for row in rows:
-            writer.writerow(row)
 
 
 def _write_score(path: Path, rows: Iterable[Sequence[Any]]) -> None:
     with _exclusive_csv(path) as handle:
         writer = csv.writer(handle)
-        writer.writerow(
-            ("row_id", "date", "user_id", "video_id", "author_id", "tab", "duration_ms")
-        )
+        writer.writerow(CANDIDATE_SCORE_COLUMNS)
         for row_id, row in enumerate(rows):
             writer.writerow((row_id, *row[:6]))
 
@@ -764,6 +1013,25 @@ def _write_prediction_subset(
         for row_id, source_index in enumerate(indices):
             user_id, video_id, score = rows[source_index]
             writer.writerow((row_id, user_id, video_id, score))
+
+
+def _write_history_feature_subset(
+    path: Path, source: Path, indices: Sequence[int]
+) -> None:
+    with source.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, strict=True)
+        if tuple(reader.fieldnames or ()) != SCORE_FEATURE_COLUMNS:
+            raise DeploymentError("history score features have an invalid header")
+        rows = list(reader)
+    with _exclusive_csv(path) as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(SCORE_FEATURE_COLUMNS))
+        writer.writeheader()
+        for row_id, source_index in enumerate(indices):
+            if source_index < 0 or source_index >= len(rows):
+                raise DeploymentError("history feature subset index is invalid")
+            row = dict(rows[source_index])
+            row["row_id"] = str(row_id)
+            writer.writerow(row)
 
 
 def _trae_yaml() -> str:

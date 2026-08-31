@@ -178,6 +178,7 @@ def test_coding_prompt_is_exact_bounded_and_credential_free() -> None:
     assert "max_provider_tokens: `50`" in prompt
     assert '"authoritative_target_files": [\n    "solution/model.py"\n  ]' in prompt
     assert "do not list the repository root" in prompt
+    assert "Reuse prior view results" in prompt
     assert "controller-owned post-patch checks" in prompt
     assert "unconstrained real-valued ranking scores" in prompt
     assert "parent_commit_sha as the executable research parent" in prompt
@@ -234,6 +235,7 @@ def test_repair_prompt_preserves_original_hypothesis_and_exact_failure() -> None
         previous_repair_fingerprints=(),
         recovery_instructions="Import the missing symbol.",
         remaining_repair_budget=1,
+        target_interface_excerpts={"entrypoint": "predict(rows)"},
         editable_roots=("solution",),
         protected_paths=("contract",),
     )
@@ -251,6 +253,12 @@ def test_repair_prompt_preserves_original_hypothesis_and_exact_failure() -> None
     assert "proposed fix, not a proven diagnosis" in prompt
     assert "confirm that the proposed fix explains the supplied evidence" in prompt
     assert '"max_provider_tokens": 40' in prompt
+    assert "Reuse prior view results" in prompt
+    assert "Do not list the repository root" in prompt
+    assert "The next editing-capable tool call must apply" in prompt
+    assert "controller-owned post-patch checks" in prompt
+    assert '"entrypoint": "predict(rows)"' in prompt
+    assert "do not claim that this edit-only tool session ran" in prompt
 
     with pytest.raises(PromptContractError, match="not a trae_repair"):
         build_repair_prompt(
@@ -261,6 +269,47 @@ def test_repair_prompt_preserves_original_hypothesis_and_exact_failure() -> None
             wall_time_limit_seconds=8,
             allowed_command_ids=("candidate_smoke",),
         )
+
+
+def test_no_op_repair_prompt_targets_silent_fallbacks_and_numeric_text() -> None:
+    _, spec = _coding_inputs()
+    context = SimpleNamespace(
+        context_id="repair-no-op",
+        run_id="run1",
+        experiment_id="exp1",
+        repair_attempt=1,
+        original_experiment_spec=spec,
+        current_patch_commit_sha="c" * 40,
+        accepted_patch_receipt_id="receipt-1",
+        failure_class="no_op",
+        error_fingerprint="fingerprint",
+        error_summary="NO_PREDICTION_CHANGE",
+        relevant_trace_tail="changed_row_fraction=0.0",
+        failed_checks=(),
+        previous_repair_fingerprints=(),
+        recovery_instructions="Repair the no-op without changing the hypothesis.",
+        remaining_repair_budget=1,
+        target_interface_excerpts={
+            "solution/model.py": "duration_ms is a numeric CSV field"
+        },
+        editable_roots=("solution",),
+        protected_paths=("contract",),
+    )
+
+    prompt = build_repair_prompt(
+        context,
+        {"action": "trae_repair", "instructions": "repair no-op"},
+        step_limit=20,
+        token_limit=None,
+        wall_time_limit_seconds=1200,
+        allowed_command_ids=("candidate_smoke",),
+    )
+
+    assert "empty-model return" in prompt
+    assert "parent-score fallback" in prompt
+    assert "integral decimal notation such as `209900.0`" in prompt
+    assert "zero parsed rows" in prompt
+    assert "Do not silently convert a schema or parsing error" in prompt
 
 
 def test_repair_prompt_records_an_unbounded_cumulative_token_limit() -> None:
@@ -281,6 +330,7 @@ def test_repair_prompt_records_an_unbounded_cumulative_token_limit() -> None:
         previous_repair_fingerprints=(),
         recovery_instructions="Import the missing symbol.",
         remaining_repair_budget=1,
+        target_interface_excerpts={"entrypoint": "predict(rows)"},
         editable_roots=("solution",),
         protected_paths=("contract",),
     )
@@ -360,6 +410,7 @@ def test_gate_a_repair_has_explicitly_absent_receipt() -> None:
         previous_repair_fingerprints=(),
         recovery_instructions="Remove only the protected-path change.",
         remaining_repair_budget=1,
+        target_interface_excerpts={"entrypoint": "predict(rows)"},
         editable_roots=("solution",),
         protected_paths=("contract",),
     )
@@ -393,6 +444,7 @@ def test_post_acceptance_repair_requires_receipt() -> None:
         previous_repair_fingerprints=(),
         recovery_instructions="Fix the candidate exception.",
         remaining_repair_budget=1,
+        target_interface_excerpts={"entrypoint": "predict(rows)"},
         editable_roots=("solution",),
         protected_paths=("contract",),
     )

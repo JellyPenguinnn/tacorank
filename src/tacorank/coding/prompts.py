@@ -80,6 +80,7 @@ class RecoveryContextLike(Protocol):
     previous_repair_fingerprints: Sequence[str]
     recovery_instructions: str
     remaining_repair_budget: int
+    target_interface_excerpts: Any
     editable_roots: Sequence[str]
     protected_paths: Sequence[str]
 
@@ -115,6 +116,17 @@ def build_coding_prompt(
     token_limit = _optional_positive_int(context, "token_limit")
     wall_limit = _positive_int(context, "wall_time_limit_seconds")
     target_files = _validated_paths(spec_document.get("target_files"), "target_files")
+    trial_type = str(spec_document.get("trial_type", "implementation"))
+    if trial_type not in {"implementation", "configuration"}:
+        raise PromptContractError("spec trial_type is invalid")
+    trial_instruction = (
+        "This is a verified configuration trial. Change only the declared active "
+        "parameter values; the hash-bound implementation must remain unchanged."
+        if trial_type == "configuration"
+        else "This is an implementation trial. Implement or repair the selected "
+        "capability in the authorized implementation targets and preserve its "
+        "machine-checkable execution receipt."
+    )
     coding_invariants = _json_value(getattr(context, "coding_invariants", ()))
     prior_result_summaries = _json_value(
         getattr(context, "prior_result_summaries", ())
@@ -170,8 +182,11 @@ def build_coding_prompt(
         "",
         "## Tool-use discipline",
         _json_block({"authoritative_target_files": target_files}),
+        trial_instruction,
         "Begin by viewing the authoritative target files directly; do not list the repository root or survey unrelated directories.",
+        "Reuse prior view results instead of rereading the same path and range.",
         "Modify only authoritative_target_files. Do not add ad-hoc smoke, test, helper, or alternate entrypoint files unless each path is explicitly present in authoritative_target_files.",
+        "When solution/experiment_config.py is the sole target, set CONFIG family to the ExperimentSpec family, copy every approved variant_parameters value to its matching CONFIG key, preserve unspecified keys, and do not inspect or rewrite candidate.py or research_scaffold.py.",
         "The interface excerpts and method cards below are the supplied integration context. Inspect one non-target file only when a concrete missing symbol or schema blocks the edit.",
         "The production entrypoint is loaded as solution.candidate:run. Keep it wired to every approved helper used by the experiment; sibling imports are allowed only when both files are authoritative_target_files.",
         "Treat parent_commit_sha as the executable research parent, not merely as Git ancestry. The checked-out target source already contains that parent's behavior. Preserve it cumulatively and add the approved child mechanism unless the ExperimentSpec explicitly authorizes replacement or ablation.",
@@ -284,6 +299,10 @@ def build_repair_prompt(
         _required_attribute(context, "protected_paths"), "protected_paths"
     )
     target_files = _validated_paths(spec_document.get("target_files"), "target_files")
+    target_interfaces = _json_value(
+        _required_attribute(context, "target_interface_excerpts")
+    )
+    failure_class = _required_text(context, "failure_class")
     decision_document = _json_document(decision, "recovery_decision")
     if decision_document.get("action") != "trae_repair":
         raise PromptContractError("recovery decision is not a trae_repair action")
@@ -324,6 +343,20 @@ def build_repair_prompt(
         "Only edit paths under editable_roots. Protected paths always win.",
         "Modify only authoritative_target_files; do not add ad-hoc smoke, test, helper, or alternate entrypoint files.",
         "",
+        "## Repair execution protocol",
+        _json_block({"authoritative_target_files": target_files}),
+        "View the authoritative target files directly. Do not list the repository root, survey directories, or inspect controller, evaluator, test, contract, or orchestration internals.",
+        "Reuse prior view results instead of rereading the same path and range. Inspect a non-target dependency only when the supplied interface and exact failure evidence leave a concrete symbol or schema question unanswered.",
+        "Before the first edit, emit concise `DIAGNOSIS:`, `REPAIR_PLAN:`, and `VERIFICATION:` lines. The next editing-capable tool call must apply the smallest repair to an authoritative target file.",
+        "The symbolic allowed_command_ids are controller-owned post-patch checks, not shell tools available in this coding action. Do not search for or invoke them.",
+        "After editing, review the changed target once if needed and call task_done. TacoRank runs Gate A and the permitted checks after this coding action.",
+        "",
+        "## Required target interfaces",
+        _json_block(target_interfaces),
+        "",
+        "## Failure-specific debug protocol",
+        *_repair_debug_protocol(failure_class),
+        "",
         "## Original ExperimentSpec (must remain unchanged)",
         _json_block(spec_document),
         "",
@@ -333,7 +366,7 @@ def build_repair_prompt(
         "## Failure evidence",
         _json_block(
             {
-                "failure_class": _required_text(context, "failure_class"),
+                "failure_class": failure_class,
                 "error_fingerprint": _required_text(context, "error_fingerprint"),
                 "error_summary": _required_text(context, "error_summary"),
                 "relevant_trace_tail": _required_text(context, "relevant_trace_tail"),
@@ -349,7 +382,7 @@ def build_repair_prompt(
         "The error summary and trace are authoritative observations. The recovery instructions are a bounded proposed fix, not a proven diagnosis. Before editing, confirm that the proposed fix explains the supplied evidence; if it does not, state the narrower evidence-backed diagnosis and make only the smallest repair that satisfies the same success check.",
         "",
         "## Completion contract",
-        "Make only the smallest repair justified by this evidence. After the edit and one bounded recheck, call task_done immediately. Finish with a non-empty repair patch plus a concise account of files changed and checks actually run.",
+        "Make only the smallest repair justified by this evidence. After the edit and one bounded recheck, call task_done immediately. Finish with a non-empty repair patch and report files changed plus checks delegated to TacoRank; do not claim that this edit-only tool session ran controller-owned checks.",
     ]
     return _finalize("\n".join(sections), safe_redactor)
 
@@ -419,6 +452,32 @@ def build_solution_revision_prompt(
         "Make the smallest coherent correction for every required change. Once the edit and one bounded recheck are complete, call task_done immediately and report only what changed.",
     ]
     return _finalize("\n".join(sections), safe_redactor)
+
+
+def _repair_debug_protocol(failure_class: str) -> Tuple[str, ...]:
+    if failure_class == "no_op":
+        return (
+            "Trace only the candidate path from input parsing through learned state, lookup keys, residual calculation, and final score writing.",
+            "Inspect every `except`, `continue`, empty-model return, missing-key default, and parent-score fallback that could leave every prediction unchanged.",
+            "CSV values arrive as text. Numeric fields may use integral decimal notation such as `209900.0`; validate them numerically instead of assuming integer string syntax.",
+            "Fail explicitly when representative training input produces zero parsed rows or empty learned state. Do not silently convert a schema or parsing error into an all-parent prediction output.",
+        )
+    if failure_class in {"code_error", "numerical_error"}:
+        return (
+            "Follow the supplied error summary and trace tail to the smallest implicated expression in the authoritative target file.",
+            "Fix that expression without redesigning the experiment, and keep invalid or non-finite inputs fail-closed.",
+        )
+    if failure_class in {"output_contract", "interface_error"}:
+        return (
+            "Compare the candidate output path directly with the supplied target interface and repair only the violated row, column, ordering, or finite-score invariant.",
+        )
+    if failure_class == "contract_error":
+        return (
+            "Remove only the contract-violating target change identified by the failed checks; do not edit or inspect protected implementations to work around the gate.",
+        )
+    return (
+        "Use the supplied error summary, trace tail, and failed checks to identify the smallest implicated expression in the authoritative target file.",
+    )
 
 
 def prompt_sha256(prompt: str) -> str:

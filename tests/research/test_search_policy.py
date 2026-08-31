@@ -18,6 +18,132 @@ def test_policy_starts_score_guided_depth_first_from_baseline(planner_context):
     assert choice.method_card_id == "objective_pairwise_bpr"
 
 
+def test_campaign_exhausts_first_family_before_second(planner_context):
+    planner_context.contract_summary.allowed_families = [
+        "objective",
+        "temporal_history",
+    ]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="depth_test",
+        family_order=["objective", "temporal_history"],
+        family_budgets={"objective": 2, "temporal_history": 2},
+        family_method_card_ids={
+            "objective": ["objective_pairwise_bpr"],
+            "temporal_history": ["temporal_history_compact"],
+        },
+        family_directives={
+            "objective": "Adapt objective experiments from prior evidence.",
+            "temporal_history": "Adapt history experiments from prior evidence.",
+        },
+    )
+
+    first = SearchPolicy().choose(planner_context)
+    assert first.phase == "campaign_depth"
+    assert first.variant_id == "objective_01"
+
+    attempted = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        decision="reject",
+        parent_eligible=False,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    attempted.status = "rejected"
+    attempted.campaign_id = "depth_test"
+    attempted.variant_id = "objective_01"
+    planner_context.family_history = [attempted]
+
+    second = SearchPolicy().choose(planner_context)
+    assert second.variant_id == "objective_02"
+    assert second.family == "objective"
+    assert second.parent.experiment_id == "exp_0000"
+    assert second.implementation_parent.experiment_id == "exp_0001"
+
+    attempted_two = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        decision="reject",
+        parent_eligible=False,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    attempted_two.status = "rejected"
+    attempted_two.campaign_id = "depth_test"
+    attempted_two.variant_id = "objective_02"
+    planner_context.family_history.append(attempted_two)
+
+    third = SearchPolicy().choose(planner_context)
+    assert third.variant_id == "temporal_history_01"
+    assert third.family == "temporal_history"
+
+
+def test_campaign_exposes_all_currently_eligible_methods_to_agent(planner_context):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="adaptive_depth",
+        family_order=["objective"],
+        family_budgets={"objective": 25},
+        family_method_card_ids={
+            "objective": [
+                "objective_pairwise_bpr",
+                "objective_listwise_user_softmax",
+            ]
+        },
+        family_directives={"objective": "Adapt from prior evidence."},
+    )
+    prior = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    prior.campaign_id = "adaptive_depth"
+    prior.variant_id = "objective_01"
+    planner_context.family_history = [prior]
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.variant_id == "objective_02"
+    assert choice.method_card_id is None
+    assert choice.allowed_method_card_ids == (
+        "objective_pairwise_bpr",
+        "objective_listwise_user_softmax",
+    )
+
+
+def test_campaign_continues_after_quarantining_suspicious_slot(planner_context):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="depth_test",
+        family_order=["objective"],
+        family_budgets={"objective": 2},
+        family_method_card_ids={"objective": ["objective_pairwise_bpr"]},
+        family_directives={"objective": "Adapt from evidence."},
+    )
+    suspicious = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        decision="invalid",
+        parent_eligible=False,
+        trust_verdict="suspicious",
+        integrity="compromised",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    suspicious.status = "invalid"
+    suspicious.campaign_id = "depth_test"
+    suspicious.variant_id = "objective_01"
+    planner_context.family_history = [suspicious]
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "propose"
+    assert choice.variant_id == "objective_02"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.implementation_parent.experiment_id == "exp_0000"
+
+
 def test_parallel_direction_is_indexed_and_legal(planner_context):
     choice = SearchPolicy().choose_parallel_direction(planner_context, 0, 2)
 
@@ -129,6 +255,234 @@ def test_synthesis_uses_strongest_confirmed_member_and_all_others(
     assert choice.component_experiment_ids == ("exp_0002",)
 
 
+def test_campaign_refines_retained_implementation_from_trusted_score_parent(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="depth_test",
+        family_order=["objective"],
+        family_budgets={"objective": 2},
+        family_method_card_ids={"objective": ["objective_pairwise_bpr"]},
+        family_directives={"objective": "Adapt from evidence."},
+    )
+    retained = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        commit_sha="b" * 40,
+        family="objective",
+        decision="retain",
+        parent_eligible=False,
+        trust_verdict="inconclusive",
+        integrity="clean",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    retained.status = "retained"
+    retained.campaign_id = "depth_test"
+    retained.variant_id = "objective_01"
+    planner_context.family_history = [retained]
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "propose"
+    assert choice.variant_id == "objective_02"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.implementation_parent.experiment_id == "exp_0001"
+    assert choice.implementation_parent.parent_commit_sha == "b" * 40
+
+
+def test_campaign_enumerates_all_fifty_slots_before_exhaustion(planner_context):
+    planner_context.contract_summary.allowed_families = [
+        "objective",
+        "temporal_history",
+    ]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="objective_temporal_50",
+        family_order=["objective", "temporal_history"],
+        family_budgets={"objective": 25, "temporal_history": 25},
+        family_method_card_ids={
+            "objective": ["objective_pairwise_bpr"],
+            "temporal_history": ["temporal_history_compact"],
+        },
+        family_directives={
+            "objective": "Adapt objective parameters.",
+            "temporal_history": "Adapt temporal parameters.",
+        },
+        minimum_family_full_evaluations=25,
+        family_convergence_patience=25,
+    )
+    history = []
+    for slot in range(1, 51):
+        planner_context.family_history = history
+        choice = SearchPolicy().choose(planner_context)
+        expected_family = "objective" if slot <= 25 else "temporal_history"
+        expected_sequence = slot if slot <= 25 else slot - 25
+        assert choice.action == "propose"
+        assert choice.family == expected_family
+        assert choice.variant_id == "%s_%02d" % (
+            expected_family,
+            expected_sequence,
+        )
+        summary = make_summary(
+            "exp_%03d" % slot,
+            parent_experiment_id="exp_0000",
+            commit_sha=("%040x" % slot),
+            family=expected_family,
+            decision="reject",
+            parent_eligible=False,
+            method_card_ids=[choice.method_card_id],
+        )
+        summary.status = "rejected"
+        summary.campaign_id = "objective_temporal_50"
+        summary.variant_id = choice.variant_id
+        history.append(summary)
+
+    planner_context.family_history = history
+    exhausted = SearchPolicy().choose(planner_context)
+    assert exhausted.action == "blocked"
+    assert exhausted.reason_code == "CAMPAIGN_EXHAUSTED"
+
+
+def test_adaptive_campaign_starts_with_objective_screening(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = [
+        "features",
+        "objective",
+        "temporal_history",
+    ]
+    planner_context.contract_summary.allowed_data.extend(
+        [
+            "time_ms",
+            "hourmin",
+            "item_tags",
+            "upload_date",
+            "point_in_time_history_features",
+        ]
+    )
+    planner_context.contract_summary.research_capabilities.extend(
+        ["strict_temporal_cutoff", "history_affinity_features_legal"]
+    )
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="objective_temporal_features_50_v3",
+        family_order=["objective", "temporal_history", "features"],
+        family_budgets={"objective": 27, "temporal_history": 15, "features": 8},
+        family_method_card_ids={
+            "features": ["features_history_affinity"],
+            "objective": [
+                "objective_pairwise_bpr",
+                "objective_listwise_user_softmax",
+            ],
+            "temporal_history": ["temporal_history_compact"],
+        },
+        family_directives={
+            "features": "Adapt point-in-time history affinity.",
+            "objective": "Adapt objective parameters.",
+            "temporal_history": "Adapt temporal parameters.",
+        },
+        minimum_family_full_evaluations=5,
+        family_convergence_patience=5,
+    )
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "propose"
+    assert choice.family == "objective"
+    assert choice.allowed_method_card_ids == ("objective_pairwise_bpr",)
+    assert choice.variant_id == "objective_01"
+
+
+def test_deep_campaign_does_not_advance_after_five_non_improving_full_trials(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = [
+        "objective",
+        "temporal_history",
+    ]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="objective_temporal_50_v4",
+        family_order=["objective", "temporal_history"],
+        family_budgets={"objective": 25, "temporal_history": 25},
+        family_method_card_ids={
+            "objective": ["objective_pairwise_bpr"],
+            "temporal_history": ["temporal_history_compact"],
+        },
+        family_directives={
+            "objective": "Adapt objective parameters.",
+            "temporal_history": "Adapt temporal parameters.",
+        },
+        minimum_family_full_evaluations=25,
+        family_convergence_patience=25,
+    )
+    history = []
+    for slot in range(1, 6):
+        summary = make_summary(
+            "exp_%03d" % slot,
+            family="objective",
+            decision="reject",
+            parent_eligible=False,
+            best_eligible=False,
+            method_card_ids=["objective_pairwise_bpr"],
+        )
+        summary.status = "rejected"
+        summary.campaign_id = "objective_temporal_50_v4"
+        summary.variant_id = "objective_%02d" % slot
+        history.append(summary)
+    planner_context.family_history = history
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "propose"
+    assert choice.family == "objective"
+    assert choice.variant_id == "objective_06"
+
+
+def test_adaptive_campaign_improvement_resets_family_patience(planner_context):
+    planner_context.contract_summary.allowed_families = [
+        "objective",
+        "temporal_history",
+        "features",
+    ]
+    planner_context.research_campaign = SimpleNamespace(
+        campaign_id="objective_temporal_features_50_v3",
+        family_order=["objective", "temporal_history", "features"],
+        family_budgets={"objective": 27, "temporal_history": 15, "features": 8},
+        family_method_card_ids={
+            "objective": ["objective_pairwise_bpr"],
+            "temporal_history": ["temporal_history_compact"],
+            "features": ["features_history_affinity"],
+        },
+        family_directives={
+            "objective": "Adapt objective parameters.",
+            "temporal_history": "Adapt temporal parameters.",
+            "features": "Adapt point-in-time history affinity.",
+        },
+        minimum_family_full_evaluations=5,
+        family_convergence_patience=5,
+    )
+    history = []
+    for slot in range(1, 7):
+        summary = make_summary(
+            "exp_%03d" % slot,
+            family="objective",
+            decision="accept" if slot == 2 else "reject",
+            parent_eligible=slot == 2,
+            best_eligible=slot == 2,
+            method_card_ids=["objective_pairwise_bpr"],
+        )
+        summary.status = "accepted" if slot == 2 else "rejected"
+        summary.campaign_id = "objective_temporal_features_50_v3"
+        summary.variant_id = "objective_%02d" % slot
+        history.append(summary)
+    planner_context.family_history = history
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "propose"
+    assert choice.family == "objective"
+    assert choice.variant_id == "objective_07"
+
+
 def test_clean_evaluator_baseline_does_not_imply_executable_parent_parity(
     planner_context,
 ):
@@ -157,6 +511,31 @@ def context_with_latest(planner_context, latest, *, allowed_families=None):
         method_cards=planner_context.method_cards,
         playbook=planner_context.playbook,
     )
+
+
+def test_legacy_invalid_noop_branches_instead_of_requiring_promotion(
+    planner_context,
+):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        decision=None,
+        parent_eligible=False,
+        trust_verdict="no_op",
+        fidelity="proxy",
+        population="internal_proxy",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    latest.status = "invalid"
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
+    assert choice.family != "objective"
+    assert choice.phase != "no_op_reimplementation"
 
 
 def test_policy_returns_to_trusted_frontier_with_family_diversity(planner_context):
@@ -386,10 +765,6 @@ def test_playbook_cannot_reintroduce_contract_disallowed_family(planner_context)
     ("overrides", "reason_code"),
     [
         ({"output_accepted": False}, "OUTPUT_CHECK_REJECTED"),
-        (
-            {"trust_verdict": "suspicious", "integrity": "compromised"},
-            "SUSPICIOUS_RESULT_REQUIRES_QUARANTINE",
-        ),
         ({"output_accepted": None}, "RESULT_NOT_BRANCHABLE"),
         ({"integrity": None}, "RESULT_NOT_BRANCHABLE"),
         ({"stability": None}, "RESULT_NOT_BRANCHABLE"),
@@ -421,152 +796,25 @@ def test_playbook_blocks_unbranchable_results(
     assert choice.reason_code == reason_code
 
 
-def test_playbook_quarantines_suspicious_result_and_continues_independently(
-    planner_context,
-):
+def test_suspicious_candidate_is_quarantined_without_blocking_search(planner_context):
     latest = make_summary(
         "exp_0001",
         parent_experiment_id="exp_0000",
         family="objective",
+        decision="invalid",
         parent_eligible=False,
         trust_verdict="suspicious",
-        integrity="inconclusive",
+        integrity="compromised",
         method_card_ids=["objective_pairwise_bpr"],
     )
+    latest.status = "invalid"
 
     choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
 
     assert choice.action == "propose"
-    assert choice.reason_code == "SUSPICIOUS_RESULT_QUARANTINED"
+    assert choice.reason_code == "SUSPICIOUS_CANDIDATE_QUARANTINED"
     assert choice.parent.experiment_id == "exp_0000"
-    assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
 
-
-def test_playbook_continues_after_no_op_with_independent_choice(planner_context):
-    latest = make_summary(
-        "exp_0001",
-        parent_experiment_id="exp_0000",
-        family="objective",
-        parent_eligible=False,
-        trust_verdict="no_op",
-        stability="not_applicable",
-        prediction_change=0.0,
-        method_card_ids=["objective_pairwise_bpr"],
-        status="no_op",
-    )
-
-    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
-
-    assert choice.action == "propose"
-    assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
-    assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
-
-
-def test_playbook_stops_after_quarantine_only_when_no_independent_method_remains(
-    planner_context,
-):
-    latest = make_summary(
-        "exp_0001",
-        parent_experiment_id="exp_0000",
-        family="objective",
-        parent_eligible=False,
-        trust_verdict="suspicious",
-        integrity="inconclusive",
-        method_card_ids=["objective_pairwise_bpr"],
-    )
-    context = context_with_latest(
-        planner_context,
-        latest,
-        allowed_families=["objective"],
-    )
-
-    choice = SearchPolicy().choose(context)
-
-    assert choice.action == "blocked"
-    assert choice.reason_code == "NO_ELIGIBLE_METHOD"
-
-
-def test_no_op_tree_ranker_can_choose_one_same_mechanism_reimplementation(
-    planner_context,
-):
-    latest = make_summary(
-        "exp_0001",
-        parent_experiment_id="exp_0000",
-        family="objective",
-        parent_eligible=False,
-        trust_verdict="no_op",
-        stability="not_applicable",
-        prediction_change=0.0,
-        method_card_ids=["objective_pairwise_bpr"],
-        status="no_op",
-    )
-    seen = []
-
-    def choose_reimplementation(choices, context):
-        seen.extend(choices)
-        return next(
-            choice
-            for choice in choices
-            if choice.reason_code == "NO_OP_REIMPLEMENT_MECHANISM"
-        )
-
-    choice = SearchPolicy(
-        legal_choice_ranker=choose_reimplementation
-    ).choose(context_with_latest(planner_context, latest))
-
-    assert {
-        candidate.reason_code for candidate in seen
-    } >= {
-        "NO_OP_REIMPLEMENT_MECHANISM",
-        "NO_OP_INDEPENDENT_MECHANISM",
-    }
-    assert choice.phase == "no_op_reimplementation"
-    assert choice.parent.experiment_id == "exp_0000"
-    assert choice.family == "objective"
-    assert choice.method_card_id == "objective_pairwise_bpr"
-
-
-def test_second_same_mechanism_no_op_retires_reimplementation(planner_context):
-    first = make_summary(
-        "exp_0001",
-        parent_experiment_id="exp_0000",
-        family="objective",
-        parent_eligible=False,
-        trust_verdict="no_op",
-        stability="not_applicable",
-        prediction_change=0.0,
-        method_card_ids=["objective_pairwise_bpr"],
-        status="no_op",
-    )
-    latest = make_summary(
-        "exp_0002",
-        parent_experiment_id="exp_0000",
-        family="objective",
-        parent_eligible=False,
-        trust_verdict="no_op",
-        stability="not_applicable",
-        prediction_change=0.0,
-        method_card_ids=["objective_pairwise_bpr"],
-        status="no_op",
-    )
-    context = context_with_latest(planner_context, latest)
-    context.family_history = [first, latest]
-    seen = []
-
-    def capture(choices, context):
-        seen.extend(choices)
-        return choices[0]
-
-    choice = SearchPolicy(legal_choice_ranker=capture).choose(context)
-
-    assert choice.action == "propose"
-    assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
-    assert not any(
-        candidate.reason_code == "NO_OP_REIMPLEMENT_MECHANISM"
-        for candidate in seen
-    )
 
 def test_playbook_branches_after_terminal_proxy_prune(planner_context):
     latest = make_summary(

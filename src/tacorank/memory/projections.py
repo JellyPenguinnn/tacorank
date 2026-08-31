@@ -18,6 +18,7 @@ from ..schemas import (
     EventType,
     ExperimentDecisionKind,
     Fidelity,
+    Integrity,
     LessonStatus,
     RecoveryAction,
     RunOutcome,
@@ -51,6 +52,7 @@ def project(events: Iterable[Event]) -> RunState:
             state.phase = "contract_verification"
             state.started_at = event.timestamp
             state.max_experiments = payload.max_experiments
+            state.run_mode = payload.run_mode
             state.parallel_directions = payload.parallel_directions
             state.synthesize_parallel_improvements = (
                 payload.synthesize_parallel_improvements
@@ -238,6 +240,7 @@ def project(events: Iterable[Event]) -> RunState:
                 ExperimentDecisionKind.ACCEPT: ExperimentStatus.ACCEPTED,
                 ExperimentDecisionKind.REJECT: ExperimentStatus.REJECTED,
                 ExperimentDecisionKind.PRUNE: ExperimentStatus.PRUNED,
+                ExperimentDecisionKind.RETAIN: ExperimentStatus.RETAINED,
                 ExperimentDecisionKind.INVALID: ExperimentStatus.INVALID,
                 ExperimentDecisionKind.PROMOTE: ExperimentStatus.READY_TO_RUN,
             }
@@ -258,10 +261,21 @@ def project(events: Iterable[Event]) -> RunState:
                     decision.fidelity_completed == Fidelity.FULL
                     and node.metric_set is not None
                     and node.trust is not None
-                    and node.trust.verdict == TrustVerdict.ACCEPTED
+                    and node.trust.integrity == Integrity.CLEAN
+                    and node.trust.verdict
+                    in {
+                        TrustVerdict.ACCEPTED,
+                        TrustVerdict.NEGATIVE,
+                        TrustVerdict.INCONCLUSIVE,
+                        TrustVerdict.REDUNDANT,
+                    }
                 ):
-                    score = node.metric_set.primary_score
-                    if (
+                    score = (
+                        node.trust.seed_mean
+                        if node.trust.seed_mean is not None
+                        else node.metric_set.primary_score
+                    )
+                    if decision.best_eligible and (
                         convergence_incumbent is None
                         or score > convergence_incumbent + state.convergence_epsilon
                     ):

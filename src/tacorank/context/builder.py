@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Type, TypeVa
 
 from ..artifacts import ArtifactStore
 from ..config import RunConfig, VerifiedContract
+from ..git.refs import GitOperationError, read_blob_at_commit
 from ..memory.projections import project
 from ..memory.retrieval import (
     active_lessons,
@@ -20,6 +21,11 @@ from ..recovery.fingerprints import fingerprint_result
 from ..research.code_blind import redact_implementation_references
 from ..research.eda import PlannerEdaToolbox
 from ..research.playbook import load_improvement_playbook
+from ..research.plans import RESEARCH_PLANS, plan_progress
+from ..research.variant_configuration import (
+    METHOD_ACTIVE_PARAMETERS,
+    METHOD_IMPLEMENTATION_IDS,
+)
 from ..research.portfolio import MethodCard, load_method_cards
 from ..research.search_eligibility import classify_search_eligibility
 from ..run_layout import run_relative_directory
@@ -34,6 +40,7 @@ from ..schemas import (
     ExperimentDecisionKind,
     ExperimentSpec,
     Fidelity,
+    TrialType,
     PlannerBudgetSummary,
     PlannerContext,
     PlannerContractSummary,
@@ -43,6 +50,7 @@ from ..schemas import (
     PlannerLessonSummary,
     PlannerMethodCardSummary,
     PlannerPlaybookSummary,
+    PlannerResearchPlanSummary,
     RecoveryContext,
     ResearchProposal,
 )
@@ -62,7 +70,13 @@ def _prediction_change_spearman(value: object) -> Optional[float]:
 
 
 def _planner_diagnostic_metrics(result: object) -> Dict[str, float]:
-    values = dict(getattr(result, "diagnostic_metrics", {}) or {})
+    values = {
+        name: value
+        for name, value in dict(
+            getattr(result, "diagnostic_metrics", {}) or {}
+        ).items()
+        if not _mentions_protected_validation_arm(name)
+    }
     diagnostics = getattr(result, "diagnostics", None)
     if diagnostics is None:
         return {name: float(value) for name, value in values.items()}
@@ -71,13 +85,10 @@ def _planner_diagnostic_metrics(result: object) -> Dict[str, float]:
             "train_validation_gap": diagnostics.train_validation_gap,
             "proxy_parent_delta": diagnostics.proxy_parent_delta,
             "proxy_full_delta_gap": diagnostics.proxy_full_delta_gap,
-            "validation_arm_gap": diagnostics.validation_arm_gap,
             "temporal_delta_slope": diagnostics.temporal_delta_slope,
             "gain_concentration_top10pct": diagnostics.gain_concentration_top10pct,
         }
     )
-    for arm, value in diagnostics.validation_arm_deltas.items():
-        values["%s_parent_delta" % arm] = value
     for label, name in (
         ("best_slice_delta", diagnostics.best_slice),
         ("worst_slice_delta", diagnostics.worst_slice),
@@ -87,6 +98,43 @@ def _planner_diagnostic_metrics(result: object) -> Dict[str, float]:
     return {
         name: float(value) for name, value in values.items() if value is not None
     }
+
+
+def _planner_primary_score(evaluation: object, metric_set: object) -> float:
+    trust = getattr(evaluation, "trust", None)
+    seed_mean = getattr(trust, "seed_mean", None)
+    return float(
+        seed_mean if seed_mean is not None else metric_set.primary_score
+    )
+
+
+def _execution_conformant(evaluation: object) -> bool:
+    metrics = dict(getattr(evaluation, "diagnostic_metrics", {}) or {})
+    value = metrics.get(
+        "training_implementation_conformant",
+        metrics.get("implementation_conformant"),
+    )
+    return value == 1.0
+
+
+def _planner_failure_hypotheses(result: object) -> List[str]:
+    diagnostics = getattr(result, "diagnostics", None)
+    if diagnostics is None:
+        return []
+    return _planner_safe_texts(diagnostics.failure_hypotheses)
+
+
+def _mentions_protected_validation_arm(value: object) -> bool:
+    normalized = str(value).lower().replace("-", "_").replace(" ", "_")
+    return "val_b" in normalized or "validation_arm" in normalized
+
+
+def _planner_safe_texts(values: object) -> List[str]:
+    return [
+        str(item)
+        for item in values or []
+        if not _mentions_protected_validation_arm(item)
+    ]
 
 
 def _planner_parent_metric_deltas(
@@ -126,6 +174,22 @@ def _planner_primary_score(
 
 def _path_is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def _sha256_file_at_commit(
+    repository_root, commit_sha: str, relative_path: str
+) -> str:
+    try:
+        encoded = read_blob_at_commit(
+            repository_root,
+            commit_sha,
+            relative_path,
+        )
+    except GitOperationError as exc:
+        raise ContextBuildError(
+            "cannot bind implementation from immutable parent commit: %s" % exc
+        ) from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _code_blind(value: object) -> object:
@@ -383,30 +447,29 @@ class ContextBuilder:
             proposal = ResearchProposal.model_validate(
                 proposal.model_dump(
                     mode="python",
-                    exclude={"target_stage", "target_files", "fidelity_plan"},
+                    exclude={
+                        "target_stage",
+                        "target_files",
+                        "fidelity_plan",
+                        "trial_type",
+                        "implementation_id",
+                        "implementation_sha256",
+                        "active_parameter_names",
+                    },
                 )
             )
 
+        root = self.config.repository_root.resolve(strict=True)
         interfaces = self._target_interface_excerpts()
-        configured_targets = set(interfaces)
         protected = self._protected_paths()
         editable = [root.rstrip("/") for root in self.config.editable_roots]
-        for target in interfaces:
-            if not any(_path_is_within(target, root) for root in editable):
-                raise ContextBuildError(
-                    "implementation target is outside editable roots: %s" % target
-                )
-            if any(_path_is_within(target, root) for root in protected):
-                raise ContextBuildError(
-                    "implementation target is protected: %s" % target
-                )
-
         cards = {
             card.method_id: card
             for card in load_method_cards(
                 self.config.repository_root / "research/methods"
             ).cards
         }
+        selected_cards = []
         for method_id in proposal.method_card_ids:
             card = cards.get(method_id)
             if card is None:
@@ -414,32 +477,68 @@ class ContextBuilder:
                     "implementation binding cannot resolve method card: %s"
                     % method_id
                 )
-            unauthorized = sorted(
-                set(card.implementation_targets) - configured_targets
-            )
-            if unauthorized:
-                raise ContextBuildError(
-                    "method implementation target is not an authorized interface: %s"
-                    % unauthorized[0]
-                )
+            selected_cards.append(card)
 
-        requested_targets = {
-            target
-            for method_id in proposal.method_card_ids
-            for target in cards[method_id].implementation_targets
-        }
-        # Older/custom method cards without an assignment retain the narrow
-        # stable-entrypoint behavior. Shipped cards name every helper needed by
-        # their mechanism, so unrelated editable files are not exposed to Trae.
-        if not requested_targets:
-            requested_targets = {"solution/candidate.py"}
-        if "solution/candidate.py" not in requested_targets:
-            raise ContextBuildError(
-                "method implementation targets must include the production entrypoint"
+        legacy_campaign_method = (
+            proposal.method_card_ids[0]
+            if proposal.campaign_id is not None
+            and len(proposal.method_card_ids) == 1
+            and proposal.method_card_ids[0] in METHOD_ACTIVE_PARAMETERS
+            else None
+        )
+        verified = legacy_campaign_method is not None
+        if verified:
+            targets = ["solution/experiment_config.py"]
+            implementation_sha256 = _sha256_file_at_commit(
+                root,
+                proposal.parent_commit_sha,
+                "solution/research_scaffold.py",
             )
-        targets = [
-            target for target in interfaces if target in requested_targets
-        ]
+            implementation_id = METHOD_IMPLEMENTATION_IDS[legacy_campaign_method]
+            active_parameters = sorted(
+                METHOD_ACTIVE_PARAMETERS[legacy_campaign_method]
+            )
+            if set(proposal.variant_parameters) != set(active_parameters):
+                raise ContextBuildError(
+                    "configuration proposal does not declare every active parameter"
+                )
+            trial_type = TrialType.CONFIGURATION
+        else:
+            targets = sorted(
+                {
+                    target
+                    for card in selected_cards
+                    for target in card.implementation_targets
+                }
+            )
+            if not targets and not selected_cards:
+                # Legacy/custom implementation proposals without method cards
+                # retain the controller's narrow default target. Reviewed
+                # research methods must declare their implementation surface.
+                targets = ["solution/experiment_config.py"]
+            elif not targets:
+                raise ContextBuildError(
+                    "unverified method has no implementation target"
+                )
+            implementation_sha256 = None
+            implementation_id = None
+            active_parameters = []
+            trial_type = TrialType.IMPLEMENTATION
+
+        unauthorized = sorted(set(targets) - set(interfaces))
+        if unauthorized:
+            raise ContextBuildError(
+                "method target is not an authorized interface: %s" % unauthorized[0]
+            )
+        for target in targets:
+            if not any(_path_is_within(target, editable_root) for editable_root in editable):
+                raise ContextBuildError(
+                    "implementation target is outside editable roots: %s" % target
+                )
+            if any(_path_is_within(target, protected_root) for protected_root in protected):
+                raise ContextBuildError(
+                    "implementation target is protected: %s" % target
+                )
 
         return ExperimentSpec(
             **proposal.model_dump(mode="python"),
@@ -449,6 +548,10 @@ class ContextBuilder:
             target_files=targets,
             # Execution sequencing is frozen controller policy, not research output.
             fidelity_plan=[Fidelity.SMOKE, Fidelity.PROXY, Fidelity.FULL],
+            trial_type=trial_type,
+            implementation_id=implementation_id,
+            implementation_sha256=implementation_sha256,
+            active_parameter_names=active_parameters,
         )
 
     @staticmethod
@@ -657,20 +760,33 @@ class ContextBuilder:
                 PlannerExperimentSummary(
                     experiment_id=spec.experiment_id,
                     parent_experiment_id=spec.parent_experiment_id,
+                    implementation_parent_experiment_id=(
+                        spec.implementation_parent_experiment_id
+                    ),
                     commit_sha=node.latest_commit_sha or spec.parent_commit_sha,
                     family=spec.family,
+                    plan_id=spec.plan_id,
                     hypothesis_summary=spec.hypothesis,
+                    evaluation_event_id=(
+                        evaluation_event.event_id if evaluation_event else None
+                    ),
                     trust_verdict=evaluation.trust.verdict if evaluation else None,
                     stability=evaluation.trust.stability if evaluation else None,
                     integrity=evaluation.trust.integrity if evaluation else None,
-                    trust_flags=(list(evaluation.trust.flags) if evaluation else []),
+                    trust_flags=(
+                        _planner_safe_texts(evaluation.trust.flags)
+                        if evaluation
+                        else []
+                    ),
                     failure_hypotheses=(
-                        list(evaluation.diagnostics.failure_hypotheses)
+                        _planner_failure_hypotheses(evaluation)
                         if evaluation
                         else []
                     ),
                     diagnostic_limitations=(
-                        list(evaluation.diagnostics.limitations) if evaluation else []
+                        _planner_safe_texts(evaluation.diagnostics.limitations)
+                        if evaluation
+                        else []
                     ),
                     diagnostic_best_slice=(
                         evaluation.diagnostics.best_slice if evaluation else None
@@ -687,7 +803,11 @@ class ContextBuilder:
                     output_accepted=(output.accepted if output else None),
                     output_checks=(dict(output.checks) if output else {}),
                     output_violations=(list(output.violations) if output else []),
-                    primary_score=_planner_primary_score(evaluation, metric_set),
+                    primary_score=(
+                        _planner_primary_score(evaluation, metric_set)
+                        if metric_set is not None
+                        else None
+                    ),
                     metric_set=metric_set,
                     metric_deltas=metric_deltas,
                     baseline_delta=evaluation.baseline_delta if evaluation else None,
@@ -714,6 +834,15 @@ class ContextBuilder:
                     best_eligible=bool(decision and decision.best_eligible),
                     status=node.status.value,
                     duplicate_key=spec.duplicate_key,
+                    campaign_id=spec.campaign_id,
+                    variant_id=spec.variant_id,
+                    variant_instruction=spec.variant_instruction,
+                    variant_parameters=dict(spec.variant_parameters),
+                    trial_type=spec.trial_type,
+                    implementation_id=spec.implementation_id,
+                    execution_conformant=bool(
+                        evaluation and _execution_conformant(evaluation)
+                    ),
                     method_card_ids=list(spec.method_card_ids),
                     component_experiment_ids=list(spec.component_experiment_ids),
                     supporting_event_ids=support,
@@ -763,6 +892,8 @@ class ContextBuilder:
                     expected_effect=card.expected_effect,
                     falsifier=card.falsifier,
                     prohibition_conditions=list(card.prohibition_conditions),
+                    capability_status=card.capability_status,
+                    active_parameters=list(card.active_parameters),
                     # Implementation targets are intentionally withheld from
                     # Person 1 and resolved only by bind_implementation().
                     implementation_targets=[],
@@ -834,6 +965,16 @@ class ContextBuilder:
                 for event in active_lesson_events
             ],
             "method_cards": method_cards,
+            "research_plans": [
+                plan_progress(
+                    {
+                        "contract_summary": contract_summary,
+                        "family_history": family_history,
+                    },
+                    plan,
+                )
+                for plan in RESEARCH_PLANS
+            ],
             "playbook": PlannerPlaybookSummary(
                 schema_version=playbook.schema_version,
                 source_path=playbook.source_path,
@@ -845,6 +986,7 @@ class ContextBuilder:
                     for family, methods in playbook.method_order.items()
                 },
             ),
+            "research_campaign": self.config.research_campaign,
             "target_interface_excerpts": {},
             "data_profile": data_profile,
             "remaining_budget": PlannerBudgetSummary(
@@ -992,6 +1134,18 @@ class ContextBuilder:
                 )
             )
         optional: List[Tuple[str, str, str]] = []
+        # Durable lessons are the highest-value optional feedback. Include them
+        # before duplicated best/history summaries so a tight context budget
+        # cannot silently erase the agent's learned constraints.
+        lesson_events = active_lessons(visible, tags=normalized_tags, limit=5)
+        for event in lesson_events:
+            optional.append(
+                (
+                    event.event_id,
+                    "Applicable active lesson",
+                    self._planner_lesson_feedback(event),
+                )
+            )
         if current_best is not None:
             optional.append(
                 (
@@ -1011,15 +1165,6 @@ class ContextBuilder:
                         self._planner_experiment_feedback(summary),
                     )
                 )
-        lesson_events = active_lessons(visible, tags=normalized_tags, limit=5)
-        for event in lesson_events:
-            optional.append(
-                (
-                    event.event_id,
-                    "Applicable active lesson",
-                    self._planner_lesson_feedback(event),
-                )
-            )
         for card in load_method_cards(
             self.config.repository_root / "research/methods"
         ).cards:
@@ -1351,13 +1496,16 @@ class ContextBuilder:
             ),
             None,
         )
-        if failure_event.event_type == EventType.PATCH_CHECKED or getattr(
-            failed_value, "failure_stage", None
-        ) == "patch_gate":
-            # A Gate-A rejection has no accepted receipt for the rejected
-            # commit.  Supplying an older receipt would authorize the wrong
-            # bytes and the real repair prompt correctly rejects it.
-            accepted_patch = None
+        # A rejected repair must never become the base of the next repair.
+        # When Gate A has accepted an earlier candidate, its receipt and commit
+        # are the last executable lineage boundary.  If no candidate has ever
+        # passed Gate A, retain the latest rejected candidate so the first
+        # bounded repair can correct that implementation rather than recode it.
+        accepted_commit = (
+            accepted_patch.patch_commit_sha
+            if accepted_patch is not None
+            else node.latest_commit_sha or node.base_commit_sha
+        )
         prior_fingerprints = [
             fingerprint_result(event.payload.result)
             for event in chain[:-1]
@@ -1371,7 +1519,7 @@ class ContextBuilder:
                     {
                         "experiment_id": experiment_id,
                         "original_hypothesis": node.hypothesis,
-                        "accepted_patch_commit": node.latest_commit_sha or node.base_commit_sha,
+                        "accepted_patch_commit": accepted_commit,
                         "remaining_repair_budget": remaining_repair_budget,
                         "hypothesis_drift": "forbidden",
                         "allowed_output": "RecoveryDecision or repaired PatchCandidate",
@@ -1413,7 +1561,7 @@ class ContextBuilder:
             context_fields={
                 "repair_attempt": repair_attempt,
                 "original_experiment_spec": spec_event.payload.spec,
-                "current_patch_commit_sha": node.latest_commit_sha or node.base_commit_sha,
+                "current_patch_commit_sha": accepted_commit,
                 "accepted_patch_receipt_id": (
                     accepted_patch.receipt_id if accepted_patch is not None else None
                 ),
@@ -1432,6 +1580,7 @@ class ContextBuilder:
                 "previous_repair_fingerprints": prior_fingerprints,
                 "recovery_instructions": "Await the deterministic recovery decision.",
                 "remaining_repair_budget": remaining_repair_budget,
+                "target_interface_excerpts": self.config.target_interface_excerpts,
                 "editable_roots": self.config.editable_roots,
                 "protected_paths": self._protected_paths(),
             },

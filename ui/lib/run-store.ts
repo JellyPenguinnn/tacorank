@@ -19,6 +19,7 @@ export type LedgerEvent = {
 
 export type RunSummary = {
   run_id: string;
+  run_mode: 'discovery' | 'submission' | null;
   source: 'ledger' | 'launch';
   status: string;
   phase: string;
@@ -51,6 +52,7 @@ export type LaunchRecord = {
   schema_version: 'tacorank.dashboard-launch.v1';
   launch_id: string;
   run_id: string;
+  run_mode?: 'discovery' | 'submission' | null;
   started_at: string;
   pid: number | null;
   stop_requested_at: string | null;
@@ -101,6 +103,7 @@ function validLaunchRecord(value: unknown): LaunchRecord | null {
   const candidate = record(value);
   const launchId = text(candidate.launch_id);
   const runId = text(candidate.run_id);
+  const runMode = candidate.run_mode == null ? null : text(candidate.run_mode);
   const startedAt = text(candidate.started_at);
   const stopRequestedAt = candidate.stop_requested_at == null ? null : text(candidate.stop_requested_at);
   const pid = candidate.pid;
@@ -108,6 +111,7 @@ function validLaunchRecord(value: unknown): LaunchRecord | null {
     candidate.schema_version !== 'tacorank.dashboard-launch.v1'
     || !launchId || !LAUNCH_ID.test(launchId)
     || !runId || !RUN_ID.test(runId)
+    || (runMode !== null && !['discovery', 'submission'].includes(runMode))
     || !startedAt || !Number.isFinite(new Date(startedAt).getTime())
     || (candidate.stop_requested_at != null && (!stopRequestedAt || !Number.isFinite(new Date(stopRequestedAt).getTime())))
     || !(pid === null || (typeof pid === 'number' && Number.isInteger(pid) && pid > 0))
@@ -116,6 +120,7 @@ function validLaunchRecord(value: unknown): LaunchRecord | null {
     schema_version: 'tacorank.dashboard-launch.v1',
     launch_id: launchId,
     run_id: runId,
+    run_mode: runMode as 'discovery' | 'submission' | null,
     started_at: startedAt,
     pid: pid as number | null,
     stop_requested_at: stopRequestedAt,
@@ -193,6 +198,7 @@ async function legacyActiveLaunch(existing: LaunchRecord[]): Promise<LaunchRecor
           schema_version: 'tacorank.dashboard-launch.v1',
           launch_id: launchId,
           run_id: match[1],
+          run_mode: null,
           started_at: startedAt,
           pid,
           stop_requested_at: null,
@@ -293,6 +299,7 @@ async function summarizeLaunch(item: LaunchRecord, lockedPid: number | null): Pr
   const stopped = !isLive && item.stop_requested_at !== null;
   return {
     run_id: item.run_id,
+    run_mode: item.run_mode ?? null,
     source: 'launch',
     status: stopping ? 'stopping' : stopped ? 'interrupted' : isLive ? 'initializing' : 'failed',
     phase: stopping ? 'setup_stopping' : stopped ? 'setup_stopped' : isLive ? 'setup' : 'setup_failed',
@@ -346,16 +353,19 @@ function experimentId(event: LedgerEvent): string | null {
 
 function metricScore(payload: JsonRecord): number | null {
   const result = nested(payload, 'result');
+  const trust = record(result.trust);
   const metricSet = record(result.metric_set ?? payload.metric_set);
-  return number(metricSet.primary_score ?? payload.primary_score);
+  return number(trust.seed_mean ?? metricSet.primary_score ?? payload.primary_score);
 }
 
 export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
+  let runMode: 'discovery' | 'submission' | null = null;
   let status = 'initializing';
   let phase = 'not_started';
   let proposed = 0;
   let bestId: string | null = null;
   let bestScore: number | null = null;
+  let bestFidelity: string | null = null;
   let baselineScore: number | null = null;
   let stopReason: string | null = null;
   let finalId: string | null = null;
@@ -365,16 +375,19 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
   let stageStartedAt: string | null = null;
   let coderTimeout: number | null = null;
   let executionTimeout: number | null = null;
-  const candidateScores = new Map<string, { experimentId: string; fidelity: string; score: number }>();
-
   for (const event of events) {
     const payload = record(event.payload);
     const previousPhase = phase;
     switch (event.event_type) {
-      case 'run.started': phase = 'contract_verification'; break;
+      case 'run.started': {
+        phase = 'contract_verification';
+        runMode = payload.run_mode === 'discovery' ? 'discovery' : 'submission';
+        break;
+      }
       case 'contract.verified': phase = 'baseline'; break;
       case 'baseline.verified':
         status = 'ready'; phase = 'planning'; baselineScore = metricScore(payload);
+        bestId = 'baseline'; bestScore = baselineScore; bestFidelity = 'full';
         break;
       case 'context.created': {
         const context = nested(payload, 'context');
@@ -404,16 +417,14 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
       case 'output.checked': phase = nested(payload, 'result').accepted === false ? 'recovery' : 'evaluation'; break;
       case 'evaluation.completed': {
         phase = 'decision';
-        const result = nested(payload, 'result');
-        const id = text(result.experiment_id);
-        const fidelity = text(result.fidelity);
-        const score = metricScore(payload);
-        if (id && id !== 'baseline' && fidelity && score !== null) {
-          candidateScores.set(`${id}\u0000${fidelity}`, { experimentId: id, fidelity, score });
-        }
         break;
       }
       case 'experiment.decided': phase = 'planning'; break;
+      case 'best.updated':
+        bestId = text(payload.experiment_id);
+        bestScore = number(payload.primary_score);
+        bestFidelity = 'full';
+        break;
       case 'run.stopped':
         status = 'stopped'; phase = 'stopped'; stopReason = text(payload.reason_code);
         activeExperiment = null; activeAttempt = null; activeFidelity = null; break;
@@ -423,15 +434,6 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
     }
     if (phase !== previousPhase) stageStartedAt = event.timestamp ?? null;
   }
-  const evaluated = [...candidateScores.values()];
-  const fullFidelity = evaluated.filter((item) => item.fidelity === 'full');
-  const scorePool = fullFidelity.length ? fullFidelity : evaluated;
-  const bestCandidate = scorePool.reduce<typeof scorePool[number] | null>(
-    (best, item) => best === null || item.score > best.score ? item : best,
-    null,
-  );
-  bestId = bestCandidate?.experimentId ?? null;
-  bestScore = bestCandidate?.score ?? null;
   const timeout = phase === 'coder_context' ? coderTimeout : phase === 'running' ? executionTimeout : null;
   const deadline = timeout !== null && stageStartedAt
     ? new Date(new Date(stageStartedAt).getTime() + timeout * 1000).toISOString()
@@ -439,6 +441,7 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
   const lastEvent = events.at(-1);
   return {
     run_id: runId,
+    run_mode: runMode,
     source: 'ledger',
     status,
     phase,
@@ -451,7 +454,7 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
     experiments_proposed: proposed,
     best_experiment_id: bestId,
     best_primary_score: bestScore,
-    best_primary_fidelity: bestCandidate?.fidelity ?? null,
+    best_primary_fidelity: bestFidelity,
     baseline_primary_score: baselineScore,
     stop_reason_code: stopReason,
     final_experiment_id: finalId,
@@ -471,7 +474,14 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
 function withObservedRuntime(summary: RunSummary, launch: LaunchRecord | undefined, lockedPid: number | null): RunSummary {
   if (!summary.is_live) return summary;
   if (launch) {
-    const alive = launchIsAlive(launch);
+    // Once a ledger exists, the controller-owned lock is the authoritative
+    // liveness signal. A detached launcher PID can remain observable briefly
+    // after exit (or be reused), which otherwise leaves the dashboard clock
+    // running forever against a dead controller.
+    const alive = launchIsAlive(launch)
+      && launch.pid !== null
+      && lockedPid !== null
+      && launch.pid === lockedPid;
     if (launch.stop_requested_at !== null) {
       return {
         ...summary,
@@ -633,7 +643,12 @@ export async function runDetail(runId: string): Promise<JsonRecord> {
     if (event.event_type === 'execution.started') item.execution_request = payload.request;
     if (event.event_type === 'execution.finished') item.execution_result = payload.result;
     if (event.event_type === 'output.checked') item.gate_b = payload.result;
-    if (event.event_type === 'evaluation.completed') item.evaluation = payload.result;
+    if (event.event_type === 'evaluation.completed') {
+      item.evaluation = {
+        ...nested(payload, 'result'),
+        reported_primary_score: metricScore(payload),
+      };
+    }
     if (event.event_type === 'experiment.decided') item.decision = payload.decision;
     if (event.event_type === 'adapter.failed') {
       const failures = Array.isArray(item.failures) ? item.failures as JsonRecord[] : [];

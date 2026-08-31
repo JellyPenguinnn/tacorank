@@ -4,6 +4,7 @@ import asyncio
 
 from tacorank.memory.replay import replay
 from tacorank.coding.trae_adapter import CodingWorkerError
+from tacorank.context.builder import ContextBuildError
 from tacorank.orchestrator.fakes import (
     FakeCodingWorker,
     FakeExecutionRunner,
@@ -11,12 +12,16 @@ from tacorank.orchestrator.fakes import (
     FakePatchGate,
 )
 from tacorank.orchestrator.state import ExperimentStatus
+from tacorank.providers.research_provider import ProviderError
 from tacorank.recovery.policy import RecoveryManager
 from tacorank.schemas import (
     CheckResult,
     CheckStatus,
     EventType,
+    ExperimentDecisionKind,
     PatchCheckResult,
+    PlannerAction,
+    PlannerOutput,
     RecoveryAction,
     RunOutcome,
     Violation,
@@ -41,6 +46,20 @@ class RepairingCodingWorker(FakeCodingWorker):
                 "context_id": context.context_id,
                 "base_commit_sha": self.initial_patch.patch_commit_sha,
                 "patch_commit_sha": "c" * 40,
+            }
+        )
+        return self.initial_patch.__class__.model_validate(values)
+
+
+class SequencedRepairingCodingWorker(RepairingCodingWorker):
+    async def repair_patch(self, context, decision):
+        self.repair_calls.append((context, decision))
+        values = self.initial_patch.model_dump(mode="json")
+        values.update(
+            {
+                "context_id": context.context_id,
+                "base_commit_sha": context.current_patch_commit_sha,
+                "patch_commit_sha": chr(ord("b") + len(self.repair_calls)) * 40,
             }
         )
         return self.initial_patch.__class__.model_validate(values)
@@ -102,6 +121,73 @@ class IntegrityRejectOncePatchGate(FakePatchGate):
         return await super().check(candidate)
 
 
+class RejectRepairPatchGate(FakePatchGate):
+    def __init__(self, artifacts):
+        super().__init__(artifacts)
+        self.calls = 0
+
+    async def check(self, candidate):
+        self.calls += 1
+        if self.calls == 1:
+            return await super().check(candidate)
+        return PatchCheckResult(
+            run_id=candidate.run_id,
+            experiment_id=candidate.experiment_id,
+            attempt=candidate.attempt,
+            patch_commit_sha=candidate.patch_commit_sha,
+            diff_sha256=candidate.diff_sha256,
+            accepted=False,
+            checks=[
+                CheckResult(
+                    name="changed_file_match",
+                    status=CheckStatus.FAIL,
+                    summary="candidate changed an unauthorized target",
+                )
+            ],
+            violations=[
+                Violation(
+                    code="UNAPPROVED_TARGET_FILE",
+                    message="candidate changed an unauthorized target",
+                    path="solution/experiment_config.py",
+                )
+            ],
+        )
+
+
+class NoOpEvaluator:
+    def __init__(self, delegate):
+        self.delegate = delegate
+
+    async def evaluate(self, request):
+        result = await self.delegate.evaluate(request)
+        zero_deltas = {name: 0.0 for name in result.metric_set.metrics}
+        return result.__class__.model_validate(
+            {
+                **result.model_dump(mode="json"),
+                "baseline_delta": 0.0,
+                "parent_delta": 0.0,
+                "previous_best_delta": 0.0,
+                "baseline_metric_deltas": zero_deltas,
+                "parent_metric_deltas": zero_deltas,
+                "previous_best_metric_deltas": zero_deltas,
+                "prediction_change": {
+                    "spearman_vs_parent": 1.0,
+                    "changed_row_fraction": 0.0,
+                },
+                "trust": {
+                    "verdict": "no_op",
+                    "stability": "not_applicable",
+                    "integrity": "clean",
+                    "flags": ["NO_PREDICTION_CHANGE"],
+                    "seed_count": 1,
+                },
+            }
+        )
+
+    async def decide(self, result, context):
+        return await self.delegate.decide(result, context)
+
+
 class TransientInitialCodingWorker(FakeCodingWorker):
     def __init__(self, artifacts):
         super().__init__(artifacts)
@@ -144,6 +230,80 @@ class PermanentInitialCodingWorker(FakeCodingWorker):
             "SOLUTION_VERIFICATION_FAILED",
             "candidate did not implement the approved plan after bounded reviews",
         )
+
+
+class FailingNextPlanner:
+    async def propose(self, context):
+        del context
+        raise ProviderError("next planner request failed")
+
+
+class ProposeThenBlockPlanner:
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.calls = 0
+
+    async def propose(self, context):
+        self.calls += 1
+        if self.calls == 1:
+            return await self.delegate.propose(context)
+        return PlannerOutput(
+            action=PlannerAction.BLOCKED,
+            reason_code="portfolio_exhausted",
+            reason="No reviewed non-duplicate method remains.",
+            supporting_event_ids=context.source_event_ids,
+        )
+
+
+def test_coder_context_failure_is_recorded_at_the_coding_boundary(
+    harness, baseline_evaluation, monkeypatch
+):
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    def fail_coder_context(*args, **kwargs):
+        del args, kwargs
+        raise ContextBuildError("mandatory coder context exceeds configured budget")
+
+    monkeypatch.setattr(harness.context_builder, "build_coder", fail_coder_context)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    failure = next(
+        event
+        for event in harness.events()
+        if event.event_type == EventType.ADAPTER_FAILED
+    )
+    assert failure.payload.result.failure_stage == "coding"
+    assert state.stop_reason_code is None
+    assert state.phase == "planning"
+    assert state.current_experiment is None
+    assert state.experiments["exp_001"].status.value == "invalid"
+
+
+def test_planner_failure_after_pre_evaluation_abandon_is_durable(
+    harness, baseline_evaluation
+):
+    harness.coding_worker = PermanentInitialCodingWorker(
+        harness.event_store.artifact_store
+    )
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    recovered = asyncio.run(harness.run_one_experiment())
+    assert recovered.phase == "planning"
+    assert recovered.current_experiment is None
+    assert recovered.experiments["exp_001"].status == ExperimentStatus.INVALID
+
+    harness.planner = FailingNextPlanner()
+    stopped = asyncio.run(harness.run_one_experiment())
+
+    assert stopped.stop_reason_code == "PLANNER_PROVIDER_FAILURE"
+    assert [event.event_type for event in harness.events()][-2:] == [
+        EventType.PLANNING_FAILED,
+        EventType.RUN_STOPPED,
+    ]
+    assert harness.events()[-2].payload.result.error_summary == "next planner request failed"
 
 
 class FailOnceRunner(FakeExecutionRunner):
@@ -368,38 +528,7 @@ def test_real_recovery_repairs_gates_reruns_and_replays(
     assert replay(events).experiments["exp_001"].repair_count == 1
 
 
-def test_candidate_integrity_failure_restarts_from_parent_and_continues(
-    harness, baseline_evaluation
-):
-    artifacts = harness.event_store.artifact_store
-    worker = IntegrityRestartingCodingWorker(artifacts)
-    gate = IntegrityRejectOncePatchGate(artifacts)
-    harness.coding_worker = worker
-    harness.patch_gate = gate
-    harness.recovery_manager = RecoveryManager()
-    harness.bootstrap(baseline_evaluation)
-
-    state = asyncio.run(harness.run_one_experiment())
-
-    assert state.stop_reason_code is None
-    assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
-    assert state.experiments["exp_001"].repair_count == 1
-    assert len(worker.restart_calls) == 1
-    restart_context, restart_decision = worker.restart_calls[0]
-    assert restart_decision.action == RecoveryAction.RESTART_FROM_TRUSTED_PARENT
-    assert restart_decision.reason_code == "CANDIDATE_INTEGRITY_CLEAN_RESTART"
-    assert restart_context.current_patch_commit_sha == "a" * 40
-    assert "PROTECTED_PATH_MODIFIED" in restart_context.error_summary
-    assert gate.calls >= 2
-    recovery_events = [
-        event.payload.decision
-        for event in harness.events()
-        if event.event_type == EventType.RECOVERY_DECIDED
-    ]
-    assert recovery_events[-1].action == RecoveryAction.RESTART_FROM_TRUSTED_PARENT
-
-
-def test_trae_exception_is_recorded_and_stops_fail_closed(
+def test_trae_exception_quarantines_candidate_and_returns_to_planning(
     harness, baseline_evaluation
 ):
     artifacts = harness.event_store.artifact_store
@@ -424,8 +553,11 @@ def test_trae_exception_is_recorded_and_stops_fail_closed(
     assert adapter_failures[0].payload.result.failure_stage == "coding"
     assert len(worker.repair_calls) == 1
     assert decisions[-1].action == RecoveryAction.ABANDON
-    assert state.status.value == "failed"
-    assert replay(events).status.value == "failed"
+    assert state.status.value == "running"
+    assert state.phase == "planning"
+    assert state.current_experiment is None
+    assert state.experiments["exp_001"].status == ExperimentStatus.INVALID
+    assert replay(events).status.value == "running"
 
 
 def test_transient_initial_coding_failure_retries_and_persists_redacted_tail(
@@ -526,6 +658,67 @@ def test_permanent_initial_coding_failure_abandons_only_the_experiment(
     assert state.phase == "planning"
     assert state.status.value == "running"
     assert state.active_experiment_id is None
+
+
+def test_outer_loop_replans_after_abandoned_candidate(
+    harness, baseline_evaluation
+) -> None:
+    planner = ProposeThenBlockPlanner(harness.planner)
+    harness.planner = planner
+    harness.coding_worker = PermanentInitialCodingWorker(
+        harness.event_store.artifact_store
+    )
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_until_stopped())
+
+    assert planner.calls == 2
+    assert state.experiments["exp_001"].status == ExperimentStatus.INVALID
+    assert state.stop_reason_code == "no_legal_proposal"
+    assert [
+        event.payload.reason_code
+        for event in harness.events()
+        if event.event_type == EventType.RUN_STOPPED
+    ] == ["no_legal_proposal"]
+
+
+def test_noop_repair_restarts_from_accepted_patch_and_terminates_before_replan(
+    harness, baseline_evaluation
+) -> None:
+    planner = ProposeThenBlockPlanner(harness.planner)
+    worker = SequencedRepairingCodingWorker(
+        harness.event_store.artifact_store
+    )
+    harness.planner = planner
+    harness.coding_worker = worker
+    harness.patch_gate = RejectRepairPatchGate(
+        harness.event_store.artifact_store
+    )
+    harness.evaluator = NoOpEvaluator(harness.evaluator)
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_until_stopped())
+
+    assert planner.calls == 2
+    assert len(worker.repair_calls) == 2
+    initial_commit = worker.initial_patch.patch_commit_sha
+    assert worker.repair_calls[0][0].current_patch_commit_sha == initial_commit
+    assert worker.repair_calls[1][0].current_patch_commit_sha == initial_commit
+    assert worker.repair_calls[1][0].accepted_patch_receipt_id == (
+        "receipt_exp_001_1"
+    )
+    terminal = [
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.EXPERIMENT_DECIDED
+        and event.payload.decision.decision != ExperimentDecisionKind.PROMOTE
+    ]
+    assert len(terminal) == 1
+    assert terminal[0].decision == ExperimentDecisionKind.REJECT
+    assert terminal[0].reason_code.startswith("recovery_abandon_")
+    assert state.stop_reason_code == "no_legal_proposal"
 
 
 def test_real_recovery_allows_only_one_same_commit_retry_across_fingerprints(

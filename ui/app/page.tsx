@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 type Json = Record<string, unknown>;
 type Event = { event_id?: string; seq?: number; timestamp?: string; event_type?: string; payload?: Json };
 type Run = {
-  run_id: string; source: 'ledger' | 'launch'; status: string; phase: string; is_live: boolean; launch_error: string | null;
+  run_id: string; run_mode: 'discovery' | 'submission' | null; source: 'ledger' | 'launch'; status: string; phase: string; is_live: boolean; launch_error: string | null;
   can_stop: boolean; stop_requested_at: string | null;
   started_at: string | null; updated_at: string | null;
   experiments_proposed: number; best_experiment_id: string | null; best_primary_score: number | null;
@@ -22,6 +22,8 @@ type Iteration = {
   timing?: Json;
 };
 type Detail = { summary: Run; events: Event[]; iterations: Iteration[]; memory: { planner_contexts: Json[]; lessons: Json[] } };
+type CampaignId = 'objective_temporal_50' | 'standard';
+type RunMode = 'discovery' | 'submission';
 
 const object = (value: unknown): Json => value && typeof value === 'object' && !Array.isArray(value) ? value as Json : {};
 const text = (value: unknown, fallback = '—') => typeof value === 'string' && value ? value : fallback;
@@ -89,17 +91,11 @@ function Plan({ plan }: { plan?: Json }) {
       <div><dt>Mechanism</dt><dd>{text(plan.expected_mechanism)}</dd></div>
       <div><dt>Success criteria</dt><dd>{text(plan.success_criteria)}</dd></div>
       <div><dt>Falsification</dt><dd>{text(plan.falsification_condition)}</dd></div>
+      {plan.variant_id ? <div><dt>Campaign slot</dt><dd>{text(plan.variant_id)}</dd></div> : null}
       <div><dt>Target files</dt><dd>{Array.isArray(plan.target_files) ? plan.target_files.join(', ') : '—'}</dd></div>
     </dl>
-    {papers.length > 0 && <div className="literature-evidence">
-      <h4>Online paper evidence</h4>
-      <ul>{papers.map((paper) => <li key={text(paper.evidence_id)}>
-        {typeof paper.url === 'string' ? <a href={paper.url} target="_blank" rel="noreferrer">{text(paper.title)}</a> : <strong>{text(paper.title)}</strong>}
-        <span>{[Array.isArray(paper.authors) ? paper.authors.join(', ') : null, paper.year, paper.venue, typeof paper.citation_count === 'number' ? `${paper.citation_count} citations` : null, paper.evidence_id].filter(Boolean).join(' · ')}</span>
-        <p>{text(paper.abstract, 'Abstract unavailable.')}</p>
-        {typeof paper.query === 'string' && <small>Search: {paper.query}</small>}
-      </li>)}</ul>
-    </div>}
+    {plan.variant_instruction ? <div className="callout"><span>Adaptive variant</span><p>{text(plan.variant_instruction)}</p></div> : null}
+    {plan.variant_parameters ? <JsonView value={plan.variant_parameters} /> : null}
   </div>;
 }
 
@@ -125,6 +121,8 @@ export default function Home() {
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [apiKey, setApiKey] = useState('');
+  const [campaignId, setCampaignId] = useState<CampaignId>('standard');
+  const [runMode, setRunMode] = useState<RunMode>('discovery');
   const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(async (preferred?: string | null) => {
@@ -171,7 +169,7 @@ export default function Home() {
       const response = await fetch('/api/runs/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ api_key: apiKey }),
+        body: JSON.stringify({ api_key: apiKey, campaign_id: campaignId, run_mode: runMode }),
       });
       const payload = await response.json() as { error?: string; run_id?: string };
       if (!response.ok) throw new Error(payload.error ?? 'Could not start the run.');
@@ -181,7 +179,7 @@ export default function Home() {
       void refresh(payload.run_id);
     } catch (caught) { setError(caught instanceof Error ? caught.message : 'Could not start the run.'); }
     finally { setApiKey(''); setStarting(false); }
-  }, [apiKey, refresh]);
+  }, [apiKey, campaignId, refresh, runMode]);
 
   const stop = useCallback(async (runId: string) => {
     setStopping(true); setError('');
@@ -221,7 +219,7 @@ export default function Home() {
   return <main className="app-shell dashboard-shell">
     <aside className="sidebar runs-sidebar">
       <div className="brand"><span className="brand-mark">T</span><span><span className="brand-name">TacoRank</span><small className="brand-subtitle">Run control</small></span></div>
-      <button className="start-button" type="button" onClick={() => { setApiKey(''); setConfirmStart(true); }} disabled={starting}>▶ <span>Start new run</span></button>
+      <button className="start-button" type="button" onClick={() => { setApiKey(''); setCampaignId('standard'); setRunMode('discovery'); setConfirmStart(true); }} disabled={starting}>▶ <span>Start new run</span></button>
       <div className="runs-heading"><span>All runs</span><b>{runs.length}</b></div>
       <nav className="run-list" aria-label="All TacoRank runs">
         {runs.map((run, index) => <button key={run.run_id} type="button" className={`run-list-item ${selectedId === run.run_id ? 'selected' : ''}`} onClick={() => setSelectedId(run.run_id)}><span className={`run-state-dot ${run.status}`} /><span><strong>{run.run_id}</strong><small>{humanize(run.phase)} · {formatTime(run.updated_at)}</small></span>{index === 0 && <em>Latest</em>}</button>)}
@@ -236,7 +234,7 @@ export default function Home() {
       {notice && <div className="notice-banner"><span>{notice}</span><button type="button" onClick={() => setNotice('')}>×</button></div>}
 
       {!current ? <section className="empty-dashboard"><span>◎</span><h2>No run selected</h2><p>Start a production run or wait for a ledger-backed run to appear.</p></section> : <>
-        <section className="run-hero"><div><span className={`status-badge ${current.status}`}><i />{humanize(current.status)}</span><p className="hero-kicker">Current phase</p><h2>{humanize(current.phase)}</h2><p>{current.source === 'launch' ? `Launch reserved ${formatTime(current.started_at)} · waiting for the first ledger event` : `Last durable evidence ${formatTime(current.updated_at)} · ${current.event_count} ledger events`}</p></div><div className="hero-score"><span>BEST PRIMARY</span><strong>{formatScore(current.best_primary_score)}</strong><small>{current.best_experiment_id === null ? 'Waiting for an experiment evaluation · baseline excluded' : `${current.best_experiment_id}${current.best_primary_fidelity ? ` · ${humanize(current.best_primary_fidelity)}` : ''}${delta === null ? '' : ` · ${delta >= 0 ? '+' : ''}${delta.toFixed(6)} vs FM`}`}</small></div></section>
+        <section className="run-hero"><div><span className={`status-badge ${current.status}`}><i />{humanize(current.status)}</span><p className="hero-kicker">{current.run_mode ? `${humanize(current.run_mode)} mode · current phase` : 'Current phase'}</p><h2>{humanize(current.phase)}</h2><p>{current.source === 'launch' ? `Launch reserved ${formatTime(current.started_at)} · waiting for the first ledger event` : `Last durable evidence ${formatTime(current.updated_at)} · ${current.event_count} ledger events`}</p></div><div className="hero-score"><span>BEST PRIMARY</span><strong>{formatScore(current.best_primary_score)}</strong><small>{current.best_experiment_id === null ? 'Waiting for the verified baseline' : `${current.best_experiment_id}${current.best_primary_fidelity ? ` · ${humanize(current.best_primary_fidelity)}` : ''}${delta === null ? '' : ` · ${delta >= 0 ? '+' : ''}${delta.toFixed(6)} vs FM`}`}</small></div></section>
         {current.launch_error && <div className="launch-error" role="alert"><strong>Setup failed before the ledger started.</strong><span>{current.launch_error}</span></div>}
         <section className="runtime-panel" aria-label="Current iteration runtime and progress">
           <div className="runtime-grid">
@@ -254,11 +252,12 @@ export default function Home() {
         <section className="section-heading"><div><p className="eyebrow">Complete research record</p><h2>All iterations</h2></div><span>{selectedDetail?.iterations.length ?? 0} total</span></section>
         <section className="iteration-list">
           {selectedDetail?.iterations.map((iteration, index) => {
-            const metricSet = object(object(iteration.evaluation).metric_set); const decision = object(iteration.decision);
+            const evaluation = object(iteration.evaluation); const metricSet = object(evaluation.metric_set); const decision = object(iteration.decision);
+            const reportedScore = typeof evaluation.reported_primary_score === 'number' ? evaluation.reported_primary_score : metricSet.primary_score;
             const timing = object(iteration.timing);
             const parent = parentExperimentId(iteration.plan);
             const loopTime = typeof timing.loop_time_seconds === 'number' ? timing.loop_time_seconds : elapsedSince(typeof timing.proposed_at === 'string' ? timing.proposed_at : null, clockAnchor);
-            return <details className="iteration-card" key={iteration.experiment_id} open={iteration.experiment_id === latestIteration}><summary><span className="iteration-index">{String(index + 1).padStart(2, '0')}</span><span><strong>{iteration.experiment_id}</strong><small>{text(iteration.plan?.family, 'Unclassified')} · {humanize(text(decision.decision, 'in progress'))}</small>{iteration.plan && <span className={`iteration-lineage ${parent === 'baseline' ? 'baseline' : 'continuation'}`}>{parent === 'baseline' ? 'Root · baseline' : `↳ Continues from ${parent ?? 'unknown parent'}`}</span>}</span><span className="iteration-metrics"><span><small>Loop time</small><b>{formatDuration(loopTime)}</b></span><span><small>Score</small><b>{typeof metricSet.primary_score === 'number' ? metricSet.primary_score.toFixed(6) : '—'}</b></span></span><span className="summary-chevron">⌄</span></summary>
+            return <details className="iteration-card" key={iteration.experiment_id} open={iteration.experiment_id === latestIteration}><summary><span className="iteration-index">{String(index + 1).padStart(2, '0')}</span><span><strong>{iteration.experiment_id}</strong><small>{text(iteration.plan?.family, 'Unclassified')} · {humanize(text(decision.decision, 'in progress'))}</small></span><span className="iteration-metrics"><span><small>Loop time</small><b>{formatDuration(loopTime)}</b></span><span><small>Score</small><b>{typeof reportedScore === 'number' ? reportedScore.toFixed(6) : '—'}</b></span></span><span className="summary-chevron">⌄</span></summary>
               <div className="iteration-body"><section className="iteration-section timing-section"><div className="subheading"><span>00</span><h3>Timing</h3></div><div className="timing-breakdown"><div><span>Proposal → terminal</span><strong>{formatDuration(loopTime)}</strong><small>{timing.terminal_at ? 'Exact terminal duration' : current.is_live ? 'Live' : 'Frozen at last durable event'}</small></div><div><span>Trae coding</span><strong>{formatDuration(typeof timing.trae_coding_time_seconds === 'number' ? timing.trae_coding_time_seconds : null)}</strong></div><div><span>Execution</span><strong>{formatDuration(typeof timing.execution_time_seconds === 'number' ? timing.execution_time_seconds : null)}</strong></div><div><span>Recovery</span><strong>{formatDuration(typeof timing.recovery_time_seconds === 'number' ? timing.recovery_time_seconds : null)}</strong></div></div></section><section className="iteration-section"><div className="subheading"><span>01</span><h3>Plan</h3></div><Plan plan={iteration.plan} /></section><section className="iteration-section"><div className="subheading"><span>02</span><h3>Memory & context</h3></div><JsonView value={{ contexts: iteration.contexts ?? [], lessons: iteration.lessons ?? [] }} empty="No iteration memory recorded." /></section><section className="iteration-section"><div className="subheading"><span>03</span><h3>Current implementation</h3></div><Implementation value={iteration.implementation} /></section><section className="iteration-section"><div className="subheading"><span>04</span><h3>Execution & evaluation</h3></div><div className="evidence-grid"><div><h4>Gate A</h4><JsonView value={iteration.gate_a} /></div><div><h4>Execution</h4><JsonView value={iteration.execution_result ?? iteration.execution_request} /></div><div><h4>Gate B</h4><JsonView value={iteration.gate_b} /></div><div><h4>Evaluation</h4><JsonView value={iteration.evaluation} /></div></div></section>
               {(iteration.failures?.length || iteration.recoveries?.length) ? <section className="iteration-section warning-section"><div className="subheading"><span>!</span><h3>Failures & bounded recovery</h3></div><JsonView value={{ failures: iteration.failures ?? [], recoveries: iteration.recoveries ?? [] }} /></section> : null}<details className="raw-evidence"><summary>Raw ledger evidence ({iteration.events?.length ?? 0} events)</summary><JsonView value={iteration.events} /></details></div></details>;
           })}
@@ -268,7 +267,7 @@ export default function Home() {
       </>}
     </section>
 
-    {confirmStart && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !starting) { setApiKey(''); setConfirmStart(false); } }}><section className="start-modal" role="dialog" aria-modal="true" aria-labelledby="start-title"><form onSubmit={(event) => { event.preventDefault(); void start(); }}><span className="modal-icon">▶</span><p className="eyebrow">Production workflow</p><h2 id="start-title">Start a new live run?</h2><p>This launches setup, non-mutating preflight, keyless online paper research, the paid DeepSeek + Trae loop, final submission checking, and ledger validation. It uses a fresh run ID and may run for hours.</p><label className="api-key-field"><span>DeepSeek API key</span><input type="password" name="deepseek-api-key" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="Paste your DeepSeek API key" autoComplete="off" autoCapitalize="none" spellCheck={false} autoFocus required disabled={starting || !canStart} /><small>The key is required for planning and coding, used only for this launch, and never saved in browser storage, run metadata, logs, or API responses. OpenAlex paper research needs no key.</small></label>{!canStart && <div className="credential-note">A script-managed live run is already active. Open the latest run to monitor it.</div>}<div className="modal-actions"><button type="button" className="cancel-button" onClick={() => { setApiKey(''); setConfirmStart(false); }} disabled={starting}>Cancel</button><button type="submit" className="start-button modal-start" disabled={starting || !canStart || !apiKey.trim()}>{starting ? 'Launching…' : 'Start production run'}</button></div></form></section></div>}
+      {confirmStart && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !starting) { setApiKey(''); setConfirmStart(false); } }}><section className="start-modal" role="dialog" aria-modal="true" aria-labelledby="start-title"><form onSubmit={(event) => { event.preventDefault(); void start(); }}><span className="modal-icon">▶</span><p className="eyebrow">Live research workflow</p><h2 id="start-title">Start a new live run?</h2><p>{runMode === 'discovery' ? 'Discovery runs explore until their experiment/time budget is exhausted or no legal proposal remains. They do not automatically select or check a final submission.' : 'Submission runs use early convergence and automatically reproduce, select, and check the validation-best submission.'}</p><label className="api-key-field"><span>Run mode</span><select value={runMode} onChange={(event) => setRunMode(event.target.value as RunMode)} disabled={starting || !canStart}><option value="discovery">Discovery only · recommended</option><option value="submission">Competition finalization</option></select></label><label className="api-key-field"><span>Research campaign</span><select value={campaignId} onChange={(event) => setCampaignId(event.target.value as CampaignId)} disabled={starting || !canStart}><option value="standard">Adaptive research plans · recommended</option><option value="objective_temporal_50">Legacy objective + history campaign · 50 max</option></select></label><label className="api-key-field"><span>DeepSeek API key</span><input type="password" name="deepseek-api-key" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="Paste your API key" autoComplete="off" autoCapitalize="none" spellCheck={false} autoFocus required disabled={starting || !canStart} /><small>The key is used only for this launch. It is not saved in browser storage, run metadata, or API responses.</small></label>{!canStart && <div className="credential-note">A script-managed live run is already active. Open the latest run to monitor it.</div>}<div className="modal-actions"><button type="button" className="cancel-button" onClick={() => { setApiKey(''); setConfirmStart(false); }} disabled={starting || !canStart}>Cancel</button><button type="submit" className="start-button modal-start" disabled={starting || !canStart || !apiKey.trim()}>{starting ? 'Launching…' : runMode === 'discovery' ? 'Start discovery run' : 'Start submission run'}</button></div></form></section></div>}
     {confirmStop && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !stopping) setConfirmStop(null); }}><section className="start-modal stop-modal" role="dialog" aria-modal="true" aria-labelledby="stop-title"><form onSubmit={(event) => { event.preventDefault(); void stop(confirmStop); }}><span className="modal-icon stop-icon">■</span><p className="eyebrow">Interrupt live workflow</p><h2 id="stop-title">Stop this run?</h2><p>This interrupts the controller and active worker for <code>{confirmStop}</code>. Durable ledger evidence is preserved, but the run is not finalized and may not be resumable from its current phase.</p><div className="stop-warning"><strong>No result will be fabricated.</strong><span>The dashboard will mark the operational run interrupted after its process exits.</span></div><div className="modal-actions"><button type="button" className="cancel-button" onClick={() => setConfirmStop(null)} disabled={stopping}>Keep running</button><button type="submit" className="stop-button modal-stop" disabled={stopping}>{stopping ? 'Stopping…' : 'Stop this run'}</button></div></form></section></div>}
   </main>;
 }

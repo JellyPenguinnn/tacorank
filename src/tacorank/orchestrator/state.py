@@ -34,6 +34,7 @@ class ExperimentStatus(str, Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     PRUNED = "pruned"
+    RETAINED = "retained"
     INVALID = "invalid"
 
 
@@ -88,6 +89,7 @@ class RunState:
     convergence_epsilon: float = 0.002
     convergence_patience: int = 3
     max_experiments: int = 0
+    run_mode: str = "submission"
     parallel_directions: int = 1
     synthesize_parallel_improvements: bool = True
     wall_time_limit_seconds: int = 0
