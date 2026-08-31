@@ -7,8 +7,8 @@
 Replace the served score with a small-capacity LambdaRank GBDT whose inputs
 are three signal classes the FM parent literally cannot see:
 
-1. **Causal per-impression history** — for each row, aggregates of that
-   user's interactions strictly before the row's `time_ms`: previous
+1. **Causal per-impression history** — for each TRAINING row, aggregates of
+   that user's TRAINING interactions strictly before the row's `time_ms`: previous
    long_view of this exact video, rolling mean of the last 5 and last 20
    long_views, running user rate, running user-by-author rate, position
    within the current session (a >30-minute gap in `time_ms` starts a new
@@ -17,7 +17,10 @@ are three signal classes the FM parent literally cannot see:
    the sibling lab study this signal class alone broke a long tabular
    plateau, worth about +0.005 primary. Score rows all fall after the
    training window, so their history state is the user's state at the end
-   of the train split.
+   of the train split — computed from TRAIN rows only. Never let any
+   score-population row (even unlabeled) enter any aggregate, count,
+   session state, or encoding: features must be identical whether or not
+   the score file exists.
 2. **Leave-one-out target encodings** from the training window: video and
    author long_view rates (subtract the row's own label inside the window;
    plain aggregates for score rows), a user-by-duration-bucket rate, and a

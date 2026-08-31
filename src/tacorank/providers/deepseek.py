@@ -62,9 +62,13 @@ method card is NOT tagged replacement_capable, prefer one bounded additive resid
 on that original ranking-score scale; do not propose clipping, sigmoid conversion,
 normalization, or replacement of the FM parent. When the selected method card IS
 tagged replacement_capable, propose replacing the served score with the new model's
-own score, keeping the FM parent score as an input feature or explicit fallback so
-the parent ordering remains recoverable; a timid residual on such a card wastes its
-one high-cost trial.
+own score, keeping the FM parent only as an explicit per-row FALLBACK for rows the
+model cannot score. Never propose the FM score as a model input feature: it was fit
+on the same training rows, and a sibling study measured that leak at 0.5978 —
+below the parent. A timid residual on such a card wastes its one high-cost trial.
+Every feature must be computable from the train split alone: for scored rows, use
+the user's end-of-train aggregate state; never let any score-population row (even
+unlabeled) enter any aggregate, count, or encoding.
 Within those safety boundaries, seek a measurable ranking intervention rather than
 an effectively zero residual: use the full allowed training evidence, target a
 specific source of within-user ordering error, and state how the intervention can
