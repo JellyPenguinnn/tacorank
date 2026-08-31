@@ -1050,8 +1050,18 @@ class SearchPolicy:
                         ),
                     )
                 )
+            # Continue the branch's own family first. Sorting recently used
+            # families to the back spread the search across seven families in
+            # fourteen experiments and left every direction shallow, which is
+            # the opposite of the depth-first traversal the playbook
+            # specifies. A family is exhausted for a parent once its cards are
+            # spent, so preferring it here ends the direction on evidence
+            # rather than on a diversity heuristic. Recency still breaks ties
+            # between the remaining families so the search cannot stall on one
+            # exhausted alternative.
             depth.sort(
                 key=lambda choice: (
+                    choice.family != parent.family,
                     choice.family in recent,
                     allowed.index(choice.family),
                 )
