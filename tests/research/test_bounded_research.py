@@ -199,3 +199,30 @@ def test_bounded_research_accounts_usage_on_exhaustion(planner_context):
     assert result.reason_code == "MALFORMED_RESEARCH_TURN"
     assert result.resource_delta.llm_input_tokens == 31
     assert result.resource_delta.llm_output_tokens == 7
+
+
+def test_bounded_research_normalizes_final_fields_from_current_plan(
+    planner_context,
+):
+    class NestedEnvelopeProvider(MockResearchProvider):
+        async def research_turn(self, request):
+            choice = request.legal_choices[0]
+            return {
+                "action": "finalize_plan",
+                "confidence": 0.5,
+                "conservative_parameter_guidance": {
+                    "default_setting": "one conservative setting",
+                },
+                "spec": _proposal(planner_context, choice),
+            }
+
+    planner = ResearchPlanner(
+        NestedEnvelopeProvider(None),
+        research_agent_mode="bounded_react",
+    )
+    result = asyncio.run(
+        planner.propose_parallel_direction(planner_context, 0, 1)
+    )
+
+    assert result.action.value == "propose"
+    assert result.selected_action_id is not None

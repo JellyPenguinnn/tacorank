@@ -348,6 +348,74 @@ class ResearchPlanner:
             output = {**output, **updates}
         return output
 
+    @staticmethod
+    def _normalize_research_turn_envelope(
+        raw_turn: Any,
+        *,
+        context: Any,
+        selected_choice: PolicyChoice,
+        legal_choices: tuple[PolicyChoice, ...],
+        observations: list[Any],
+    ) -> Any:
+        """Fill only safe final-envelope fields from the same proposed plan.
+
+        DeepSeek sometimes returns the candidate object correctly but places its
+        duplicated research claims inside ``spec``.  The controller still owns
+        legality and evidence checks; this adapter only copies fields that are
+        already present in the current-run response or context.
+        """
+
+        if not isinstance(raw_turn, Mapping):
+            return raw_turn
+        if raw_turn.get("action") not in {
+            ResearchTurnAction.FINALIZE_PLAN,
+            ResearchTurnAction.FINALIZE_PLAN.value,
+        }:
+            return raw_turn
+
+        value = dict(raw_turn)
+        raw_spec = value.get("spec") or value.get("experiment_spec")
+        if not isinstance(raw_spec, Mapping):
+            return value
+        if "spec" not in value:
+            value["spec"] = dict(raw_spec)
+
+        def copy_if_missing(field: str, *spec_fields: str) -> None:
+            if value.get(field) is not None:
+                return
+            for spec_field in spec_fields:
+                candidate = raw_spec.get(spec_field)
+                if candidate is not None:
+                    value[field] = candidate
+                    return
+
+        copy_if_missing("claim", "claim", "change_summary", "hypothesis")
+        copy_if_missing("hypothesis", "hypothesis")
+        copy_if_missing("expected_mechanism", "expected_mechanism")
+        copy_if_missing("success_criterion", "success_criterion", "success_criteria")
+        copy_if_missing("falsification_condition", "falsification_condition")
+
+        if value.get("selected_action_id") is None and len(legal_choices) == 1:
+            value["selected_action_id"] = selected_choice.choice_id
+
+        if not value.get("evidence_event_ids"):
+            evidence = raw_spec.get("evidence_event_ids")
+            if not isinstance(evidence, (list, tuple)) or not evidence:
+                evidence = _get(context, "source_event_ids", []) or []
+            if not evidence:
+                evidence = [
+                    event_id
+                    for observation in observations
+                    for event_id in (_get(observation, "source_event_ids", []) or [])
+                ]
+            value["evidence_event_ids"] = list(dict.fromkeys(str(item) for item in evidence))
+
+        if not value.get("conservative_parameter_guidance"):
+            guidance = raw_spec.get("conservative_parameter_guidance")
+            if isinstance(guidance, Mapping) and guidance:
+                value["conservative_parameter_guidance"] = dict(guidance)
+        return value
+
     async def _propose_bounded_react(
         self,
         context: Any,
@@ -422,6 +490,13 @@ class ResearchPlanner:
                         "RESEARCH_PROVIDER_PROTOCOL",
                         "The bounded research provider did not return a usable JSON turn after its repair attempt.",
                     )
+                raw_turn = self._normalize_research_turn_envelope(
+                    raw_turn,
+                    context=context,
+                    selected_choice=selected_choice,
+                    legal_choices=legal_choices,
+                    observations=observations,
+                )
                 try:
                     turn = ResearchTurn.model_validate(raw_turn)
                 except Exception as error:

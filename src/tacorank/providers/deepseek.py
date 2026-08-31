@@ -745,6 +745,9 @@ class DeepSeekResearchProvider:
                     "success_criterion": "observable validation criterion",
                     "falsification_condition": "observable failure condition",
                     "confidence": "number from 0 to 1",
+                    "evidence_event_ids": [
+                        "one or more exact IDs copied from context or observations"
+                    ],
                     "conservative_parameter_guidance": {
                         "default_setting": "one conservative fixed configuration",
                         "single_parameter_sensitivity": {
@@ -755,11 +758,19 @@ class DeepSeekResearchProvider:
                     },
                     "spec": "one candidate plan object, no implementation paths",
                 },
+                "finalize_envelope_rule": (
+                    "Put selected_action_id, claim, hypothesis, expected_mechanism, "
+                    "success_criterion, falsification_condition, confidence, "
+                    "evidence_event_ids, and conservative_parameter_guidance at "
+                    "the top level of the final turn. The spec is a separate nested "
+                    "candidate object and does not replace those top-level fields."
+                ),
                 "turn_rules": [
                     "Return one JSON object only.",
                     "For a tool turn, include only the action and bounded IDs/query.",
                     "For finalize_plan, include every finalize_schema field and a complete spec.",
                     "conservative_parameter_guidance must be a non-empty JSON object, never a string.",
+                    "evidence_event_ids must copy exact current-run IDs; never invent placeholders.",
                     "If repair_hint is present, correct that issue before choosing the next action.",
                 ],
             },
