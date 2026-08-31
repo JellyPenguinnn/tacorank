@@ -728,6 +728,51 @@ def _soft_prune_choice(
     return None
 
 
+def _member_ensemble_choice(
+    context: Any,
+    eligible: Sequence[ExperimentNodeView],
+    parent: ExperimentNodeView,
+) -> PolicyChoice | None:
+    """Propose a member-combining ensemble from accepted frontier nodes.
+
+    The soft-result route only reaches the residual ensemble card. Cards
+    that combine ACCEPTED members (per-user z-blend) need a route that can
+    name those members: combine the depth-first parent with the other
+    accepted non-baseline frontier nodes.
+    """
+
+    members = tuple(
+        node.experiment_id
+        for node in eligible
+        if node.experiment_id
+        not in (parent.experiment_id, "baseline", None)
+    )
+    if not members:
+        return None
+    card = _method_for_family(
+        context,
+        "ensemble",
+        preferred="ensemble_zblend_diverse",
+        parent_experiment_id=parent.experiment_id,
+    )
+    if card is None:
+        return None
+    components = members[:2]
+    return _proposal(
+        parent=parent,
+        family="ensemble",
+        card=card,
+        phase="ensemble",
+        reason_code="CONFIRMED_MEMBER_ZBLEND",
+        reason=(
+            "Combine trusted parent %s with confirmed diverse members %s by "
+            "per-user z-scored equal-weight blending."
+            % (parent.experiment_id, ", ".join(components))
+        ),
+        component_experiment_ids=components,
+    )
+
+
 def _playbook_choice(
     context: Any,
     eligible: list[ExperimentNodeView],
@@ -1109,6 +1154,13 @@ class SearchPolicy:
         for parent in frontier:
             depth: list[PolicyChoice] = []
             for family in allowed:
+                if family == "ensemble":
+                    choice = _member_ensemble_choice(
+                        context, eligible, parent
+                    )
+                    if choice is not None:
+                        depth.append(choice)
+                    continue
                 card = _method_for_family(
                     context,
                     family,
