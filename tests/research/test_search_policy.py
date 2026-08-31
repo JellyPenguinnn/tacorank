@@ -198,6 +198,17 @@ def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
         parent_delta=None,
         method_card_ids=["objective_listwise_user_softmax"],
     )
+    # The branch is only exhausted once every objective card has been spent on
+    # it. The family gained objective_lambdarank_ndcg, so leaving it unattempted
+    # would test continuation rather than backtracking.
+    lambdarank = make_summary(
+        "exp_0004",
+        parent_experiment_id="exp_0001",
+        family="objective",
+        parent_eligible=False,
+        parent_delta=None,
+        method_card_ids=["objective_lambdarank_ndcg"],
+    )
     contract = SimpleNamespace(**vars(planner_context.contract_summary))
     contract.allowed_families = ["objective"]
     context = SimpleNamespace(
@@ -205,7 +216,7 @@ def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
         baseline=root,
         current_best=best,
         eligible_frontier=[root, best],
-        family_history=[best, pairwise, listwise],
+        family_history=[best, pairwise, listwise, lambdarank],
         method_cards=planner_context.method_cards,
         playbook=planner_context.playbook,
     )
@@ -665,7 +676,11 @@ def test_playbook_refines_meaningful_pairwise_no_gain_in_family(planner_context)
 
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.family == "objective"
-    assert choice.method_card_id == "objective_listwise_user_softmax"
+    # A generic no-gain refinement follows method_order, which now offers the
+    # metric-aligned objective before listwise. The specific
+    # pairwise_gauc_up_ndcg_down rule still routes to listwise directly,
+    # because it names the card rather than taking the ordered next one.
+    assert choice.method_card_id == "objective_lambdarank_ndcg"
 
 
 def test_directionally_positive_parent_prevents_premature_search_stop(

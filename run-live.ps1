@@ -40,7 +40,7 @@
 param(
     [string]$RunId = ("run_{0}" -f (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")),
     [int]$MaxExperiments = 15,
-    [string[]]$Families = @("model", "temporal_history", "duration_bias", "ensemble"),
+    [string[]]$Families = @("model", "objective", "temporal_history", "duration_bias", "ensemble"),
     [string]$EnvFile = "..\.env",
     # Where per-run Trae runtimes are created. The coding worker refuses to
     # start if a .env is reachable from the runtime root upwards, so keeping
