@@ -27,7 +27,12 @@ from .coding import (
     TRAE_STATELESS_DOCKER_MARKER,
     hash_trae_runtime_package,
 )
-from .config import PRODUCTION_TARGET_INTERFACE_EXCERPTS
+from .config import (
+    DEFAULT_CODING_STEP_LIMIT,
+    DEFAULT_REPAIR_STEP_LIMIT,
+    DEFAULT_SOLUTION_REVISION_STEP_LIMIT,
+    PRODUCTION_TARGET_INTERFACE_EXCERPTS,
+)
 from .docker_host import normalize_local_docker_host
 from .evaluation.proxy import split_validation_indices
 
@@ -69,9 +74,17 @@ def setup_trae_deployment(
     runtime_directory: Path,
     python312: Path,
     docker_executable: Path,
+    coding_step_limit: int = DEFAULT_CODING_STEP_LIMIT,
+    repair_step_limit: int = DEFAULT_REPAIR_STEP_LIMIT,
+    solution_revision_step_limit: int = DEFAULT_SOLUTION_REVISION_STEP_LIMIT,
 ) -> Mapping[str, Any]:
     """Prepare only the production Trae coding path, without benchmark data."""
 
+    _validate_coding_limits(
+        coding_step_limit,
+        repair_step_limit,
+        solution_revision_step_limit,
+    )
     root = Path(repository_root).resolve(strict=True)
     deployment = _new_directory_inside(root, deployment_directory)
     runtime = _new_external_directory(root, runtime_directory)
@@ -88,7 +101,13 @@ def setup_trae_deployment(
 
     runtime.mkdir(parents=True, exist_ok=False)
     deployment.mkdir(parents=True, exist_ok=False)
-    assets = _prepare_trae_runtime(root, runtime, python, docker)
+    assets = _prepare_trae_runtime(
+        root,
+        runtime,
+        python,
+        docker,
+        max_steps=coding_step_limit,
+    )
     config_path = deployment / "trae-deployment.json"
     payload = {
         "schema_version": "1.0",
@@ -108,7 +127,7 @@ def setup_trae_deployment(
         ],
 
         "target_interface_excerpts": dict(PRODUCTION_TARGET_INTERFACE_EXCERPTS),
-        "coding_step_limit": 64,
+        "coding_step_limit": coding_step_limit,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
         "data_boundary_sha256": TRAE_ONLY_DATA_BOUNDARY_SHA256,
@@ -120,6 +139,9 @@ def setup_trae_deployment(
             docker=docker,
             docker_host=docker_host,
             image=assets["image"],
+            max_steps_cap=coding_step_limit,
+            repair_step_limit=repair_step_limit,
+            solution_revision_step_limit=solution_revision_step_limit,
         ),
     }
     _write_json_exclusive(config_path, payload)
@@ -143,9 +165,17 @@ def setup_live_deployment(
     docker_executable: Path,
     run_id: str,
     download_data: bool,
+    coding_step_limit: int = DEFAULT_CODING_STEP_LIMIT,
+    repair_step_limit: int = DEFAULT_REPAIR_STEP_LIMIT,
+    solution_revision_step_limit: int = DEFAULT_SOLUTION_REVISION_STEP_LIMIT,
 ) -> Mapping[str, Any]:
     """Build an exact production deployment and return its generated paths."""
 
+    _validate_coding_limits(
+        coding_step_limit,
+        repair_step_limit,
+        solution_revision_step_limit,
+    )
     root = Path(repository_root).resolve(strict=True)
     deployment = _new_directory_inside(root, deployment_directory)
     runtime = _new_external_directory(root, runtime_directory)
@@ -169,7 +199,13 @@ def setup_live_deployment(
 
     runtime.mkdir(parents=True, exist_ok=False)
     deployment.mkdir(parents=True, exist_ok=False)
-    assets = _prepare_trae_runtime(root, runtime, python, docker)
+    assets = _prepare_trae_runtime(
+        root,
+        runtime,
+        python,
+        docker,
+        max_steps=coding_step_limit,
+    )
     image = str(assets["image"])
     image_environment_sha256 = str(assets["image_environment_sha256"])
     allowed_import_roots = list(assets["allowed_import_roots"])
@@ -196,6 +232,9 @@ def setup_live_deployment(
             docker=docker,
             docker_host=docker_host,
             image=image,
+            max_steps_cap=coding_step_limit,
+            repair_step_limit=repair_step_limit,
+            solution_revision_step_limit=solution_revision_step_limit,
         ),
         "contract_root": str(generated_data["contract_root"]),
         "input_roots": {
@@ -313,7 +352,7 @@ def setup_live_deployment(
         "prediction_change_no_op_threshold": 0.001,
         "max_single_score_fraction": 0.5,
         "target_interface_excerpts": dict(PRODUCTION_TARGET_INTERFACE_EXCERPTS),
-        "coding_step_limit": 64,
+        "coding_step_limit": coding_step_limit,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
         "research_provider": "deepseek",
@@ -356,6 +395,8 @@ def _prepare_trae_runtime(
     runtime: Path,
     python: Path,
     docker: Path,
+    *,
+    max_steps: int = DEFAULT_CODING_STEP_LIMIT,
 ) -> Mapping[str, Any]:
     """Install, compatibility-patch, and attest the reviewed Trae runtime."""
 
@@ -370,7 +411,7 @@ def _prepare_trae_runtime(
     _install_trae_tools(runtime, docker, image, root)
     runtime_identity = _trae_identity(runtime)
     trae_yaml = runtime / "trae-agent.yaml"
-    _write_text_exclusive(trae_yaml, _trae_yaml())
+    _write_text_exclusive(trae_yaml, _trae_yaml(max_steps=max_steps))
     trae_yaml.chmod(0o600)
     return {
         "image": image,
@@ -389,7 +430,15 @@ def _trae_payload(
     docker: Path,
     docker_host: str,
     image: str,
+    max_steps_cap: int = DEFAULT_CODING_STEP_LIMIT,
+    repair_step_limit: int = DEFAULT_REPAIR_STEP_LIMIT,
+    solution_revision_step_limit: int = DEFAULT_SOLUTION_REVISION_STEP_LIMIT,
 ) -> Mapping[str, Any]:
+    _validate_coding_limits(
+        max_steps_cap,
+        repair_step_limit,
+        solution_revision_step_limit,
+    )
     return {
         "command_prefix": [str(runtime_identity["executable"])],
         "trae_version": "0.1.0",
@@ -399,10 +448,10 @@ def _trae_payload(
         "reasoning_effort": "high",
         "config_file": str(trae_yaml),
         "config_sha256": _sha256_file(trae_yaml),
-        "max_steps_cap": 64,
+        "max_steps_cap": max_steps_cap,
         "max_token_cap": None,
         "max_wall_time_seconds_cap": 1800,
-        "repair_step_limit": 20,
+        "repair_step_limit": repair_step_limit,
         "repair_token_limit": None,
         "repair_wall_time_limit_seconds": 1200,
         "repair_allowed_command_ids": ["candidate_smoke"],
@@ -410,7 +459,7 @@ def _trae_payload(
         "solution_verification_timeout_seconds": 120,
         "solution_verification_max_output_tokens": 4096,
         "solution_verification_max_source_bytes": 524288,
-        "solution_revision_step_limit": 32,
+        "solution_revision_step_limit": solution_revision_step_limit,
         "solution_revision_wall_time_limit_seconds": 600,
         "solution_verifier_credential_environment_name": "DEEPSEEK_API_KEY",
         "approved_environment_names": ["DEEPSEEK_API_KEY"],
@@ -755,12 +804,14 @@ def _write_prediction_subset(
             writer.writerow((row_id, user_id, video_id, score))
 
 
-def _trae_yaml() -> str:
+def _trae_yaml(*, max_steps: int = DEFAULT_CODING_STEP_LIMIT) -> str:
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
+        raise DeploymentError("Trae max_steps must be a positive integer")
     return """agents:
   trae_agent:
     enable_lakeview: false
     model: tacorank_coder
-    max_steps: 64
+    max_steps: %d
     tools:
       - str_replace_based_edit_tool
       - task_done
@@ -784,7 +835,28 @@ models:
     top_k: 0
     max_retries: 3
     parallel_tool_calls: false
-"""
+""" % max_steps
+
+
+def _validate_coding_limits(
+    max_steps_cap: int,
+    repair_step_limit: int,
+    solution_revision_step_limit: int,
+) -> None:
+    values = {
+        "coding_step_limit": max_steps_cap,
+        "repair_step_limit": repair_step_limit,
+        "solution_revision_step_limit": solution_revision_step_limit,
+    }
+    for name, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise DeploymentError("%s must be a positive integer" % name)
+    if repair_step_limit > max_steps_cap:
+        raise DeploymentError("repair_step_limit cannot exceed coding_step_limit")
+    if solution_revision_step_limit > max_steps_cap:
+        raise DeploymentError(
+            "solution_revision_step_limit cannot exceed coding_step_limit"
+        )
 
 
 def _install_trae(python: Path, runtime: Path, root: Path) -> None:

@@ -5,7 +5,7 @@ agents:
   trae_agent:
     enable_lakeview: false
     model: tacorank_coder
-    max_steps: 64
+    max_steps: 96
     tools:
       - str_replace_based_edit_tool
       - task_done

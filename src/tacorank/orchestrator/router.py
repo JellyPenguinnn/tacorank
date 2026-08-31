@@ -2024,9 +2024,19 @@ class Harness:
                 # same-commit retry so the recovery projection reaches a
                 # terminal INVALID/NO_OP state before the round is summarized.
                 if action == RecoveryAction.RETRY_SAME_COMMIT:
+                    # The first escaped failure was already recorded at the
+                    # current execution/repair attempt.  Reusing that attempt
+                    # would produce the same idempotency key, so EventStore
+                    # would return the old adapter.failed event and the next
+                    # recovery context would end on recovery.decided (which
+                    # has no typed failure result).  Advance the audit attempt
+                    # for this synthetic exhaustion record.
+                    retry_attempt = max(
+                        1, node.attempt_count, node.repair_count
+                    ) + 1
                     retry_failure = self._record_adapter_failure(
                         experiment_id=spec.experiment_id,
-                        attempt=max(1, node.attempt_count),
+                        attempt=retry_attempt,
                         stage=stage,
                         error=error,
                         causation_event_id=self.events()[-1].event_id,

@@ -60,7 +60,7 @@ approved ExperimentSpec
   -> accepted OutputCheckResult returned to Person 2
 ```
 
-The initial Trae allowance is 64 steps and a controller-requested external repair receives 48; verifier-requested revisions use a separate 32-step allowance while sharing the original coding action's hard wall deadline. Prompts require Trae to call `task_done` immediately after the required edit and one bounded recheck. The verifier receives no protected metrics or hidden labels and cannot issue a Gate A receipt. Gate A independently rejects files outside the exact `ExperimentSpec.target_files` set and imports `solution.candidate:run` in a read-only, network-disabled Docker container before acceptance.
+The initial Trae allowance is 96 steps and a controller-requested external repair receives 48; verifier-requested revisions use a separate 48-step allowance while sharing the original coding action's hard wall deadline. Prompts require Trae to call `task_done` immediately after the required edit and one bounded recheck. The verifier receives no protected metrics or hidden labels and cannot issue a Gate A receipt. Gate A independently rejects files outside the exact `ExperimentSpec.target_files` set and imports `solution.candidate:run` in a read-only, network-disabled Docker container before acceptance.
 
 No execution may consume a raw LLM command. A repaired commit invalidates the earlier receipt and must pass Gate A again.
 

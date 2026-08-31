@@ -38,6 +38,7 @@ from tacorank.schemas import (
     PlannerOutput,
     PatchCheckResult,
     RecoveryAction,
+    RunOutcome,
     SubmissionCheckedPayload,
     TrustVerdict,
     Violation,
@@ -166,6 +167,35 @@ class ConcurrentCodingWorker:
 
     async def repair_patch(self, context, decision):
         return await self.delegate.repair_patch(context, decision)
+
+
+class RepairStepLimitWorker(FakeCodingWorker):
+    """Make the bounded repair-worker failure from the live exp lanes repeatable."""
+
+    async def repair_patch(self, context, decision):
+        raise CodingWorkerError(
+            "TRAE_REPORTED_FAILURE",
+            "Trae trajectory reports an unsuccessful task: maximum steps exceeded",
+        )
+
+
+class TwoLaneCodeErrorRunner(FakeExecutionRunner):
+    """Return candidate-scoped code errors while one sibling runs normally."""
+
+    async def run(self, request, observer):
+        result = await super().run(request, observer)
+        if request.experiment_id in {"exp_002", "exp_003"}:
+            return result.model_copy(
+                update={
+                    "outcome": RunOutcome.CODE_ERROR,
+                    "exit_code": 1,
+                    "error_class": "ValueError",
+                    "error_fingerprint": "e" * 64,
+                    "error_summary": "candidate code failed in smoke execution",
+                    "prediction_artifact": None,
+                }
+            )
+        return result
 
 
 class SameMechanismReimplementationPlanner:
@@ -432,6 +462,52 @@ def test_parallel_round_quarantines_pre_coder_lane_failure(
     )
 
 
+def test_parallel_round_quarantines_repair_worker_failure(
+    harness, baseline_evaluation
+):
+    harness.config = harness.config.model_copy(
+        update={
+            "max_experiments": 10,
+            "parallel_directions": 3,
+            "parallel_schedule": [3, 3, 2],
+            "research_agent_mode": "bounded_react",
+            "synthesize_parallel_improvements": False,
+        }
+    )
+    harness.planner = ParallelPlanner(harness.config.baseline_commit_sha)
+    harness.coding_worker = RepairStepLimitWorker(
+        harness.event_store.artifact_store
+    )
+    harness.runner = TwoLaneCodeErrorRunner(harness.event_store.artifact_store)
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+    state = asyncio.run(harness.run_parallel_round())
+
+    assert state.stop_reason_code is None
+    assert state.experiments["exp_002"].status == ExperimentStatus.INVALID
+    assert state.experiments["exp_001"].status == ExperimentStatus.ACCEPTED
+    assert state.experiments["exp_003"].status == ExperimentStatus.INVALID
+    failures = [
+        event
+        for event in harness.events()
+        if event.event_type == EventType.ADAPTER_FAILED
+    ]
+    for experiment_id in ("exp_002", "exp_003"):
+        assert [
+            event.payload.result.attempt
+            for event in failures
+            if event.payload.result.experiment_id == experiment_id
+        ] == [1, 2]
+    assert any(
+        event.payload.result.experiment_id == "exp_002"
+        and event.payload.result.error_class == "TRAE_REPORTED_FAILURE"
+        for event in failures
+    )
+    assert not any(
+        event.event_type == EventType.RUN_STOPPED for event in harness.events()
+    )
+
+
 class NoOpEvaluator(FakeEvaluator):
     """Return a structurally valid evaluation with unchanged predictions."""
 
@@ -485,7 +561,7 @@ class ExhaustedNoOpRepairingCodingWorker(FakeCodingWorker):
     async def repair_patch(self, context, decision):
         raise CodingWorkerError(
             "TRAE_STEP_LIMIT_EXCEEDED",
-            "Trae exhausted the bounded 20-step no-op repair task",
+            "Trae exhausted the bounded 48-step no-op repair task",
         )
 
 

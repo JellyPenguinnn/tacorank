@@ -205,6 +205,21 @@ def build_parser() -> argparse.ArgumentParser:
     setup_live.add_argument("--docker", type=Path)
     setup_live.add_argument("--run-id", default="run_001")
     setup_live.add_argument("--download-data", action="store_true")
+    setup_live.add_argument(
+        "--coding-step-limit",
+        type=int,
+        help="maximum Trae steps for an initial coding task (default: 96)",
+    )
+    setup_live.add_argument(
+        "--repair-step-limit",
+        type=int,
+        help="maximum Trae steps for a bounded repair task (default: 48)",
+    )
+    setup_live.add_argument(
+        "--solution-revision-step-limit",
+        type=int,
+        help="maximum Trae steps for verifier-requested revisions (default: 48)",
+    )
 
     setup_trae = commands.add_parser(
         "setup-trae",
@@ -217,6 +232,9 @@ def build_parser() -> argparse.ArgumentParser:
     setup_trae.add_argument("--runtime-dir", type=Path)
     setup_trae.add_argument("--python312", type=Path)
     setup_trae.add_argument("--docker", type=Path)
+    setup_trae.add_argument("--coding-step-limit", type=int)
+    setup_trae.add_argument("--repair-step-limit", type=int)
+    setup_trae.add_argument("--solution-revision-step-limit", type=int)
 
     trae_preflight = commands.add_parser(
         "trae-preflight",
@@ -274,7 +292,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "setup-live":
-            from .deployment import setup_live_deployment
+            from .deployment import (
+                DEFAULT_CODING_STEP_LIMIT,
+                DEFAULT_REPAIR_STEP_LIMIT,
+                DEFAULT_SOLUTION_REVISION_STEP_LIMIT,
+                setup_live_deployment,
+            )
 
             root = args.repository_root.resolve(strict=True)
             python312 = args.python312 or Path(shutil.which("python3.12") or "python3.12")
@@ -291,12 +314,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 docker_executable=docker,
                 run_id=args.run_id,
                 download_data=args.download_data,
+                coding_step_limit=(
+                    args.coding_step_limit
+                    if args.coding_step_limit is not None
+                    else DEFAULT_CODING_STEP_LIMIT
+                ),
+                repair_step_limit=(
+                    args.repair_step_limit
+                    if args.repair_step_limit is not None
+                    else DEFAULT_REPAIR_STEP_LIMIT
+                ),
+                solution_revision_step_limit=(
+                    args.solution_revision_step_limit
+                    if args.solution_revision_step_limit is not None
+                    else DEFAULT_SOLUTION_REVISION_STEP_LIMIT
+                ),
             )
             print(json.dumps(result, sort_keys=True))
             return 0
 
         if args.command == "setup-trae":
-            from .deployment import setup_trae_deployment
+            from .deployment import (
+                DEFAULT_CODING_STEP_LIMIT,
+                DEFAULT_REPAIR_STEP_LIMIT,
+                DEFAULT_SOLUTION_REVISION_STEP_LIMIT,
+                setup_trae_deployment,
+            )
 
             root = args.repository_root.resolve(strict=True)
             python312 = args.python312 or Path(shutil.which("python3.12") or "python3.12")
@@ -310,6 +353,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 runtime_directory=runtime,
                 python312=python312,
                 docker_executable=docker,
+                coding_step_limit=(
+                    args.coding_step_limit
+                    if args.coding_step_limit is not None
+                    else DEFAULT_CODING_STEP_LIMIT
+                ),
+                repair_step_limit=(
+                    args.repair_step_limit
+                    if args.repair_step_limit is not None
+                    else DEFAULT_REPAIR_STEP_LIMIT
+                ),
+                solution_revision_step_limit=(
+                    args.solution_revision_step_limit
+                    if args.solution_revision_step_limit is not None
+                    else DEFAULT_SOLUTION_REVISION_STEP_LIMIT
+                ),
             )
             print(json.dumps(result, sort_keys=True))
             return 0

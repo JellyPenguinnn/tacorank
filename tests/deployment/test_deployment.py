@@ -551,11 +551,11 @@ def test_generated_trae_yaml_uses_v4_flash() -> None:
     document = deployment_module._trae_yaml()
 
     assert "model: deepseek-v4-flash" in document
-    assert "max_steps: 64" in document
+    assert "max_steps: 96" in document
     assert "deepseek-v4-pro" not in document
 
 
-def test_generated_live_deployment_caps_repair_at_twenty_steps(
+def test_generated_live_deployment_uses_expanded_coding_limits(
     tmp_path: Path, monkeypatch
 ) -> None:
     runtime = tmp_path / "runtime"
@@ -588,9 +588,15 @@ def test_generated_live_deployment_caps_repair_at_twenty_steps(
         docker=docker,
         docker_host="npipe:////./pipe/dockerDesktopLinuxEngine",
         image="sha256:" + "b" * 64,
+        max_steps_cap=128,
+        repair_step_limit=64,
+        solution_revision_step_limit=48,
     )
 
-    assert payload["repair_step_limit"] == 20
+    assert payload["max_steps_cap"] == 128
+    assert payload["repair_step_limit"] == 64
+    assert payload["solution_revision_step_limit"] == 48
+    assert "max_steps: 128" in deployment_module._trae_yaml(max_steps=128)
 
 
 def test_trae_responses_sdk_is_exactly_pinned() -> None:
