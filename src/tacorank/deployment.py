@@ -476,7 +476,10 @@ def setup_live_deployment(
         "convergence_epsilon": 0.002,
         "convergence_patience": 3,
         "max_repairs_per_experiment": 2,
-        "allowed_runtime_adjustments": {},
+        "allowed_runtime_adjustments": {
+            "memory_limit_mb": {"next_value": 14336},
+            "timeout_profile": {"next_value": "extended"},
+        },
         "timeout_profiles": {"standard": 1800, "extended": 2700},
         "max_confirmation_attempts": 2,
         "seed_schedule": [11, 22, 33, 44, 55],

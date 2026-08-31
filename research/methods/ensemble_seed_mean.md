@@ -41,6 +41,15 @@ example invocation.seed plus fixed offsets 100 and 200), z-score each
 member's predictions within each user (population ddof 0), average, and
 emit. No weight tuning, no member selection, deterministic and finite.
 
+## Memory discipline
+
+Train members SEQUENTIALLY inside the candidate: build one member's frame,
+train, predict, then `del` the frame/dataset and `gc.collect()` before the
+next member. Holding two full feature frames simultaneously exceeds the
+container memory limit and the experiment dies on an OOM kill (this killed
+a prior ensemble attempt). Peak memory must stay under a single member's
+footprint plus predictions.
+
 ## Sources
 
 Sibling lab study (lab/PLAYBOOK.md) and run_017_global_repro50 exp_002.

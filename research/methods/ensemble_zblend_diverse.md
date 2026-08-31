@@ -56,6 +56,15 @@ spec, and emit the summed score. Do not tune weights against evaluation
 feedback inside the experiment; a deliberate ablation is a separate
 proposal.
 
+## Memory discipline
+
+Train members SEQUENTIALLY inside the candidate: build one member's frame,
+train, predict, then `del` the frame/dataset and `gc.collect()` before the
+next member. Holding two full feature frames simultaneously exceeds the
+container memory limit and the experiment dies on an OOM kill (this killed
+a prior ensemble attempt). Peak memory must stay under a single member's
+footprint plus predictions.
+
 ## Sources
 
 Sibling lab study measurements (lab/PLAYBOOK.md).
