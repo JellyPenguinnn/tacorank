@@ -74,6 +74,7 @@ from .finalize import (
     baseline_reproduction_event_id,
     candidate_finalization_plan,
 )
+from .state import ExperimentStatus
 from .state_machine import TransitionError
 from .ports import (
     CodingWorker,
@@ -862,8 +863,13 @@ class Harness:
             failure_event.payload.result,
             experiment_id,
         )
-        # An exception means the normal continuation point is unknown. Even
-        # when policy records a repair/retry action, stop rather than guessing
+        if self._lane_closed_safely(experiment_id):
+            # Recovery closed the experiment in a planner-safe terminal
+            # state; the run continues with the next proposal instead of
+            # stopping for a failure that already cost only one experiment.
+            return self.state()
+        # Otherwise the normal continuation point is unknown. Even when
+        # policy records a repair/retry action, stop rather than guessing
         # which side effects completed. Resume can inspect the durable evidence.
         self.stop(
             StopDecision(
@@ -954,11 +960,18 @@ class Harness:
         except _RepairWorkerUnavailable as failure:
             # The repair worker failure and its recovery decision are already
             # in the ledger. Honor the decided action without re-deciding:
-            # planning continues for return_to_planner; every other action
-            # keeps the conservative safe stop, because a mid-fidelity
-            # abandon without a terminal decision can deadlock the planner.
+            # planning continues for return_to_planner, or whenever recovery
+            # left the experiment in a planner-safe terminal state; a
+            # mid-fidelity abandon that left no terminal state keeps the
+            # conservative safe stop, because it can deadlock the planner.
             if failure.action == RecoveryAction.RETURN_TO_PLANNER:
                 return self.state()
+            state = self.state()
+            if (
+                state.active_experiment_id
+                and self._lane_closed_safely(state.active_experiment_id)
+            ):
+                return state
             self.stop(
                 StopDecision(
                     True,
@@ -2073,6 +2086,11 @@ class Harness:
                 failure_event.payload.result,
                 spec.experiment_id,
             )
+            if self._lane_closed_safely(spec.experiment_id):
+                # Recovery left this lane's experiment in a terminal state the
+                # planner can branch past, so one failed lane costs one
+                # experiment, not the whole run.
+                return self.state()
             if self._pending_parallel_stop is None:
                 self._pending_parallel_stop = StopDecision(
                     True,
@@ -2081,6 +2099,22 @@ class Harness:
                     % (stage, action.value),
                 )
             return self.state()
+
+    _SAFE_TERMINAL_STATUSES = frozenset(
+        {
+            ExperimentStatus.INVALID,
+            ExperimentStatus.NO_OP,
+            ExperimentStatus.ACCEPTED,
+            ExperimentStatus.REJECTED,
+            ExperimentStatus.PRUNED,
+        }
+    )
+
+    def _lane_closed_safely(self, experiment_id: str) -> bool:
+        """Whether recovery left the experiment planner-safe to branch past."""
+
+        node = self.state().experiments.get(experiment_id)
+        return node is not None and node.status in self._SAFE_TERMINAL_STATUSES
 
     @staticmethod
     def _event_experiment_id(event: Event) -> Optional[str]:
