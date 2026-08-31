@@ -1155,8 +1155,10 @@ class EvaluationResult(StrictModel):
                     "seed evidence events"
                 )
             if self.trust.stability in (Stability.CONFIRMED, Stability.UNSTABLE):
+                # Keep this floor equal to evaluation.trust.TrustConfig
+                # .required_seed_count: the policy confirms on two seeds.
                 if (
-                    self.trust.seed_count < 3
+                    self.trust.seed_count < 2
                     or self.trust.seed_mean is None
                     or self.trust.seed_stderr is None
                 ):
