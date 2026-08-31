@@ -47,8 +47,8 @@ the outcome policy explicitly requests refinement or deepening.
     "multitask": ["multitask_single_auxiliary"],
     "duration_bias": ["duration_bias_quantile_deconfounded", "duration_bias_censored_watch_time"],
     "features": ["features_list_context_relative", "temporal_drift_past_only"],
-    "model": ["model_catboost_yetirank", "model_lgbm_causal_history", "model_lgbm_lambdarank_blend", "model_compact_ranker", "model_stacked_cross_residual"],
-    "ensemble": ["ensemble_zblend_diverse", "ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
+    "model": ["model_lgbm_causal_history", "model_lgbm_xendcg", "model_lgbm_lambdarank_blend", "model_compact_ranker", "model_stacked_cross_residual"],
+    "ensemble": ["ensemble_zblend_diverse", "ensemble_seed_mean", "ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]
   }
 }
@@ -61,15 +61,18 @@ below explains the evidence semantics and research rationale for humans.
 `model` leads the family order deliberately: fourteen bounded additive
 residual experiments in run_20260831T_v4 all stayed within ±0.005 of the FM
 parent (spearman 0.988), so the remaining headroom requires new signal
-classes, not new knobs. `model_catboost_yetirank` goes first — the strongest
-single model in the sibling lab study on this exact data (lab/PLAYBOOK.md;
-0.6120 test), riding the causal feature frame that study measured at
-0.6056–0.6122 valid primary versus the 0.6016 FM parent — with
-`model_lgbm_causal_history` next as the architecturally diverse LightGBM
-member on the same frame, then the harness-proven
-`model_lgbm_lambdarank_blend` (+0.0023 in run_017_global_repro50).
-`ensemble_zblend_diverse` leads the ensemble family (0.6172 valid there when
-members are architecturally diverse).
+classes, not new knobs. `model_lgbm_causal_history` goes first — the causal
+feature frame the sibling lab study (lab/PLAYBOOK.md) measured at
+0.6056–0.6122 valid primary versus the 0.6016 FM parent, restricted here to
+train-split-only aggregates — then `model_lgbm_xendcg` (that study's best
+single number, 0.6133 valid, and a diverse loss shape for blending), then
+the harness-proven `model_lgbm_lambdarank_blend` (+0.0023 in
+run_017_global_repro50). `ensemble_zblend_diverse` leads the ensemble
+family (0.6172 valid there when members are diverse) with
+`ensemble_seed_mean` as the one-member fallback (+0.001).
+`model_catboost_yetirank` is retired known_negative: direct team
+measurement showed it matches the FM baseline once features obey the
+train-split-only rule.
 
 Measured dead ends from the same study — do not re-walk them: FM score as a
 plain input feature (0.5978, in-sample leak; `model_gbdt_stack` is retired

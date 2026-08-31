@@ -38,13 +38,14 @@ DEFAULT_METHOD_ORDER = {
     "duration_bias": ("duration_bias_censored_watch_time",),
     "features": ("temporal_drift_past_only",),
     "model": (
-        "model_catboost_yetirank",
         "model_lgbm_causal_history",
+        "model_lgbm_xendcg",
         "model_lgbm_lambdarank_blend",
         "model_compact_ranker",
     ),
     "ensemble": (
         "ensemble_zblend_diverse",
+        "ensemble_seed_mean",
         "ensemble_diverse_residual_candidate",
         "ensemble_confirmed_members",
     ),
@@ -224,19 +225,38 @@ def _method_for_family(
     return eligible[remaining[0]] if remaining else None
 
 
+# A method attempt only blocks re-selection when it produced scientific
+# information. An experiment that died on an implementation failure (invalid,
+# abandoned, no-op) never tested its mechanism, so the method stays available
+# for re-exploration instead of the run stopping on method exhaustion. The
+# ledger's duplicate guard caps how many times one method/parent pair may be
+# re-tried.
+_INFORMATIVE_DECISIONS = {"accept", "prune", "reject"}
+
+
 def _attempted_methods_for_parent(
     context: Any, parent_experiment_id: str | None
 ) -> set[str]:
-    return {
-        method_id
-        for summary in as_list(get_value(context, "family_history", None))
-        if parent_experiment_id is not None
-        and str(get_value(summary, "parent_experiment_id", ""))
-        == parent_experiment_id
-        for method_id in map(
-            str, as_list(get_value(summary, "method_card_ids", None))
+    attempted: set[str] = set()
+    for summary in as_list(get_value(context, "family_history", None)):
+        if parent_experiment_id is None:
+            continue
+        if (
+            str(get_value(summary, "parent_experiment_id", ""))
+            != parent_experiment_id
+        ):
+            continue
+        decision = _normalized(get_value(summary, "decision", None))
+        verdict = _normalized(get_value(summary, "trust_verdict", None))
+        if decision not in _INFORMATIVE_DECISIONS and verdict not in (
+            "negative",
+            "redundant",
+        ):
+            continue
+        attempted.update(
+            map(str, as_list(get_value(summary, "method_card_ids", None)))
         )
-    }
+    return attempted
 
 
 def _ordered_eligible_method_cards(context: Any, family: str) -> tuple[Any, ...]:

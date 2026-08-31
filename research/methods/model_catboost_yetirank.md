@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"model_catboost_yetirank","family":"model","status":"candidate","tags":["catboost","yetirank","categorical","replacement_capable","model"],"cost_tier":"medium","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"sources":["https://arxiv.org/abs/1706.09516"]}
+{"schema_version":"1.0","method_id":"model_catboost_yetirank","family":"model","status":"known_negative","tags":["catboost","yetirank","categorical","replacement_capable","model"],"cost_tier":"medium","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"sources":["https://arxiv.org/abs/1706.09516"]}
 ```
 
 ## Mechanism
@@ -37,6 +37,11 @@ No trusted improvement over the LightGBM causal-history parent standalone
 AND no gain when blended with it.
 
 ## Do not use when
+
+Retired by direct team measurement: with the train-split-only feature rule
+(no rolling state over score-period rows), CatBoost YetiRank on this frame
+scored the same as the FM baseline. The sibling study's 0.6120 depended on
+eval-window rolling history this contract forbids. Do not propose.
 
 The wall-clock budget cannot fit its training (about 7 minutes on CPU in
 the sibling study); do not shrink training to make it fit.

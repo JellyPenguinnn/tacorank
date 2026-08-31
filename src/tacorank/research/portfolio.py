@@ -153,6 +153,7 @@ def default_portfolio() -> ExperimentPortfolio:
             MethodCard(
                 method_id="model_catboost_yetirank",
                 family="model",
+                status="known_negative",
                 summary="CatBoost YetiRank on the causal feature frame; strongest single model in the sibling study.",
                 tags=("catboost", "yetirank", "categorical", "replacement_capable", "model"),
                 cost_tier="medium",

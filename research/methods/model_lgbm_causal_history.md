@@ -30,6 +30,14 @@ are three signal classes the FM parent literally cannot see:
    sibling study; play_progress, complete/valid/like/share rate and log
    show/play counts also earn gain. Join on video_id.
 
+Measured on this contract's actual train view (1,141,112 rows): the tab
+field alone separates long_view rates from 4.2% (tab 0) to 48.9% (tab 4);
+prior-click history correlates 0.76 with long_view and play-ratio history
+0.57, which is why the h_click and play-ratio features earn gain; 98.4% of
+scored users and 100% of scored videos appear in training, so the
+leave-one-out encodings cover nearly every scored row; the median user has
+31 training rows, feeding the m5/m20 rolling windows.
+
 ## Preconditions
 
 Executable FM parity is verified. train.csv exposes time_ms/hourmin/

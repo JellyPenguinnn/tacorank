@@ -87,6 +87,29 @@ def _authorized_no_op_reimplementation(events: List[Event], state, spec) -> bool
     )
 
 
+def _authorized_failed_attempt_reexploration(state, spec) -> bool:
+    """Allow re-proposing a method whose prior attempts never tested it.
+
+    An experiment abandoned on an implementation failure (INVALID) or closed
+    as a wiring no-op produced no evidence about its mechanism, so the same
+    method/parent pair may be proposed again instead of exhausting the
+    portfolio. Bounded to three total attempts per duplicate key, and never
+    authorized once any attempt reached an informative terminal state.
+    """
+
+    prior = [
+        node
+        for node in state.experiments.values()
+        if node.duplicate_key == spec.duplicate_key
+    ]
+    if not prior or len(prior) >= 3:
+        return False
+    return all(
+        node.status in (ExperimentStatus.INVALID, ExperimentStatus.NO_OP)
+        for node in prior
+    )
+
+
 def _latest_recoverable_failure(events: List[Event], experiment_id: str) -> Optional[Event]:
     for event in reversed(events):
         if event.event_type == EventType.PATCH_CHECKED:
@@ -242,7 +265,8 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         )
         _require(
             not duplicate_exists
-            or _authorized_no_op_reimplementation(events, state, spec),
+            or _authorized_no_op_reimplementation(events, state, spec)
+            or _authorized_failed_attempt_reexploration(state, spec),
             "duplicate experiment proposal",
         )
         if spec.parent_experiment_id:
