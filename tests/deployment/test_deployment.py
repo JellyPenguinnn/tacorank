@@ -138,6 +138,15 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
         "split_validation_indices",
         lambda users: ([0, 2], [1, 3]),
     )
+    monkeypatch.setattr(
+        deployment_module,
+        "_load_extra_log_columns",
+        lambda data: {
+            "train": [("1000", "900", "0", "10")] * len(train),
+            "valid": [("2000", "1000", "1", "20")] * len(valid),
+            "test": [("3000", "1100", "0", "30")] * len(test),
+        },
+    )
 
     def fake_run(args, *, cwd, label, capture_output=False):
         del cwd, label, capture_output

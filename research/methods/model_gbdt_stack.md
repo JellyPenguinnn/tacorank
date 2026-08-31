@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"model_gbdt_stack","family":"model","status":"candidate","tags":["lightgbm","gbdt","stacking","replacement_capable","model"],"cost_tier":"high","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"sources":["https://papers.nips.cc/paper/6907-lightgbm-a-highly-efficient-gradient-boosting-decision-tree","https://arxiv.org/abs/1706.09516"]}
+{"schema_version":"1.0","method_id":"model_gbdt_stack","family":"model","status":"known_negative","tags":["lightgbm","gbdt","stacking","replacement_capable","model"],"cost_tier":"high","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"sources":["https://papers.nips.cc/paper/6907-lightgbm-a-highly-efficient-gradient-boosting-decision-tree","https://arxiv.org/abs/1706.09516"]}
 ```
 
 ## Mechanism
@@ -43,6 +43,11 @@ Spearman correlation with the parent so high (for example above 0.995) that the
 trees learned nothing beyond the FM feature.
 
 ## Do not use when
+
+Measured dead end in the sibling lab study: a GBDT taking the FM score as
+an input feature scored 0.5978 — below the FM parent — because the FM was
+fit on the same training rows and the tree simply memorizes it (an
+in-sample leak, not a stack). Kept for the record; do not propose.
 
 The evaluator, split, or scored population would need to change, or the wall
 clock budget cannot train the boosted model honestly at every fidelity. The

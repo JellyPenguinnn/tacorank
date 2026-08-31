@@ -25,3 +25,4 @@ certifi>=2025.1.31,<2027
 
 # Strict parsing of the reviewed Trae execution-surface configuration
 PyYAML>=6,<7
+catboost>=1.2,<2

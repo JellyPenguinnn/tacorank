@@ -34,11 +34,13 @@ DEFAULT_METHOD_ORDER = {
     "duration_bias": ("duration_bias_censored_watch_time",),
     "features": ("temporal_drift_past_only",),
     "model": (
+        "model_lgbm_causal_history",
+        "model_catboost_yetirank",
         "model_lgbm_lambdarank_blend",
-        "model_gbdt_stack",
         "model_compact_ranker",
     ),
     "ensemble": (
+        "ensemble_zblend_diverse",
         "ensemble_diverse_residual_candidate",
         "ensemble_confirmed_members",
     ),

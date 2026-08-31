@@ -41,6 +41,23 @@ RAW_REQUIRED = (
     "log_standard_4_08_to_4_21_pure.csv",
     "log_standard_4_22_to_5_08_pure.csv",
     "video_features_basic_pure.csv",
+    "video_features_statistic_pure.csv",
+    "user_features_pure.csv",
+)
+
+# Extra per-row log columns exposed to candidates beyond the starter-kit
+# seven. Train rows carry timing plus per-row outcome signals usable ONLY
+# as strictly-past history; score rows carry timing only, because outcome
+# columns do not exist at serve time.
+TRAIN_EXTRA_COLUMNS = ("time_ms", "hourmin", "is_click", "play_time_ms")
+SCORE_EXTRA_COLUMNS = ("time_ms", "hourmin")
+
+# Dataset side files hard-linked into every candidate view. These are
+# organizer-published KuaiRand-Pure files, not external data.
+SIDE_FEATURE_FILES = (
+    "video_features_basic_pure.csv",
+    "video_features_statistic_pure.csv",
+    "user_features_pure.csv",
 )
 TRAE_ONLY_DATA_BOUNDARY_SHA256 = hashlib.sha256(
     b"tacorank-trae-only-no-dataset-v1"
@@ -101,10 +118,18 @@ def setup_trae_deployment(
                 "invocation.input_root and write exactly invocation.output_path as "
                 "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
                 "invocation.seed; return None. train.csv has the exact columns "
-                "date,user_id,video_id,author_id,tab,duration_ms,long_view, where "
-                "date is an integer YYYYMMDD value; "
-                "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
-                "and never exposes long_view. fm_baseline_predictions.csv is the "
+                "date,user_id,video_id,author_id,tab,duration_ms,long_view,"
+                "time_ms,hourmin,is_click,play_time_ms, where date is an integer "
+                "YYYYMMDD value and time_ms is the epoch-millisecond impression "
+                "time; score.csv has row_id,date,user_id,video_id,author_id,tab,"
+                "duration_ms,time_ms,hourmin and never exposes long_view or any "
+                "other outcome column. is_click and play_time_ms are outcomes of "
+                "their own row: use them only as strictly-past history (rows with "
+                "time_ms before the row being scored), never as same-row features, "
+                "or the feature cannot exist at serve time. The input root also "
+                "contains the organizer-published side files "
+                "video_features_basic_pure.csv, video_features_statistic_pure.csv "
+                "and user_features_pure.csv for joins on video_id/user_id. fm_baseline_predictions.csv is the "
                 "setup-verified official FM score for every score.csv row. These are "
                 "unconstrained real-valued ranking scores, not probabilities. Never "
                 "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
@@ -113,7 +138,7 @@ def setup_trae_deployment(
                 "unless the approved hypothesis explicitly replaces the parent. "
                 "The candidate runs in an offline container with no network: the "
                 "importable third-party packages are numpy, pandas, scipy, "
-                "scikit-learn, lightgbm, pydantic, and PyYAML, plus the standard "
+                "scikit-learn, lightgbm, catboost, pydantic, and PyYAML, plus the standard "
                 "library. Importing anything else fails the isolated entrypoint "
                 "import check and rejects the patch. Prefer these implementations "
                 "over hand-rolled numeric code: a hand-written approximation "
@@ -273,6 +298,107 @@ def setup_live_deployment(
             "tab",
             "duration_ms",
             "long_view",
+            # timing and strictly-past history signals on the log rows
+            "time_ms",
+            "hourmin",
+            "is_click",
+            "play_time_ms",
+            "row_id",
+            "score",
+            # video_features_basic_pure.csv
+            "video_type",
+            "upload_dt",
+            "upload_type",
+            "visible_status",
+            "video_duration",
+            "server_width",
+            "server_height",
+            "music_id",
+            "music_type",
+            "tag",
+            # video_features_statistic_pure.csv (organizer-published static
+            # aggregates over the dataset)
+            "counts",
+            "show_cnt",
+            "show_user_num",
+            "play_cnt",
+            "play_user_num",
+            "play_duration",
+            "complete_play_cnt",
+            "complete_play_user_num",
+            "valid_play_cnt",
+            "valid_play_user_num",
+            "long_time_play_cnt",
+            "long_time_play_user_num",
+            "short_time_play_cnt",
+            "short_time_play_user_num",
+            "play_progress",
+            "comment_stay_duration",
+            "like_cnt",
+            "like_user_num",
+            "click_like_cnt",
+            "double_click_cnt",
+            "cancel_like_cnt",
+            "cancel_like_user_num",
+            "comment_cnt",
+            "comment_user_num",
+            "direct_comment_cnt",
+            "reply_comment_cnt",
+            "delete_comment_cnt",
+            "delete_comment_user_num",
+            "comment_like_cnt",
+            "comment_like_user_num",
+            "follow_cnt",
+            "follow_user_num",
+            "cancel_follow_cnt",
+            "cancel_follow_user_num",
+            "share_cnt",
+            "share_user_num",
+            "download_cnt",
+            "download_user_num",
+            "report_cnt",
+            "report_user_num",
+            "reduce_similar_cnt",
+            "reduce_similar_user_num",
+            "collect_cnt",
+            "collect_user_num",
+            "cancel_collect_cnt",
+            "cancel_collect_user_num",
+            "direct_comment_user_num",
+            "reply_comment_user_num",
+            "share_all_cnt",
+            "share_all_user_num",
+            "outsite_share_all_cnt",
+            # user_features_pure.csv
+            "user_active_degree",
+            "is_lowactive_period",
+            "is_live_streamer",
+            "is_video_author",
+            "follow_user_num_range",
+            "fans_user_num",
+            "fans_user_num_range",
+            "friend_user_num",
+            "friend_user_num_range",
+            "register_days",
+            "register_days_range",
+            "onehot_feat0",
+            "onehot_feat1",
+            "onehot_feat2",
+            "onehot_feat3",
+            "onehot_feat4",
+            "onehot_feat5",
+            "onehot_feat6",
+            "onehot_feat7",
+            "onehot_feat8",
+            "onehot_feat9",
+            "onehot_feat10",
+            "onehot_feat11",
+            "onehot_feat12",
+            "onehot_feat13",
+            "onehot_feat14",
+            "onehot_feat15",
+            "onehot_feat16",
+            "onehot_feat17",
         ],
         "protected_columns": ["label"],
         "hidden_path_tokens": ["hidden_labels", "final_labels", "test_labels"],
@@ -347,10 +473,18 @@ def setup_live_deployment(
                 "invocation.input_root and write exactly invocation.output_path as "
                 "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
                 "invocation.seed; return None. train.csv has the exact columns "
-                "date,user_id,video_id,author_id,tab,duration_ms,long_view, where "
-                "date is an integer YYYYMMDD value; "
-                "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
-                "and never exposes long_view. fm_baseline_predictions.csv contains "
+                "date,user_id,video_id,author_id,tab,duration_ms,long_view,"
+                "time_ms,hourmin,is_click,play_time_ms, where date is an integer "
+                "YYYYMMDD value and time_ms is the epoch-millisecond impression "
+                "time; score.csv has row_id,date,user_id,video_id,author_id,tab,"
+                "duration_ms,time_ms,hourmin and never exposes long_view or any "
+                "other outcome column. is_click and play_time_ms are outcomes of "
+                "their own row: use them only as strictly-past history (rows with "
+                "time_ms before the row being scored), never as same-row features, "
+                "or the feature cannot exist at serve time. The input root also "
+                "contains the organizer-published side files "
+                "video_features_basic_pure.csv, video_features_statistic_pure.csv "
+                "and user_features_pure.csv for joins on video_id/user_id. fm_baseline_predictions.csv contains "
                 "the setup-verified official FM score aligned one-to-one with "
                 "score.csv; fm_baseline_predictions.sha256 authenticates it. The "
                 "baseline candidate reproduces these bytes exactly. FM scores are "
@@ -364,7 +498,7 @@ def setup_live_deployment(
                 "feature or fallback. "
                 "The candidate runs in an offline container with no network: the "
                 "importable third-party packages are numpy, pandas, scipy, "
-                "scikit-learn, lightgbm, pydantic, and PyYAML, plus the standard "
+                "scikit-learn, lightgbm, catboost, pydantic, and PyYAML, plus the standard "
                 "library. Importing anything else fails the isolated entrypoint "
                 "import check and rejects the patch. Prefer these implementations "
                 "over hand-rolled numeric code: a hand-written approximation "
@@ -585,8 +719,14 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
 
     common = views / "common"
     common.mkdir(mode=0o700)
+    extra_columns = _load_extra_log_columns(data)
+    for split_name, split_rows in (("train", train), ("valid", valid), ("test", test)):
+        if len(extra_columns[split_name]) != len(split_rows):
+            raise DeploymentError(
+                "raw log columns do not align with the official %s split" % split_name
+            )
     train_path = common / "train.csv"
-    _write_train(train_path, train)
+    _write_train(train_path, train, extra_columns["train"])
     command_directories = {
         "candidate_smoke": views / "candidate-smoke",
         "candidate_proxy": views / "candidate-proxy",
@@ -605,14 +745,25 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
         "candidate_full": baseline_prediction_csvs["full"],
         "candidate_final_infer": baseline_final_prediction_csv,
     }
+    score_extras = {
+        "candidate_smoke": extra_columns["valid"],
+        "candidate_proxy": extra_columns["valid"],
+        "candidate_full": extra_columns["valid"],
+        "candidate_final_infer": extra_columns["test"],
+    }
     for command_id, directory in command_directories.items():
         directory.mkdir(mode=0o700)
         os.link(train_path, directory / "train.csv")
+        for side_name in SIDE_FEATURE_FILES:
+            _copy_exclusive(data / side_name, directory / side_name)
         rows, indices = index_sets[command_id]
+        extras_rows = score_extras[command_id]
         selected: Iterable[Sequence[Any]] = rows
+        selected_extras: Iterable[Sequence[Any]] = extras_rows
         if indices is not None:
             selected = (rows[index] for index in indices)
-        _write_score(directory / "score.csv", selected)
+            selected_extras = (extras_rows[index] for index in indices)
+        _write_score(directory / "score.csv", selected, selected_extras)
         fm_view = directory / "fm_baseline_predictions.csv"
         _copy_exclusive(fm_prediction_sources[command_id], fm_view)
         _write_text_exclusive(
@@ -755,24 +906,75 @@ def _load_official_splits(root: Path, data: Path) -> Mapping[str, Any]:
     return module.load(str(data))
 
 
-def _write_train(path: Path, rows: Sequence[Sequence[Any]]) -> None:
+def _load_extra_log_columns(data: Path) -> Mapping[str, list]:
+    """Extra per-row columns, positionally aligned with the official splits.
+
+    The starter-kit loader reads the two standard logs in a fixed file
+    order, filters by date, and preserves row order, so re-reading the raw
+    logs the same way yields rows aligned one-to-one with each split.
+    """
+
+    split_ranges = {
+        "train": (20220408, 20220421),
+        "valid": (20220422, 20220428),
+        "test": (20220429, 20220508),
+    }
+    out: Dict[str, list] = {name: [] for name in split_ranges}
+    for name in (
+        "log_standard_4_08_to_4_21_pure.csv",
+        "log_standard_4_22_to_5_08_pure.csv",
+    ):
+        with (data / name).open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                date = int(row["date"])
+                for split, (lo, hi) in split_ranges.items():
+                    if lo <= date <= hi:
+                        out[split].append(
+                            (
+                                row["time_ms"],
+                                row["hourmin"],
+                                row["is_click"],
+                                row["play_time_ms"],
+                            )
+                        )
+                        break
+    return out
+
+
+def _write_train(
+    path: Path,
+    rows: Sequence[Sequence[Any]],
+    extras: Sequence[Sequence[Any]],
+) -> None:
+    if len(rows) != len(extras):
+        raise DeploymentError("train extra columns do not align with the official split")
     with _exclusive_csv(path) as handle:
         writer = csv.writer(handle)
         writer.writerow(
-            ("date", "user_id", "video_id", "author_id", "tab", "duration_ms", "long_view")
+            (
+                "date", "user_id", "video_id", "author_id", "tab",
+                "duration_ms", "long_view", *TRAIN_EXTRA_COLUMNS,
+            )
         )
-        for row in rows:
-            writer.writerow(row)
+        for row, extra in zip(rows, extras):
+            writer.writerow((*row, *extra))
 
 
-def _write_score(path: Path, rows: Iterable[Sequence[Any]]) -> None:
+def _write_score(
+    path: Path,
+    rows: Iterable[Sequence[Any]],
+    extras: Iterable[Sequence[Any]],
+) -> None:
     with _exclusive_csv(path) as handle:
         writer = csv.writer(handle)
         writer.writerow(
-            ("row_id", "date", "user_id", "video_id", "author_id", "tab", "duration_ms")
+            (
+                "row_id", "date", "user_id", "video_id", "author_id", "tab",
+                "duration_ms", *SCORE_EXTRA_COLUMNS,
+            )
         )
-        for row_id, row in enumerate(rows):
-            writer.writerow((row_id, *row[:6]))
+        for row_id, (row, extra) in enumerate(zip(rows, extras)):
+            writer.writerow((row_id, *row[:6], extra[0], extra[1]))
 
 
 def _write_population(path: Path, rows: Iterable[Sequence[Any]]) -> None:

@@ -32,6 +32,10 @@ TRAIN_COLUMNS = (
     "tab",
     "duration_ms",
     "long_view",
+    "time_ms",
+    "hourmin",
+    "is_click",
+    "play_time_ms",
 )
 SCORE_COLUMNS = (
     "row_id",
@@ -41,6 +45,8 @@ SCORE_COLUMNS = (
     "author_id",
     "tab",
     "duration_ms",
+    "time_ms",
+    "hourmin",
 )
 ENTITY_COLUMNS = ("user_id", "video_id", "author_id")
 CARDINALITY_COLUMNS = ENTITY_COLUMNS + ("tab",)
