@@ -38,9 +38,9 @@ DEFAULT_METHOD_ORDER = {
     "duration_bias": ("duration_bias_censored_watch_time",),
     "features": ("temporal_drift_past_only",),
     "model": (
+        "model_lgbm_lambdarank_blend",
         "model_lgbm_causal_history",
         "model_lgbm_xendcg",
-        "model_lgbm_lambdarank_blend",
         "model_compact_ranker",
     ),
     "ensemble": (

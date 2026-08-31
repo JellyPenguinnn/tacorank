@@ -47,7 +47,7 @@ the outcome policy explicitly requests refinement or deepening.
     "multitask": ["multitask_single_auxiliary"],
     "duration_bias": ["duration_bias_quantile_deconfounded", "duration_bias_censored_watch_time"],
     "features": ["features_list_context_relative", "temporal_drift_past_only"],
-    "model": ["model_lgbm_causal_history", "model_lgbm_xendcg", "model_lgbm_lambdarank_blend", "model_compact_ranker", "model_stacked_cross_residual"],
+    "model": ["model_lgbm_lambdarank_blend", "model_lgbm_causal_history", "model_lgbm_xendcg", "model_compact_ranker", "model_stacked_cross_residual"],
     "ensemble": ["ensemble_zblend_diverse", "ensemble_seed_mean", "ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]
   }
@@ -61,7 +61,13 @@ below explains the evidence semantics and research rationale for humans.
 `model` leads the family order deliberately: fourteen bounded additive
 residual experiments in run_20260831T_v4 all stayed within ±0.005 of the FM
 parent (spearman 0.988), so the remaining headroom requires new signal
-classes, not new knobs. `model_lgbm_causal_history` goes first — the causal
+classes, not new knobs. Method order inside the model family follows
+measured harness evidence, newest first: `model_lgbm_lambdarank_blend` is
+the only card with repeated accepted full-fidelity gains here (+0.0020 to
++0.0021, best 0.60351); the causal-history and xendcg cards measured below
+the parent as standalone replacements under the train-split-only rule
+(0.6011 and 0.59747 in offline replication) and earn their keep only as
+z-scored blend residuals, so they follow the blend rather than lead it. `model_lgbm_causal_history` goes first — the causal
 feature frame the sibling lab study (lab/PLAYBOOK.md) measured at
 0.6056–0.6122 valid primary versus the 0.6016 FM parent, restricted here to
 train-split-only aggregates — then `model_lgbm_xendcg` (that study's best
