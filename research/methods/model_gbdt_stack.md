@@ -66,7 +66,7 @@ Train one LightGBM model (binary objective on long_view, or lambdarank grouped
 by user) over the permitted raw fields, a small set of strictly past-only
 aggregate features, and the aligned FM parent score as one input feature. Use
 pandas categorical dtypes for user_id, video_id, author_id, and tab so LightGBM
-handles them natively; set deterministic single-threaded parameters and a fixed
+handles them natively; set deterministic parameters with a fixed thread count and a fixed
 seed. Output the model's raw margin score for every scored row on its own
 unconstrained scale — do not sigmoid, clip, normalize, or blend back into the
 parent by hand. For rows whose user or item was never seen in training, the FM
