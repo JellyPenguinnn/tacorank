@@ -43,7 +43,7 @@ before backtracking, rather than probing every research family from baseline.
     "multitask": ["multitask_single_auxiliary"],
     "duration_bias": ["duration_bias_quantile_deconfounded", "duration_bias_censored_watch_time"],
     "features": ["features_list_context_relative", "temporal_drift_past_only"],
-    "model": ["model_lgbm_causal_history", "model_catboost_yetirank", "model_lgbm_lambdarank_blend", "model_compact_ranker", "model_stacked_cross_residual"],
+    "model": ["model_catboost_yetirank", "model_lgbm_causal_history", "model_lgbm_lambdarank_blend", "model_compact_ranker", "model_stacked_cross_residual"],
     "ensemble": ["ensemble_zblend_diverse", "ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]
   }
@@ -57,14 +57,15 @@ below explains the evidence semantics and research rationale for humans.
 `model` leads the family order deliberately: fourteen bounded additive
 residual experiments in run_20260831T_v4 all stayed within ±0.005 of the FM
 parent (spearman 0.988), so the remaining headroom requires new signal
-classes, not new knobs. `model_lgbm_causal_history` goes first — the sibling
-lab study on this exact data (lab/PLAYBOOK.md) measured strictly-past
-per-impression history plus leave-one-out target encodings plus static item
-statistics at 0.6056–0.6122 valid primary versus the 0.6016 FM parent —
-followed by `model_catboost_yetirank` (strongest single model there, 0.6120
-test) and the harness-proven `model_lgbm_lambdarank_blend` (+0.0023 in
-run_017_global_repro50). `ensemble_zblend_diverse` leads the ensemble family
-(0.6172 valid there when members are architecturally diverse).
+classes, not new knobs. `model_catboost_yetirank` goes first — the strongest
+single model in the sibling lab study on this exact data (lab/PLAYBOOK.md;
+0.6120 test), riding the causal feature frame that study measured at
+0.6056–0.6122 valid primary versus the 0.6016 FM parent — with
+`model_lgbm_causal_history` next as the architecturally diverse LightGBM
+member on the same frame, then the harness-proven
+`model_lgbm_lambdarank_blend` (+0.0023 in run_017_global_repro50).
+`ensemble_zblend_diverse` leads the ensemble family (0.6172 valid there when
+members are architecturally diverse).
 
 Measured dead ends from the same study — do not re-walk them: FM score as a
 plain input feature (0.5978, in-sample leak; `model_gbdt_stack` is retired

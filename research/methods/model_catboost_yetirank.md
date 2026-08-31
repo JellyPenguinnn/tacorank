@@ -14,9 +14,11 @@ learning rate 0.05, 245 iterations), beating every LightGBM variant.
 
 ## Preconditions
 
-A causal-history feature frame already exists in the candidate lineage
-(build on the model_lgbm_causal_history parent rather than re-deriving the
-frame), and executable FM parity is verified.
+Executable FM parity is verified. When a causal-history feature frame
+already exists in the candidate lineage, build on that parent; when none
+exists yet, build the frame in this experiment following the
+model_lgbm_causal_history card's mechanism (strictly-past history,
+leave-one-out target encodings, static item statistics).
 
 ## Allowed data
 
@@ -41,7 +43,9 @@ the sibling study); do not shrink training to make it fit.
 
 ## Minimal implementation
 
-Same feature frame and group-per-user construction as the parent; CatBoost
+Same feature frame and group-per-user construction as the
+model_lgbm_causal_history card (build it here if no parent supplies it);
+CatBoost
 parameters measured strong in the sibling study: loss_function YetiRank,
 depth 6, learning_rate 0.05, around 245 iterations (frozen — there is no
 label access for early stopping in this harness), random_seed bound to
