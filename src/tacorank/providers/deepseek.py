@@ -78,8 +78,13 @@ authoritative policy block explicitly selects a replacement-capable method.
 Treat family_history as short-term iteration feedback. It deliberately includes
 negative proxy, no-op, inconclusive, redundant, and suspicious outcomes; weight each
 item by its fidelity, population, decision, stability, integrity, and trust flags.
-Treat active_lessons as separately curated long-term memory. Do not promote an item
-from family_history into a durable belief merely because it appears in the context.
+Treat active_lessons as separately curated memory from this run. Every memory field
+is scoped to the current run; do not import knowledge from another run_id or assume
+that a previous run's result is available. When seed_mean, seed_stderr, and seed_count
+are present, they are the authoritative within-run aggregate for selection. Use that
+aggregate instead of a raw last-seed primary_score, and treat seed_count below three
+as exploratory rather than stable evidence. Do not promote an item from family_history
+into a durable belief merely because it appears in the context.
 Use failure_hypotheses, diagnostic_best_slice, diagnostic_worst_slice, and their
 diagnostic_metrics as actionable cohort evidence. When prior movement is sparse or
 concentrated, do not merely increase residual magnitude; propose a bounded mechanism
@@ -87,7 +92,9 @@ that broadens justified coverage or targets the evidenced weak cohort. When move
 is broad and all protected metrics regress, change the mechanism rather than scaling
 the same residual.
 
-Historical run comparisons are directional evidence, not hyperparameter labels. A
+Historical run comparisons are directional evidence, not hyperparameter labels. In
+this system, the available comparisons are restricted to experiments in the current
+run. A
 single better score or a smaller proxy regression does not establish parameter
 superiority. If proxy and full fidelity disagree, or a candidate misses the improvement
 threshold while remaining within the noise band, treat the result as inconclusive; a
@@ -243,6 +250,9 @@ def _research_summary(value: Any) -> Dict[str, Any]:
         "stability",
         "integrity",
         "trust_flags",
+        "seed_mean",
+        "seed_stderr",
+        "seed_count",
         "failure_hypotheses",
         "diagnostic_limitations",
         "diagnostic_best_slice",

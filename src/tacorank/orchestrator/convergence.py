@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 from ..config import RunConfig
+from ..evaluation.stability import stable_primary_score
 from ..orchestrator.state import RunState
 from ..schemas import (
     Event,
@@ -74,7 +75,7 @@ def convergence_pressure(events: Sequence[Event], config: RunConfig) -> int:
                 and result.trust.verdict == TrustVerdict.ACCEPTED
             ):
                 continue
-            score = result.metric_set.primary_score
+            score = stable_primary_score(result)
             if incumbent is None or score > incumbent + config.convergence_epsilon:
                 incumbent = score
                 non_improving = 0

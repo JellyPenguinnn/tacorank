@@ -12,6 +12,10 @@ from ..config import RunConfig, VerifiedContract
 from ..coding import CodingWorkerError
 from ..coding.redaction import SecretRedactor
 from ..context.builder import ContextBuilder
+from ..evaluation.stability import (
+    aggregate_metric_sets,
+    confirmed_seed_evaluation_events,
+)
 from ..memory.canonical_json import canonical_sha256
 from ..memory.event_store import DuplicateIdempotencyKey, EventStore, LedgerError
 from ..memory.projections import project
@@ -67,6 +71,7 @@ from .convergence import (
     StopDecision,
     is_finalizable_stop_reason,
     runtime_budget_decision,
+    stable_primary_score,
     stop_decision,
 )
 from .finalize import (
@@ -250,6 +255,13 @@ class Harness:
                 and event.payload.result.fidelity == fidelity
             ):
                 metric_set = event.payload.result.metric_set
+                seed_events = confirmed_seed_evaluation_events(
+                    self.events(), event
+                )
+                if seed_events:
+                    metric_set = aggregate_metric_sets(
+                        [item.payload.result.metric_set for item in seed_events]
+                    )
                 values = dict(metric_set.metrics)
                 values.setdefault(
                     metric_set.primary_metric_name, metric_set.primary_score
@@ -1982,7 +1994,7 @@ class Harness:
             if (
                 node.status.value == "accepted"
                 and node.metric_set is not None
-                and node.metric_set.primary_score > threshold
+                and stable_primary_score(node) > threshold
                 and node.best_eligible
             ):
                 improved.append(experiment_id)

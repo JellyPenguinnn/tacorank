@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Sequence
 
 from .graph_view import (
@@ -302,7 +302,12 @@ def _best_experimental_parent(
         for node in eligible
         if not node.is_root and node.primary_score is not None
     ]
-    return _best_parent(experimental or eligible)
+    # A near-best exploratory result is useful evidence, but stacking another
+    # mechanism on top of it compounds the very noise the confirmation ladder
+    # is meant to control.  Prefer a trusted experimental parent whenever one
+    # exists; use an exploratory parent only when it is the only measured path.
+    trusted = [node for node in experimental if node.is_trusted]
+    return _best_parent(trusted or experimental or eligible)
 
 
 def _same_family_refinement_choice(
@@ -393,10 +398,19 @@ def _latest_parent(
     latest: Any, eligible: Sequence[ExperimentNodeView]
 ) -> ExperimentNodeView:
     latest_id = str(get_value(latest, "experiment_id", ""))
-    return next(
+    latest_node = next(
         (node for node in eligible if node.experiment_id == latest_id),
         _best_parent(eligible),
     )
+    if latest_node.is_exploratory_parent:
+        trusted = [
+            node
+            for node in eligible
+            if not node.is_root and node.is_trusted
+        ]
+        if trusted:
+            return _best_parent(trusted)
+    return latest_node
 
 
 def _next_independent_choice(
@@ -660,7 +674,7 @@ def _soft_prune_choice(
             )
 
     if ensemble_authorized and "ensemble" in allowed:
-        parent = _best_parent(eligible)
+        parent = _best_experimental_parent(eligible)
         card = _method_for_family(
             context,
             "ensemble",
@@ -1116,11 +1130,35 @@ class SearchPolicy:
         choices = self._parallel_choices(context, direction_count)
         if not choices:
             return self.choose(context)
+        # A parallel round is sealed against one snapshot, so rank the legal
+        # arms using only evidence already present in this run.  With no
+        # history the original deterministic playbook order is retained.
+        if _family_history(context) and self.legal_choice_ranker is not None:
+            choices = self._rank_parallel_choices(choices, context)
         if direction_index >= len(choices):
             raise ValueError(
                 "parallel direction index exceeds unique legal parent/method choices"
             )
-        return choices[direction_index]
+        return replace(
+            choices[direction_index],
+            reason_code="PARALLEL_DIRECTION_%d_OF_%d"
+            % (direction_index + 1, direction_count),
+        )
+
+    def _rank_parallel_choices(
+        self, choices: Sequence[PolicyChoice], context: Any
+    ) -> tuple[PolicyChoice, ...]:
+        """Rank all legal lanes without changing the legal action set."""
+
+        remaining = list(choices)
+        ranked = []
+        while remaining:
+            selected = self._rank(remaining, context)
+            if selected not in remaining:
+                selected = remaining[0]
+            ranked.append(selected)
+            remaining.remove(selected)
+        return tuple(ranked)
 
     def parallel_direction_capacity(self, context: Any) -> int:
         """Return the number of unique legal parent/method lanes at a checkpoint."""
@@ -1147,10 +1185,27 @@ class SearchPolicy:
 
         # Keep the strongest parent first, then deterministically backtrack to
         # other verified parents once its method-card identities are spent.
-        parents = sorted(
-            eligible,
-            key=lambda node: (-_score(node), node.child_count, node.experiment_id),
-        )
+        trusted_experimental = [
+            node for node in eligible if not node.is_root and node.is_trusted
+        ]
+        exploratory_experimental = [
+            node
+            for node in eligible
+            if not node.is_root and not node.is_trusted
+        ]
+        roots = [node for node in eligible if node.is_root]
+        parents = []
+        for group in (trusted_experimental, exploratory_experimental, roots):
+            parents.extend(
+                sorted(
+                    group,
+                    key=lambda node: (
+                        -_score(node),
+                        node.child_count,
+                        node.experiment_id,
+                    ),
+                )
+            )
         choices: list[PolicyChoice] = []
         for parent in parents:
             attempted = _attempted_methods_for_parent(

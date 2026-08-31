@@ -1462,6 +1462,11 @@ class PlannerExperimentSummary(StrictModel):
     stability: Optional[Stability] = None
     integrity: Optional[Integrity] = None
     trust_flags: List[NonEmptyStr] = Field(default_factory=list)
+    # These values are derived from this run's seed schedule only.  They make
+    # evidence quality explicit to the planner without adding cross-run memory.
+    seed_mean: Optional[float] = None
+    seed_stderr: Optional[float] = Field(default=None, ge=0.0)
+    seed_count: int = Field(default=1, ge=1)
     failure_hypotheses: List[NonEmptyStr] = Field(default_factory=list)
     diagnostic_limitations: List[NonEmptyStr] = Field(default_factory=list)
     diagnostic_best_slice: Optional[str] = None

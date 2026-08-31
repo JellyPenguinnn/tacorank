@@ -83,7 +83,25 @@ class LinUCBLegalChoiceRanker:
                 if str(get_value(choice, "family", ""))
             }
         )
-        dimension = 1 + len(families) + 3 + 1
+        methods = sorted(
+            {
+                str(method_id)
+                for item in history
+                for method_id in as_list(
+                    get_value(item, "method_card_ids", None)
+                )
+                if str(method_id)
+            }
+            | {
+                str(get_value(choice, "method_card_id", ""))
+                for choice in choices
+                if str(get_value(choice, "method_card_id", ""))
+            }
+        )
+        # Intercept + family + method + cost + parent advantage.  Method-level
+        # evidence prevents a family average from hiding a consistently weak
+        # card, while the legal-choice boundary still owns what may be tried.
+        dimension = 1 + len(families) + len(methods) + 3 + 1
         matrix = [
             [self.ridge if row == column else 0.0 for column in range(dimension)]
             for row in range(dimension)
@@ -110,19 +128,37 @@ class LinUCBLegalChoiceRanker:
             ):
                 continue
             family = str(get_value(summary, "family", ""))
+            summary_methods = as_list(get_value(summary, "method_card_ids", None))
+            method_id = str(summary_methods[0]) if summary_methods else ""
             parent = by_id.get(str(get_value(summary, "parent_experiment_id", "")))
             features = self._features(
                 family,
+                method_id,
                 _normalized(get_value(summary, "actual_cost", "medium")),
                 _number(get_value(parent, "primary_score", None)),
                 baseline_score,
                 families,
+                methods,
             )
+            # Full confirmed aggregates are the strongest observations.  Proxy
+            # and single-seed evidence remains useful for direction finding but
+            # has less leverage, so one noisy observation cannot dominate the
+            # learned ordering.
+            fidelity = _normalized(
+                get_value(summary, "highest_completed_fidelity", "")
+            )
+            stability = _normalized(get_value(summary, "stability", ""))
+            quality = 1.0 if fidelity == "full" else 0.35
+            if stability == "single_seed":
+                quality *= 0.5
+            elif stability == "unstable":
+                quality *= 0.25
             clipped_reward = max(-0.1, min(0.1, reward))
+            weighted_reward = quality * clipped_reward
             for row in range(dimension):
-                reward_vector[row] += clipped_reward * features[row]
+                reward_vector[row] += weighted_reward * features[row]
                 for column in range(dimension):
-                    matrix[row][column] += features[row] * features[column]
+                    matrix[row][column] += quality * features[row] * features[column]
 
         inverse = _inverse(matrix)
         theta = _matvec(inverse, reward_vector)
@@ -131,10 +167,12 @@ class LinUCBLegalChoiceRanker:
             parent = get_value(choice, "parent", None)
             features = self._features(
                 str(get_value(choice, "family", "")),
+                str(get_value(choice, "method_card_id", "")),
                 _normalized(get_value(choice, "cost_tier", "medium")),
                 _number(get_value(parent, "primary_score", None)),
                 baseline_score,
                 families,
+                methods,
             )
             projected = _matvec(inverse, features)
             uncertainty = math.sqrt(max(0.0, _dot(features, projected)))
@@ -148,13 +186,16 @@ class LinUCBLegalChoiceRanker:
     @staticmethod
     def _features(
         family: str,
+        method_id: str,
         cost_tier: str,
         parent_score: float | None,
         baseline_score: float | None,
         families: Sequence[str],
+        methods: Sequence[str],
     ) -> list[float]:
         values = [1.0]
         values.extend(1.0 if family == item else 0.0 for item in families)
+        values.extend(1.0 if method_id == item else 0.0 for item in methods)
         values.extend(1.0 if cost_tier == item else 0.0 for item in ("low", "medium", "high"))
         parent_advantage = 0.0
         if parent_score is not None and baseline_score is not None:

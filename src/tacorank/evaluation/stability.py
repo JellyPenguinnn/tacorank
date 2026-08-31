@@ -1,10 +1,13 @@
-"""Seed aggregation and adaptive leaderboard gating."""
+"""Seed aggregation, run-local evidence projection, and leaderboard gating."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 import math
 import statistics
-from typing import Optional, Sequence, Tuple
+from typing import Any, Mapping, Sequence, Tuple
 
+from ..schemas import EventType, Integrity, MetricSet
 from .types import SeedAggregate
 
 
@@ -109,3 +112,107 @@ def seed_independence_passes(
     lower = max(float(minimum_std), float(expected_std) / tolerance_factor)
     upper = float(expected_std) * tolerance_factor
     return lower <= aggregate.standard_deviation <= upper
+
+
+def confirmed_seed_evaluation_events(
+    events: Sequence[Any], terminal_event: Any
+) -> Tuple[Any, ...]:
+    """Resolve the current-run seed evidence for one terminal evaluation.
+
+    The evaluation record names the earlier seed events explicitly.  We use
+    only those IDs plus the terminal event, and require the declared count to
+    match before treating the evidence as an aggregate.  Missing or malformed
+    references fall back to the terminal observation instead of silently
+    mixing unrelated evaluations.
+    """
+
+    result = getattr(getattr(terminal_event, "payload", None), "result", None)
+    trust = getattr(result, "trust", None)
+    seed_mean = getattr(trust, "seed_mean", None)
+    seed_count = getattr(trust, "seed_count", 1)
+    if seed_mean is None or seed_count < 3:
+        return ()
+
+    evidence_ids = list(getattr(result, "seed_evidence_event_ids", ()) or ())
+    if len(evidence_ids) != seed_count - 1:
+        return ()
+    by_id = {
+        getattr(event, "event_id", None): event
+        for event in events
+        if getattr(event, "event_type", None) == EventType.EVALUATION_COMPLETED
+    }
+    resolved = [by_id.get(event_id) for event_id in evidence_ids]
+    if any(event is None for event in resolved):
+        return ()
+
+    expected_identity = (
+        getattr(result, "run_id", None),
+        getattr(result, "experiment_id", None),
+        getattr(result, "population", None),
+        getattr(result, "fidelity", None),
+    )
+    selected = [*resolved, terminal_event]
+    for event in selected:
+        candidate = event.payload.result
+        identity = (
+            getattr(candidate, "run_id", None),
+            getattr(candidate, "experiment_id", None),
+            getattr(candidate, "population", None),
+            getattr(candidate, "fidelity", None),
+        )
+        if (
+            identity != expected_identity
+            or getattr(candidate.trust, "integrity", None) != Integrity.CLEAN
+        ):
+            return ()
+    return tuple(selected)
+
+
+def aggregate_metric_sets(metric_sets: Sequence[Any]) -> MetricSet:
+    """Average compatible metric sets without introducing new metric semantics."""
+
+    if not metric_sets:
+        raise ValueError("at least one metric set is required")
+    first = metric_sets[0]
+    names = tuple(getattr(first, "metrics", {}).keys())
+    primary_name = getattr(first, "primary_metric_name")
+    for metric_set in metric_sets[1:]:
+        if (
+            getattr(metric_set, "primary_metric_name") != primary_name
+            or set(getattr(metric_set, "metrics", {})) != set(names)
+        ):
+            raise ValueError("seed metric schemas do not match")
+    count = len(metric_sets)
+    metrics = {
+        name: sum(float(metric_set.metrics[name]) for metric_set in metric_sets)
+        / count
+        for name in names
+    }
+    primary = sum(float(metric_set.primary_score) for metric_set in metric_sets) / count
+    return MetricSet(
+        metrics=metrics,
+        primary_metric_name=primary_name,
+        primary_score=primary,
+    )
+
+
+def mean_mapping(values: Sequence[Mapping[str, float]]) -> dict[str, float]:
+    """Average same-shaped protected metric-delta maps."""
+
+    if not values or any(set(value) != set(values[0]) for value in values[1:]):
+        return {}
+    count = len(values)
+    return {
+        name: sum(float(value[name]) for value in values) / count
+        for name in values[0]
+    }
+
+
+def stable_primary_score(result: Any) -> float:
+    """Return the confirmed seed mean, or the current observation if unconfirmed."""
+
+    trust = getattr(result, "trust", None)
+    seed_mean = getattr(trust, "seed_mean", None)
+    if seed_mean is not None:
+        return float(seed_mean)
+    return float(result.metric_set.primary_score)

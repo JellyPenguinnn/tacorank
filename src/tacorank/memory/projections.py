@@ -12,7 +12,10 @@ from ..orchestrator.state import (
     RunState,
     RunStatus,
 )
-from ..orchestrator.convergence import is_finalizable_stop_reason
+from ..orchestrator.convergence import (
+    is_finalizable_stop_reason,
+    stable_primary_score,
+)
 from ..schemas import (
     Event,
     EventType,
@@ -260,7 +263,7 @@ def project(events: Iterable[Event]) -> RunState:
                     and node.trust is not None
                     and node.trust.verdict == TrustVerdict.ACCEPTED
                 ):
-                    score = node.metric_set.primary_score
+                    score = stable_primary_score(node)
                     if (
                         convergence_incumbent is None
                         or score > convergence_incumbent + state.convergence_epsilon

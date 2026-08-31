@@ -28,6 +28,37 @@ def test_parallel_direction_is_indexed_and_legal(planner_context):
     assert choice.method_card_id == "objective_pairwise_bpr"
 
 
+def test_parallel_direction_uses_run_local_learner_for_legal_order(
+    planner_context,
+):
+    class PreferLast:
+        def __call__(self, choices, context):
+            return choices[-1]
+
+    planner_context.family_history = [
+        make_summary(
+            "exp_0001",
+            parent_experiment_id="exp_0000",
+            family="objective",
+            method_card_ids=["objective_pairwise_bpr"],
+            parent_delta=-0.01,
+            output_accepted=True,
+            integrity="clean",
+        )
+    ]
+    policy = SearchPolicy(legal_choice_ranker=PreferLast())
+    expected = policy._parallel_choices(planner_context, 7)[-1]
+
+    choice = policy.choose_parallel_direction(planner_context, 0, 7)
+
+    assert (choice.parent.experiment_id, choice.family, choice.method_card_id) == (
+        expected.parent.experiment_id,
+        expected.family,
+        expected.method_card_id,
+    )
+    assert choice.reason_code == "PARALLEL_DIRECTION_1_OF_7"
+
+
 def test_parallel_directions_use_distinct_eligible_method_cards(planner_context):
     policy = SearchPolicy()
     contract = SimpleNamespace(**vars(planner_context.contract_summary))
@@ -942,6 +973,51 @@ def test_near_best_exploratory_parent_continues_depth_first(planner_context):
     assert choice.parent.experiment_id == "exp_0003"
     assert choice.family == "duration_bias"
     assert choice.method_card_id == "duration_bias_censored_watch_time"
+
+
+def test_exploratory_peak_does_not_become_a_stackable_parent(
+    planner_context,
+):
+    root = make_summary("exp_0000", score=0.601468756352959)
+    trusted = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        score=0.6022,
+        decision="accept",
+        parent_eligible=True,
+        trust_verdict="accepted",
+        stability="confirmed",
+        parent_delta=0.0007,
+        prediction_change=0.8,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    exploratory = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0001",
+        family="duration_bias",
+        score=0.6031,
+        decision="accept",
+        parent_eligible=True,
+        trust_verdict="inconclusive",
+        stability="confirmed",
+        parent_delta=0.0001,
+        prediction_change=0.8,
+        method_card_ids=["duration_bias_censored_watch_time"],
+    )
+    context = SimpleNamespace(
+        contract_summary=SimpleNamespace(**vars(planner_context.contract_summary)),
+        baseline=root,
+        current_best=trusted,
+        eligible_frontier=[root, trusted, exploratory],
+        family_history=[trusted, exploratory],
+        method_cards=planner_context.method_cards,
+        playbook=planner_context.playbook,
+    )
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.parent.experiment_id == "exp_0001"
 
 
 def test_meaningful_no_gain_backtracks_to_highest_scoring_experimental_path(

@@ -8,6 +8,11 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Type, TypeVa
 
 from ..artifacts import ArtifactStore
 from ..config import RunConfig, VerifiedContract
+from ..evaluation.stability import (
+    aggregate_metric_sets,
+    confirmed_seed_evaluation_events,
+    mean_mapping,
+)
 from ..memory.projections import project
 from ..memory.retrieval import (
     active_lessons,
@@ -562,6 +567,9 @@ class ContextBuilder:
             stability=baseline_evaluation.trust.stability,
             integrity=baseline_evaluation.trust.integrity,
             trust_flags=list(baseline_evaluation.trust.flags),
+            seed_mean=baseline_evaluation.trust.seed_mean,
+            seed_stderr=baseline_evaluation.trust.seed_stderr,
+            seed_count=baseline_evaluation.trust.seed_count,
             decision=ExperimentDecisionKind.ACCEPT,
             decision_reason_code="BASELINE_VERIFIED",
             highest_completed_fidelity=baseline_evaluation.fidelity,
@@ -591,6 +599,7 @@ class ContextBuilder:
             event for event in events if event.event_type == EventType.EXPERIMENT_PROPOSED
         ]
         evaluation_by_experiment = {}
+        evaluation_events_by_id = {}
         decision_by_experiment = {}
         output_by_experiment = {}
         for event in events:
@@ -598,6 +607,7 @@ class ContextBuilder:
                 output_by_experiment[event.payload.result.experiment_id] = event
             elif event.event_type == EventType.EVALUATION_COMPLETED:
                 evaluation_by_experiment[event.payload.result.experiment_id] = event
+                evaluation_events_by_id[event.event_id] = event
             elif event.event_type == EventType.EXPERIMENT_DECIDED:
                 # Smoke promotion is an execution-routing decision, not the
                 # terminal research outcome. In particular, a candidate that
@@ -631,17 +641,44 @@ class ContextBuilder:
             decision = decision_event.payload.decision if decision_event else None
             output = output_event.payload.result if output_event else None
             metric_set = evaluation.metric_set if evaluation else node.metric_set
+            seed_events = (
+                confirmed_seed_evaluation_events(
+                    tuple(evaluation_events_by_id.values()), evaluation_event
+                )
+                if evaluation_event is not None
+                else ()
+            )
+            if seed_events:
+                metric_set = aggregate_metric_sets(
+                    [event.payload.result.metric_set for event in seed_events]
+                )
             parent_metrics = metrics_by_experiment.get(spec.parent_experiment_id)
             parent_route = routes_by_experiment.get(spec.parent_experiment_id)
             metric_deltas = {}
             if evaluation is not None and metric_set is not None:
                 current_route = (evaluation.population, evaluation.fidelity)
-                metric_deltas = _planner_parent_metric_deltas(
-                    evaluation=evaluation,
-                    metric_set=metric_set,
-                    parent_metrics=parent_metrics,
-                    same_route=parent_route == current_route,
-                )
+                if seed_events:
+                    metric_deltas = mean_mapping(
+                        [
+                            dict(event.payload.result.parent_metric_deltas)
+                            for event in seed_events
+                        ]
+                    )
+                    if not metric_deltas and parent_metrics is not None:
+                        if parent_route == current_route:
+                            metric_deltas = {
+                                name: float(value)
+                                - float(parent_metrics.metrics[name])
+                                for name, value in metric_set.metrics.items()
+                                if name in parent_metrics.metrics
+                            }
+                if not metric_deltas:
+                    metric_deltas = _planner_parent_metric_deltas(
+                        evaluation=evaluation,
+                        metric_set=metric_set,
+                        parent_metrics=parent_metrics,
+                        same_route=parent_route == current_route,
+                    )
                 routes_by_experiment[spec.experiment_id] = current_route
             if metric_set is not None:
                 metrics_by_experiment[spec.experiment_id] = metric_set
@@ -653,6 +690,28 @@ class ContextBuilder:
                 support.append(decision_event.event_id)
             if output_event is not None:
                 support.append(output_event.event_id)
+            if seed_events:
+                support.extend(
+                    event.event_id
+                    for event in seed_events
+                    if event.event_id not in support
+                )
+            baseline_delta = evaluation.baseline_delta if evaluation else None
+            parent_delta = evaluation.parent_delta if evaluation else None
+            previous_best_delta = (
+                evaluation.previous_best_delta if evaluation else None
+            )
+            if seed_events:
+                baseline_delta = sum(
+                    event.payload.result.baseline_delta for event in seed_events
+                ) / len(seed_events)
+                parent_delta = sum(
+                    event.payload.result.parent_delta for event in seed_events
+                ) / len(seed_events)
+                previous_best_delta = sum(
+                    event.payload.result.previous_best_delta
+                    for event in seed_events
+                ) / len(seed_events)
             summaries.append(
                 PlannerExperimentSummary(
                     experiment_id=spec.experiment_id,
@@ -664,6 +723,11 @@ class ContextBuilder:
                     stability=evaluation.trust.stability if evaluation else None,
                     integrity=evaluation.trust.integrity if evaluation else None,
                     trust_flags=(list(evaluation.trust.flags) if evaluation else []),
+                    seed_mean=(evaluation.trust.seed_mean if evaluation else None),
+                    seed_stderr=(
+                        evaluation.trust.seed_stderr if evaluation else None
+                    ),
+                    seed_count=(evaluation.trust.seed_count if evaluation else 1),
                     failure_hypotheses=(
                         list(evaluation.diagnostics.failure_hypotheses)
                         if evaluation
@@ -690,11 +754,9 @@ class ContextBuilder:
                     primary_score=_planner_primary_score(evaluation, metric_set),
                     metric_set=metric_set,
                     metric_deltas=metric_deltas,
-                    baseline_delta=evaluation.baseline_delta if evaluation else None,
-                    parent_delta=evaluation.parent_delta if evaluation else None,
-                    previous_best_delta=(
-                        evaluation.previous_best_delta if evaluation else None
-                    ),
+                    baseline_delta=baseline_delta,
+                    parent_delta=parent_delta,
+                    previous_best_delta=previous_best_delta,
                     prediction_change=(
                         _prediction_change_fraction(evaluation.prediction_change)
                         if evaluation
@@ -1002,7 +1064,11 @@ class ContextBuilder:
                 )
             )
         history = recent_experiment_feedback(visible, family=family, limit=10)
+        seen_feedback_experiments = set()
         for event in history:
+            if event.payload.result.experiment_id in seen_feedback_experiments:
+                continue
+            seen_feedback_experiments.add(event.payload.result.experiment_id)
             summary = feedback_by_experiment.get(event.payload.result.experiment_id)
             if summary is not None:
                 optional.append(
