@@ -1836,18 +1836,47 @@ class Harness:
         propose = getattr(self.planner, "propose_parallel_direction", None)
 
         async def request(index: int):
-            if propose is None:
-                return await self.planner.propose(planner_context)
-            return await propose(planner_context, index, count)
+            attempts = max(1, self.config.research_planning_max_attempts)
+            last_output = None
+            for attempt in range(1, attempts + 1):
+                if propose is None:
+                    output = await self._request_planner_with_retry(
+                        lambda: self.planner.propose(planner_context),
+                        label="parallel_direction_%d_of_%d"
+                        % (index + 1, count),
+                    )
+                else:
+                    output = await self._request_planner_with_retry(
+                        lambda: propose(planner_context, index, count),
+                        label="parallel_direction_%d_of_%d"
+                        % (index + 1, count),
+                    )
+                if output.action == PlannerAction.PROPOSE:
+                    return output
+
+                if self.config.research_agent_mode != "bounded_react":
+                    return output
+                last_output = output
+                self._append(
+                    PlannerRecommendedPayload(output=output),
+                    stage="parallel_planner_recommended",
+                    experiment_id="parallel_direction_%03d" % (index + 1),
+                    attempt=attempt,
+                    causation_event_id=context_event.event_id,
+                    resource_delta=output.resource_delta,
+                )
+                if attempt >= attempts:
+                    break
+                delay = self.config.research_planning_retry_backoff_seconds * attempt
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            assert last_output is not None
+            return last_output
 
         try:
             results = await asyncio.gather(
                 *(
-                    self._request_planner_with_retry(
-                        lambda index=index: request(index),
-                        label="parallel_direction_%d_of_%d"
-                        % (index + 1, count),
-                    )
+                    request(index)
                     for index in range(count)
                 ),
                 return_exceptions=True,
@@ -1873,14 +1902,32 @@ class Harness:
             )
             return []
         if any(item.action != PlannerAction.PROPOSE for item in outputs):
-            self.stop(
-                StopDecision(
-                    True,
-                    "PARALLEL_ROUND_INCOMPLETE",
-                    "The researcher did not return every required parallel direction.",
+            if self.config.research_agent_mode != "bounded_react":
+                self.stop(
+                    StopDecision(
+                        True,
+                        "PARALLEL_ROUND_INCOMPLETE",
+                        "The researcher did not return every required parallel direction.",
+                    )
                 )
+                return []
+            outputs = [
+                item for item in outputs if item.action == PlannerAction.PROPOSE
+            ]
+            if not outputs:
+                self.stop(
+                    StopDecision(
+                        True,
+                        "PLANNER_ROUND_NO_USABLE_DIRECTION",
+                        "No parallel research direction produced a valid plan after bounded retries.",
+                    )
+                )
+                return []
+            logger.warning(
+                "parallel_round_partial_planner_recovery accepted=%d rejected=%d",
+                len(outputs),
+                count - len(outputs),
             )
-            return []
         duplicate_keys = [item.spec.duplicate_key for item in outputs]
         existing_keys = {
             event.payload.spec.duplicate_key

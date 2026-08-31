@@ -31,6 +31,7 @@ from tacorank.schemas import (
     PlannerOutput,
     PatchCheckResult,
     ResearchProposal,
+    ResourceDelta,
     Stability,
     PlannerAction,
     PlannerOutput,
@@ -110,6 +111,40 @@ class ParallelPlanner:
             spec=spec,
             reason_code="parallel_round_synthesis",
             reason="Combine accepted lanes through the normal coding and gate path.",
+        )
+
+
+class RecoveringParallelPlanner:
+    """Return one bounded planner failure before recovering that lane."""
+
+    def __init__(self, parent_commit_sha: str, *, always_block: bool = False):
+        self.parent_commit_sha = parent_commit_sha
+        self.always_block = always_block
+        self.calls = {}
+
+    async def propose_parallel_direction(self, context, index, count):
+        self.calls[index] = self.calls.get(index, 0) + 1
+        if self.always_block or (index == 1 and self.calls[index] == 1):
+            return PlannerOutput(
+                action=PlannerAction.BLOCKED,
+                reason_code="MALFORMED_RESEARCH_TURN",
+                reason="The bounded research turn did not match the typed protocol.",
+                resource_delta=ResourceDelta(
+                    llm_input_tokens=11,
+                    llm_output_tokens=3,
+                ),
+            )
+        output = await FakeResearchPlanner(self.parent_commit_sha).propose(context)
+        return output.model_copy(
+            update={
+                "spec": output.spec.model_copy(
+                    update={
+                        "hypothesis": "Recovered independent direction %d of %d."
+                        % (index + 1, count),
+                        "duplicate_key": "recovered:direction:%d" % index,
+                    }
+                )
+            }
         )
 
 
@@ -208,8 +243,9 @@ def test_parallel_round_runs_independent_lanes_and_serializes_public_queries(
 ):
     harness.config = harness.config.model_copy(
         update={
-            "max_experiments": 3,
+            "max_experiments": 10,
             "parallel_directions": 3,
+            "parallel_schedule": [3, 3, 2],
             "synthesize_parallel_improvements": False,
         }
     )
@@ -222,7 +258,7 @@ def test_parallel_round_runs_independent_lanes_and_serializes_public_queries(
 
     assert state.experiments_proposed == 3
     assert worker.max_active == 3
-    assert state.stop_reason_code == "experiment_budget"
+    assert state.stop_reason_code is None
     proposals = [
         event.payload.spec
         for event in harness.events()
@@ -283,6 +319,76 @@ def test_parallel_round_synthesizes_all_independent_improvements(
         "exp_002",
         "exp_003",
     ]
+
+
+def test_bounded_parallel_round_retries_a_failed_lane_and_seals_the_batch(
+    harness, baseline_evaluation
+):
+    harness.config = harness.config.model_copy(
+        update={
+            "max_experiments": 10,
+            "parallel_directions": 3,
+            "parallel_schedule": [3, 3, 2],
+            "research_agent_mode": "bounded_react",
+            "research_planning_max_attempts": 2,
+            "synthesize_parallel_improvements": False,
+        }
+    )
+    planner = RecoveringParallelPlanner(harness.config.baseline_commit_sha)
+    harness.planner = planner
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_parallel_round())
+
+    assert state.experiments_proposed == 3
+    assert state.stop_reason_code is None
+    assert planner.calls == {0: 1, 1: 2, 2: 1}
+    recommendations = [
+        event
+        for event in harness.events()
+        if event.event_type == EventType.PLANNER_RECOMMENDED
+    ]
+    assert len(recommendations) == 1
+    assert recommendations[0].payload.output.reason_code == (
+        "MALFORMED_RESEARCH_TURN"
+    )
+
+
+def test_bounded_parallel_round_preserves_lane_failures_before_safe_stop(
+    harness, baseline_evaluation
+):
+    harness.config = harness.config.model_copy(
+        update={
+            "max_experiments": 10,
+            "parallel_directions": 3,
+            "parallel_schedule": [3, 3, 2],
+            "research_agent_mode": "bounded_react",
+            "research_planning_max_attempts": 2,
+            "synthesize_parallel_improvements": False,
+        }
+    )
+    planner = RecoveringParallelPlanner(
+        harness.config.baseline_commit_sha,
+        always_block=True,
+    )
+    harness.planner = planner
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_parallel_round())
+
+    assert state.status.value == "failed"
+    assert state.stop_reason_code == "PLANNER_ROUND_NO_USABLE_DIRECTION"
+    assert planner.calls == {0: 2, 1: 2, 2: 2}
+    recommendations = [
+        event
+        for event in harness.events()
+        if event.event_type == EventType.PLANNER_RECOMMENDED
+    ]
+    assert len(recommendations) == 6
+    assert all(
+        event.payload.output.resource_delta.llm_input_tokens == 11
+        for event in recommendations
+    )
 
 
 class NoOpEvaluator(FakeEvaluator):

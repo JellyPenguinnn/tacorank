@@ -17,6 +17,8 @@ class ProviderRequest:
     observations: tuple[Any, ...] = ()
     legal_choices: tuple[Any, ...] = ()
     research_turn_index: int = 0
+    research_turn_attempt: int = 1
+    research_turn_error: str | None = None
     batch_role: str | None = None
 
 
@@ -30,9 +32,16 @@ class ResearchProvider(Protocol):
     async def research_turn(self, request: ProviderRequest) -> Any:
         """Return one typed bounded-research turn, if the mode is enabled."""
 
+    def begin_research_session(self) -> None:
+        """Reset usage accounting before one bounded research session."""
+
 
 class ProviderError(RuntimeError):
     pass
+
+
+class ProviderProtocolError(ProviderError):
+    """The provider returned an unusable response envelope or JSON payload."""
 
 
 class TransientProviderError(ProviderError):
@@ -50,6 +59,11 @@ class MockResearchProvider:
         self.response = response
         self.requests: list[ProviderRequest] = []
         self.repair_requests: list[tuple[ProviderRequest, tuple[str, ...]]] = []
+
+    def begin_research_session(self) -> None:
+        """Match the production provider session boundary; usage is not tracked."""
+
+        return None
 
     async def generate(self, request: ProviderRequest) -> Any:
         self.requests.append(request)

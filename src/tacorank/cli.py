@@ -118,6 +118,7 @@ def _planner_for(config: RunConfig):
         research_agent_mode=config.research_agent_mode,
         research_tool_step_limit=config.research_tool_step_limit,
         research_literature_max_queries=config.research_literature_max_queries,
+        research_planning_max_attempts=config.research_planning_max_attempts,
         literature_required=config.literature_required,
     )
 

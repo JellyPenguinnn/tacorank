@@ -259,6 +259,25 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert provider.resource_delta.token_measurement == TokenMeasurement.PROVIDER
 
 
+def test_research_turn_retry_is_compact_and_disables_thinking(planner_context):
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key")
+    request = ProviderRequest(
+        context=planner_context,
+        policy_choice=choice,
+        research_turn_attempt=2,
+        research_turn_error="research_turn_schema_invalid",
+    )
+
+    payload = provider._research_turn_payload(request)
+    prompt_document = json.loads(payload["messages"][1]["content"])
+
+    assert payload["thinking"] == {"type": "disabled"}
+    assert "compact JSON object only" in payload["messages"][0]["content"]
+    assert prompt_document["turn_attempt"] == 2
+    assert prompt_document["repair_hint"] == "research_turn_schema_invalid"
+
+
 def test_deepseek_provider_grounds_plan_in_retrieved_literature(planner_context):
     calls = []
     evidence = literature_evidence()

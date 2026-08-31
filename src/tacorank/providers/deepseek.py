@@ -23,6 +23,7 @@ from ..research.graph_view import as_list, get_value
 from ..schemas import ResourceDelta, TokenMeasurement
 from .research_provider import (
     ProviderError,
+    ProviderProtocolError,
     ProviderRequest,
     ProviderTimeoutError,
     TransientProviderError,
@@ -179,6 +180,12 @@ criterion, falsification condition, confidence from 0 to 1, conservative paramet
 guidance, and one candidate plan object. The candidate must preserve the controller's
 parent, family, method, data, cost, and safety constraints; do not add implementation
 targets or execution details."""
+
+RESEARCH_TURN_COMPACT_RETRY_INSTRUCTION = """The previous research turn could not be
+accepted by the deterministic controller. Repair the stated protocol issue and return
+one compact JSON object only. Do not add analysis, Markdown, optional fields, or prose
+outside the JSON. For a tool action, include only the action and its bounded arguments;
+for finalize_plan, include every required final field and a complete spec."""
 
 
 def _jsonable(value: Any) -> Any:
@@ -451,9 +458,9 @@ def default_chat_transport(
     try:
         decoded = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ProviderError("DeepSeek returned a non-JSON HTTP response") from exc
+        raise ProviderProtocolError("DeepSeek returned a non-JSON HTTP response") from exc
     if not isinstance(decoded, Mapping):
-        raise ProviderError("DeepSeek returned an invalid response envelope")
+        raise ProviderProtocolError("DeepSeek returned an invalid response envelope")
     return decoded
 
 
@@ -514,6 +521,15 @@ class DeepSeekResearchProvider:
             llm_output_tokens=output_tokens,
             token_measurement=TokenMeasurement.PROVIDER,
         )
+
+    def begin_research_session(self) -> None:
+        """Start a fresh usage scope for one bounded planner session."""
+
+        self._input_tokens.set(0)
+        self._output_tokens.set(0)
+        self._last_candidate.set(None)
+        self._last_completed_input_tokens = 0
+        self._last_completed_output_tokens = 0
 
     def preflight(self) -> None:
         """Authenticate without spending completion tokens and verify the model exists."""
@@ -704,6 +720,8 @@ class DeepSeekResearchProvider:
                     "chain-of-thought, code, paths, labels, raw rows, or hidden data."
                 ),
                 "turn_index": request.research_turn_index,
+                "turn_attempt": request.research_turn_attempt,
+                "repair_hint": request.research_turn_error,
                 "available_actions": [
                     "inspect_frontier", "compare_experiments", "inspect_diagnostics",
                     "inspect_failures", "inspect_method_cards", "search_literature",
@@ -730,6 +748,12 @@ class DeepSeekResearchProvider:
                     "conservative_parameter_guidance": "bounded suggestions only",
                     "spec": "one candidate plan object, no implementation paths",
                 },
+                "turn_rules": [
+                    "Return one JSON object only.",
+                    "For a tool turn, include only the action and bounded IDs/query.",
+                    "For finalize_plan, include every finalize_schema field and a complete spec.",
+                    "If repair_hint is present, correct that issue before choosing the next action.",
+                ],
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -740,17 +764,26 @@ class DeepSeekResearchProvider:
         max_tokens = self.max_output_tokens
         if request.output_token_limit is not None:
             max_tokens = min(max_tokens, request.output_token_limit)
+        system_prompt = RESEARCH_TURN_SYSTEM_PROMPT
+        if request.research_turn_attempt > 1:
+            system_prompt += "\n" + RESEARCH_TURN_COMPACT_RETRY_INSTRUCTION
         return {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": RESEARCH_TURN_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": self._research_turn_prompt(request)},
             ],
             "response_format": {"type": "json_object"},
             "max_tokens": max_tokens,
             "temperature": self.temperature,
             "stream": False,
-            "thinking": {"type": "enabled" if self.thinking_enabled else "disabled"},
+            "thinking": {
+                "type": (
+                    "enabled"
+                    if self.thinking_enabled and request.research_turn_attempt <= 1
+                    else "disabled"
+                )
+            },
             "reasoning_effort": self.reasoning_effort,
         }
 
@@ -780,23 +813,23 @@ class DeepSeekResearchProvider:
     def _content(self, response: Mapping[str, Any]) -> Mapping[str, Any]:
         choices = response.get("choices")
         if not isinstance(choices, list) or len(choices) != 1:
-            raise ProviderError("DeepSeek must return exactly one completion choice")
+            raise ProviderProtocolError("DeepSeek must return exactly one completion choice")
         choice = choices[0]
         if not isinstance(choice, Mapping):
-            raise ProviderError("DeepSeek returned an invalid completion choice")
+            raise ProviderProtocolError("DeepSeek returned an invalid completion choice")
         finish_reason = choice.get("finish_reason")
         if finish_reason != "stop":
-            raise ProviderError("DeepSeek completion did not finish cleanly: %s" % finish_reason)
+            raise ProviderProtocolError("DeepSeek completion did not finish cleanly: %s" % finish_reason)
         message = choice.get("message")
         content = message.get("content") if isinstance(message, Mapping) else None
         if not isinstance(content, str) or not content.strip():
-            raise ProviderError("DeepSeek returned empty planner JSON")
+            raise ProviderProtocolError("DeepSeek returned empty planner JSON")
         try:
             candidate = json.loads(content)
         except json.JSONDecodeError as exc:
-            raise ProviderError("DeepSeek returned malformed planner JSON") from exc
+            raise ProviderProtocolError("DeepSeek returned malformed planner JSON") from exc
         if not isinstance(candidate, Mapping):
-            raise ProviderError("DeepSeek planner JSON must be an object")
+            raise ProviderProtocolError("DeepSeek planner JSON must be an object")
         wrapped = candidate.get("experiment_spec")
         if isinstance(wrapped, Mapping):
             candidate = wrapped
@@ -805,20 +838,20 @@ class DeepSeekResearchProvider:
     def _turn_content(self, response: Mapping[str, Any]) -> Dict[str, Any]:
         choices = response.get("choices")
         if not isinstance(choices, list) or len(choices) != 1:
-            raise ProviderError("DeepSeek must return exactly one research turn")
+            raise ProviderProtocolError("DeepSeek must return exactly one research turn")
         choice = choices[0]
         if not isinstance(choice, Mapping) or choice.get("finish_reason") != "stop":
-            raise ProviderError("DeepSeek research turn did not finish cleanly")
+            raise ProviderProtocolError("DeepSeek research turn did not finish cleanly")
         message = choice.get("message")
         content = message.get("content") if isinstance(message, Mapping) else None
         if not isinstance(content, str) or not content.strip():
-            raise ProviderError("DeepSeek returned empty research turn JSON")
+            raise ProviderProtocolError("DeepSeek returned empty research turn JSON")
         try:
             value = json.loads(content)
         except json.JSONDecodeError as exc:
-            raise ProviderError("DeepSeek returned malformed research turn JSON") from exc
+            raise ProviderProtocolError("DeepSeek returned malformed research turn JSON") from exc
         if not isinstance(value, Mapping):
-            raise ProviderError("DeepSeek research turn JSON must be an object")
+            raise ProviderProtocolError("DeepSeek research turn JSON must be an object")
         return dict(value)
 
     def _normalize(
@@ -945,7 +978,7 @@ class DeepSeekResearchProvider:
         if value.get("action") == "finalize_plan":
             raw_spec = value.get("spec") or value.get("experiment_spec")
             if not isinstance(raw_spec, Mapping):
-                raise ProviderError("final research turn omitted its experiment spec")
+                raise ProviderProtocolError("final research turn omitted its experiment spec")
             value["spec"] = self._normalize(raw_spec, request, default_evidence=False)
         self._last_completed_input_tokens = self._input_tokens.get() or 0
         self._last_completed_output_tokens = self._output_tokens.get() or 0

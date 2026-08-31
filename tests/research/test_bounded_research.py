@@ -3,6 +3,7 @@ import asyncio
 from tacorank.agents.research_planner import ResearchPlanner
 from tacorank.providers.research_provider import MockResearchProvider
 from tacorank.research.duplicate_detection import compute_duplicate_key
+from tacorank.schemas import ResourceDelta, TokenMeasurement
 
 
 def _proposal(context, choice):
@@ -119,3 +120,82 @@ def test_bounded_research_stops_after_four_tool_actions(planner_context):
     assert result.reason_code == "RESEARCH_TOOL_STEP_LIMIT"
     assert len(seen) == 5
     assert len(observations) == 4
+
+
+def test_bounded_research_repairs_a_malformed_turn_without_losing_usage(
+    planner_context,
+):
+    seen = []
+
+    class RepairingProvider(MockResearchProvider):
+        def __init__(self):
+            super().__init__(None)
+            self._resource_delta = ResourceDelta(
+                llm_input_tokens=17,
+                llm_output_tokens=5,
+                token_measurement=TokenMeasurement.PROVIDER,
+            )
+
+        @property
+        def resource_delta(self):
+            return self._resource_delta
+
+        async def research_turn(self, request):
+            seen.append(request)
+            if request.research_turn_attempt == 1:
+                return {"action": "finalize_plan"}
+            choice = request.legal_choices[0]
+            return {
+                "action": "finalize_plan",
+                "selected_action_id": choice.choice_id,
+                "claim": "Use one legal mechanism after repairing the turn format.",
+                "hypothesis": "A bounded mechanism improves ranking.",
+                "expected_mechanism": "It changes relative ordering conservatively.",
+                "success_criterion": "The stable primary score improves.",
+                "falsification_condition": "The stable score does not improve.",
+                "confidence": 0.5,
+                "evidence_event_ids": ["evt_000001"],
+                "conservative_parameter_guidance": {"default": "low capacity"},
+                "spec": _proposal(planner_context, choice),
+            }
+
+    provider = RepairingProvider()
+    planner = ResearchPlanner(
+        provider,
+        research_agent_mode="bounded_react",
+        research_planning_max_attempts=2,
+    )
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result.action.value == "propose"
+    assert [request.research_turn_index for request in seen] == [0, 0]
+    assert [request.research_turn_attempt for request in seen] == [1, 2]
+    assert seen[1].research_turn_error == "research_turn_schema_invalid"
+    assert result.resource_delta.llm_input_tokens == 17
+    assert result.resource_delta.llm_output_tokens == 5
+
+
+def test_bounded_research_accounts_usage_on_exhaustion(planner_context):
+    class UsageProvider(MockResearchProvider):
+        @property
+        def resource_delta(self):
+            return ResourceDelta(
+                llm_input_tokens=31,
+                llm_output_tokens=7,
+                token_measurement=TokenMeasurement.PROVIDER,
+            )
+
+        async def research_turn(self, request):
+            return {"action": "finalize_plan"}
+
+    planner = ResearchPlanner(
+        UsageProvider(None),
+        research_agent_mode="bounded_react",
+        research_planning_max_attempts=2,
+    )
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result.action.value == "blocked"
+    assert result.reason_code == "MALFORMED_RESEARCH_TURN"
+    assert result.resource_delta.llm_input_tokens == 31
+    assert result.resource_delta.llm_output_tokens == 7
