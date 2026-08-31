@@ -19,6 +19,25 @@ TacoRank is a control-plane system rather than a standalone recommender model.
 The candidate model surface is solution/, while the control plane owns the
 experiment lifecycle and the frozen competition contract.
 
+## Contents
+
+- [Project overview](#project-overview)
+- [Why TacoRank is different](#why-tacorank-is-different)
+- [Research approach](#research-approach)
+- [Current architecture](#current-architecture)
+- [Requirements](#requirements)
+- [Setup and installation](#setup-and-installation)
+- [Reproducing and validating results](#reproducing-and-validating-results)
+- [Monitoring and dashboard](#monitoring-and-dashboard)
+- [Repository layout](#repository-layout)
+- [Team member contributions](#team-member-contributions)
+- [Integration contract](#integration-contract)
+- [Limitations and future improvements](#limitations-and-future-improvements)
+- [Troubleshooting](#troubleshooting)
+- [Development and contribution rules](#development-and-contribution-rules)
+- [Documentation](#documentation)
+- [License](#license)
+
 ## Project overview
 
 The complete workflow is:
@@ -40,51 +59,86 @@ The complete workflow is:
            or protected FM fallback
         -> label-free final inference, final Gate B, and official submission check
 
-### Lifecycle of one experiment
-
-```mermaid
-flowchart LR
-    A["Ledger-derived<br/>planner context"]
-    B["Select a legal method<br/>and research direction"]
-    C["DeepSeek<br/>research proposal"]
-    D["Controller-bound<br/>ExperimentSpec"]
-    E["Trae edit and bounded<br/>implementation review"]
-    F{"Gate A"}
-    G["Smoke, proxy, and full<br/>sandboxed execution"]
-    H{"Gate B"}
-    I["Protected evaluation<br/>and trust assessment"]
-    J{"Experiment decision"}
-    K["Record lessons and<br/>build the next context"]
-    R["Bounded recovery"]
-
-    A --> B --> C --> D --> E --> F
-    F -- pass --> G --> H
-    H -- pass --> I --> J
-    J -- promote --> G
-    J -- accept, reject, or prune --> K --> A
-
-    E -. error .-> R
-    F -. fail .-> R
-    G -. fail .-> R
-    H -. fail .-> R
-    I -. no-op or error .-> R
-    R -- retry or repair --> E
-    R -- runtime retry --> G
-    R -- abandon or rollback --> K
-```
-
 The controller is deterministic and is the only component allowed to mutate
 workflow state or append the event ledger. External agents return typed
 records; they cannot select the final checkpoint, alter budgets, bypass a
 gate, access hidden labels, or rewrite the evaluator.
 
-The current research portfolio includes an eligibility-gated causal
-rolling-feedback residual blend combining causal history, diverse compact
-rankers, and residual correction. The reviewed method-card portfolio spans
-pairwise and listwise objectives, compact rankers, causal history, auxiliary
-engagement signals, duration bias, temporal drift, and ensemble methods.
-Preconditions, prohibitions, and prior negative results determine which cards
-are legally selectable.
+### Observed outcome and evidence boundary
+
+The completed reference run exercised the production workflow through official
+submission checking:
+
+| Item | Observed result |
+| --- | ---: |
+| Experiments proposed | 6 |
+| Strongest research candidate | `exp_006` at 0.6022983341 primary |
+| Protected FM baseline | 0.6014687564 primary |
+| Final eligible selection | `baseline` |
+| Stop reason | `no_legal_proposal` |
+| Submission check | accepted |
+
+Although `exp_006` had a higher point estimate, its gain was classified as
+within noise, so the controller retained the protected FM baseline. This is
+evidence that the complete workflow and fail-closed selection contract worked;
+it is not evidence that autonomous research improved the benchmark. The newer
+causal rolling-feedback direction described below was added to the research
+portfolio after this reference run and was not evaluated by it.
+
+## Why TacoRank is different
+
+- **Intelligence is separated from authority.** DeepSeek and Trae may propose
+  research and code, but the deterministic controller owns budgets, routing,
+  promotion, recovery, stopping, final selection, and ledger writes.
+- **Every candidate crosses two independent gates.** Gate A verifies whether a
+  patch is legal to execute; Gate B verifies whether its prediction artifact is
+  eligible for protected evaluation or submission.
+- **The experiment history is evidence, not mutable application state.** Plans,
+  patches, gate receipts, execution results, metrics, recovery decisions, and
+  resource use are appended to a hash-chained ledger and replayed into views.
+- **Failure is a valid outcome.** The controller can retry, abandon, roll back,
+  or select the protected FM fallback, but agents cannot weaken checks or
+  promote an exciting score without trusted evidence.
+
+## Research approach
+
+The official FM baseline is a strong static, second-order model. It cannot
+directly express evolving user intent, strict past-only behavioral histories,
+candidate-list context, or complementary errors across different ranking
+objectives. TacoRank therefore searches a reviewed portfolio of pairwise and
+listwise objectives, compact rankers, causal history, auxiliary engagement
+signals, duration-bias corrections, temporal-drift features, and ensembles.
+
+The newest integrated candidate direction is an eligibility-gated causal
+rolling-feedback residual blend:
+
+1. **Construct leakage-safe history.** User, user-video, user-author, session,
+   item, time-gap, and permitted engagement features use only rows strictly
+   earlier than the scored row, with a deterministic same-timestamp policy.
+2. **Train diverse compact rankers.** Small LambdaRank, `rank_xendcg`, and
+   CatBoost YetiRank members target within-user order using different
+   inductive biases while remaining within the CPU budget.
+3. **Correct complementary residual errors.** Frozen-history LightGBM, a
+   second ranker, and a compact sequence/time-context member contribute
+   per-user normalized correction vectors using the frozen sparse recipe:
+
+       Z(lab_base) - 0.40*Z(frozen_lgb) - 0.10*Z(rank2) + 0.15*Z(DIN50)
+
+4. **Preserve a trusted fallback.** The setup-verified FM score remains
+   available for unseen cases and final fallback; coefficients, seeds,
+   normalization, cutoff rules, and member identities are frozen before
+   protected evaluation rather than tuned per validation slice.
+5. **Reject weak or unsafe evidence.** Future/self-outcome leakage, ambiguous
+   ordering, later-temporal regression, concentrated gains, or no trusted
+   full-fidelity improvement beyond `epsilon` falsifies the method.
+
+This direction is selectable only when the serving contract explicitly permits
+earlier-row feedback at scoring time. Otherwise the controller must choose a
+train-window-only causal-history method. See the
+[`ensemble_causal_rolling_residual_blend` method card](research/methods/ensemble_causal_rolling_residual_blend.md)
+for its exact prerequisites, allowed data, implementation boundary, and
+falsifiers; the broader portfolio lives in
+[`research/methods/`](research/methods/).
 
 ## Current architecture
 
@@ -100,7 +154,7 @@ The implementation uses the src/tacorank namespace. The main components are:
 | Guardrails | Enforces protected paths, data boundaries, command policy, Gate A, and Gate B. | src/tacorank/safety, PROTECTED_PATHS.md |
 | Execution and SRE | Runs reviewed symbolic commands in Docker, monitors health/resources, and records artifacts. | src/tacorank/execution, src/tacorank/sre |
 | Recovery | Classifies failures and selects bounded repair, retry, rollback, or abandon actions. | src/tacorank/recovery |
-| Evaluation and reporting | Computes protected metrics, trust diagnostics, decisions, lessons, resource reports, and final selection. | src/tacorank/evaluation, src/tacorank/reflection, src/tacorank/reporting |
+| Evaluation and reporting | Computes protected metrics, trust diagnostics, lessons, resource reports, and final-selection evidence; the controller makes the selection. | src/tacorank/evaluation, src/tacorank/reflection, src/tacorank/reporting |
 | Benchmark adapters | Connects the controller to the official KuaiRand-Pure evaluator and submission checker. | benchmarks/kuairand_pure, kuairand-starter-kit |
 | Candidate solution | The only normal coding-agent-editable model surface. | solution |
 | Dashboard | Reads repository-backed ledgers and displays runs, experiments, gates, metrics, recovery, and token usage. | ui |
@@ -238,6 +292,12 @@ directory and keep it at:
 
     runs/run_20260830094907711_3c78fb3c/
 
+The archive must be distributed separately from the repository, for example as
+an immutable release asset with a published SHA-256. Until the team publishes
+that asset, external readers can reproduce the official baseline or start a new
+run, but they cannot independently validate this exact historical ledger. Do
+not commit the archive to Git.
+
 Then, from the repository root, run:
 
     REPO_ROOT="$(pwd -P)"
@@ -359,6 +419,8 @@ reference run. It creates a new auditable result under the same frozen rules.
 
 ## Monitoring and dashboard
 
+![TacoRank Run Monitor — autonomous research observed live](ui/public/og.png)
+
 The optional UI is a local repository-backed dashboard. It reads runs and
 events rather than becoming a second source of truth. It displays experiment
 plans, parent/child lineage, Gate A, execution, Gate B, evaluation, recovery,
@@ -420,15 +482,15 @@ Research references: AIDE, UCB node selection, and the AIDE ML repository.
 
 Responsibilities:
 
-- Define experiment nodes, hypotheses, parents, children, target files, and
-  fidelity.
-- Maintain experiment lineage and allow branching from promising historical
-  nodes.
+- Define hypotheses, research families, method-card policy, and parent/child
+  search behavior. Target files and execution fidelity remain controller-bound.
+- Design search over controller-recorded lineage and allow policy-approved
+  branching from promising historical nodes.
 - Implement UCB-style exploration/exploitation decisions.
 - Generate feature, model, loss, training-strategy, hyperparameter, and
   ensemble experiment proposals.
-- Promote proxy candidates to full evaluation only when policy permits.
-- Prune weak branches and detect convergence using the official rule.
+- Define proxy-promotion, pruning, and convergence criteria that the controller
+  evaluates and applies.
 - Explain and record why each node was selected.
 - Provide experiment-tree views for the dashboard.
 
@@ -442,10 +504,11 @@ Actual ownership mapping:
 - research/CURRENT_RUN_IMPROVEMENT_PLAN.md
 - docs/research/planning-and-search.md
 
-Primary output: a validated ExperimentSpec derived from experiment history,
-method cards, budget, and convergence state.
+Primary output: a deterministic policy choice and validated, code-blind
+ResearchProposal derived from experiment history, method cards, budget, and
+convergence state. The controller binds it into an ExperimentSpec.
 
-### Person 2 — Jing Min: agent harness and Trae integration
+### Person 2 — Jing Ming: agent harness and Trae integration
 
 Research references: ReAct, Karpathy's autoresearch loop, autoresearch program
 design, and Trae Agent.
@@ -519,9 +582,11 @@ Responsibilities:
   missing outputs.
 - Classify syntax/import, data, OOM, numerical, timeout, hang, contract, and
   infrastructure failures.
-- Apply bounded self-debugging and targeted retries.
+- Produce bounded self-debugging and targeted-retry decisions for the
+  controller to authorize.
 - Reduce approved runtime settings after OOM when policy allows.
-- Roll back failed patches and resume from checkpoints where supported.
+- Implement rollback and checkpoint mechanisms used by controller-authorized
+  recovery.
 - Persist raw runtime events, artifacts, telemetry, recovery decisions, and
   resource usage.
 - Keep immediate recovery separate from long-term research memory.
@@ -589,8 +654,9 @@ Each person owns a clear transformation:
 
 | Owner | Input | Output |
 | --- | --- | --- |
-| Person 1 | Experiment history, method cards, budgets | ExperimentSpec |
-| Person 2 | ExperimentSpec and bounded context | PatchCandidate |
+| Person 1 | Experiment history, method cards, budgets | Policy choice and ResearchProposal |
+| Deterministic controller | Policy choice and ResearchProposal | Controller-bound ExperimentSpec and ledger transition |
+| Person 2 | Controller-bound ExperimentSpec and bounded context | PatchCandidate |
 | Person 3 | PatchCandidate or RunResult | Verification result |
 | Person 4 | Verified patch and execution request | RunResult |
 | Person 5 | RunResult and protected evaluator output | EvaluationReport, ReflectionRecord, SearchFeedback |
@@ -602,7 +668,8 @@ The first team-wide milestone is a minimal complete loop:
 3. Person 3 validates the patch.
 4. Person 4 executes the official FM or a bounded candidate command.
 5. Person 5 evaluates the output and returns metrics.
-6. Person 1 records the new experiment-tree node.
+6. The controller records the new experiment-tree node and supplies it to the
+   next planning context.
 
 Advanced research mechanisms should be added only after this loop, its ledger
 events, and its failure boundaries are reproducible.
