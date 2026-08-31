@@ -341,6 +341,7 @@ class ExecutionRunner:
         telemetry_error: Optional[BaseException] = None
 
         consecutive_sample_failures = 0
+        consecutive_probe_failures = 0
         try:
             with TelemetryJournal(manager.telemetry_path) as journal:
                 while True:
@@ -445,13 +446,28 @@ class ExecutionRunner:
 
                     try:
                         outputs_ready = process.runtime_outputs_ready()
-                    except ProcessLaunchError:
-                        termination = (
-                            "infrastructure_error",
-                            "RUNTIME_OUTPUT_HANDSHAKE_FAILURE",
-                            "container output completion probe failed",
-                        )
-                        break
+                    except ProcessLaunchError as error:
+                        # A single probe is one ``docker exec`` on a loaded
+                        # Docker Desktop backend; treat a short streak of
+                        # failures as "not ready yet" before failing closed.
+                        consecutive_probe_failures += 1
+                        if (
+                            consecutive_probe_failures
+                            >= _MAX_CONSECUTIVE_TELEMETRY_MISSES
+                        ):
+                            detail = str(error).strip()
+                            summary = "container output completion probe failed"
+                            if detail:
+                                summary = f"{summary}: {detail}"
+                            termination = (
+                                "infrastructure_error",
+                                "RUNTIME_OUTPUT_HANDSHAKE_FAILURE",
+                                summary,
+                            )
+                            break
+                        outputs_ready = False
+                    else:
+                        consecutive_probe_failures = 0
                     if outputs_ready:
                         try:
                             process.extract_ready_runtime_outputs()

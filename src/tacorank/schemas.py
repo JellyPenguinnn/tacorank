@@ -1590,7 +1590,10 @@ class RecoveryPolicyContext(StrictModel):
     attempt_history: List[Dict[str, Any]] = Field(default_factory=list)
     repair_attempts_used: int = Field(ge=0)
     max_repair_attempts: int = Field(ge=0, le=2)
-    same_commit_retries_used: int = Field(ge=0, le=1)
+    # Keep the upper bound equal to recovery.policy.MAX_SAME_COMMIT_RETRIES:
+    # the router builds this context AFTER a failure, so the counter can show
+    # every granted retry as already used.
+    same_commit_retries_used: int = Field(ge=0, le=2)
     remaining_repair_budget: int = Field(ge=0)
     previous_error_fingerprints: List[NonEmptyStr] = Field(default_factory=list)
     remaining_run_budget: Dict[str, int] = Field(default_factory=dict)
