@@ -568,6 +568,34 @@ class DeepSeekResearchProvider:
             )
 
     def _context_payload(self, context: Any) -> Dict[str, Any]:
+        evidence_event_ids = set(
+            str(item)
+            for item in (get_value(context, "source_event_ids", []) or [])
+        )
+        for field_name in (
+            "baseline",
+            "current_best",
+            "eligible_frontier",
+            "family_history",
+            "active_lessons",
+            "research_frontier",
+            "research_observations",
+        ):
+            values = get_value(context, field_name, None)
+            if values is None:
+                continue
+            if not isinstance(values, (list, tuple, set, frozenset)):
+                values = (values,)
+            for item in values:
+                for provenance_name in ("source_event_ids", "supporting_event_ids"):
+                    provenance = get_value(item, provenance_name, []) or []
+                    evidence_event_ids.update(str(event_id) for event_id in provenance)
+        round_summary = get_value(context, "round_summary", None)
+        if round_summary is not None:
+            evidence_event_ids.update(
+                str(event_id)
+                for event_id in (get_value(round_summary, "source_event_ids", []) or [])
+            )
         return {
             "schema_version": get_value(context, "schema_version", "1.0"),
             "context_id": get_value(context, "context_id", None),
@@ -617,6 +645,13 @@ class DeepSeekResearchProvider:
             "remaining_budget": _jsonable(get_value(context, "remaining_budget", None)),
             "convergence": _jsonable(get_value(context, "convergence", None)),
             "source_event_ids": _jsonable(get_value(context, "source_event_ids", [])),
+            # This is a controller-derived, current-run-only provenance index.
+            # The model may copy IDs from it, but cannot add to it.
+            "research_evidence_event_ids": sorted(
+                event_id
+                for event_id in evidence_event_ids
+                if event_id.startswith("evt_")
+            ),
             "rendered_context": _code_blind(get_value(context, "content", "")),
         }
 
@@ -746,7 +781,7 @@ class DeepSeekResearchProvider:
                     "falsification_condition": "observable failure condition",
                     "confidence": "number from 0 to 1",
                     "evidence_event_ids": [
-                        "one or more exact IDs copied from context or observations"
+                        "one or more exact IDs copied from context.research_evidence_event_ids or observations"
                     ],
                     "conservative_parameter_guidance": {
                         "default_setting": "one conservative fixed configuration",

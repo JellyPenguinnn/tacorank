@@ -39,6 +39,51 @@ def _get(value: Any, name: str, default: Any = None) -> Any:
     return getattr(value, name, default)
 
 
+def _current_run_evidence_ids(context: Any) -> set[str]:
+    """Return event IDs exposed by the typed, current-run planner context.
+
+    Planner contexts carry provenance in nested advisory aggregates (frontier,
+    round summaries, experiment summaries, and observations).  Those IDs are
+    still current-run evidence, even when they are not repeated in the
+    document-level ``source_event_ids`` field.  Keep this allowlist structural
+    and typed: never scrape IDs from rendered context text.
+    """
+
+    evidence: set[str] = set()
+
+    def add(value: Any, *field_names: str) -> None:
+        for field_name in field_names:
+            values = _get(value, field_name, ()) or ()
+            if isinstance(values, (str, bytes)):
+                values = (values,)
+            for item in values:
+                if isinstance(item, str) and item.startswith("evt_"):
+                    evidence.add(item)
+
+    add(context, "source_event_ids")
+    for field_name in (
+        "baseline",
+        "current_best",
+        "eligible_frontier",
+        "family_history",
+        "active_lessons",
+        "research_frontier",
+        "research_observations",
+    ):
+        values = _get(context, field_name, None)
+        if values is None:
+            continue
+        if isinstance(values, (list, tuple, set, frozenset)):
+            values = values
+        else:
+            values = (values,)
+        for item in values:
+            add(item, "source_event_ids", "supporting_event_ids")
+
+    add(_get(context, "round_summary", None), "source_event_ids")
+    return evidence
+
+
 def _default_output_factory(action: str, spec: Any, reason_code: str, reason: str, supporting_event_ids: list[str]) -> Any:
     try:
         from tacorank import schemas
@@ -367,14 +412,33 @@ class ResearchPlanner:
 
         if not isinstance(raw_turn, Mapping):
             return raw_turn
-        if raw_turn.get("action") not in {
+        value = dict(raw_turn)
+        raw_spec = value.get("spec") or value.get("experiment_spec")
+        final_field_names = (
+            "selected_action_id",
+            "claim",
+            "hypothesis",
+            "expected_mechanism",
+            "success_criterion",
+            "falsification_condition",
+            "evidence_event_ids",
+            "conservative_parameter_guidance",
+        )
+        # Some provider responses contain the complete final envelope but omit
+        # only the discriminator.  It is safe to classify that shape as a
+        # final-plan candidate because ResearchTurn still enforces every final
+        # field and the controller validates the selected action/spec below.
+        if (
+            value.get("action") is None
+            and isinstance(raw_spec, Mapping)
+            and any(value.get(name) is not None for name in final_field_names)
+        ):
+            value["action"] = ResearchTurnAction.FINALIZE_PLAN.value
+        if value.get("action") not in {
             ResearchTurnAction.FINALIZE_PLAN,
             ResearchTurnAction.FINALIZE_PLAN.value,
         }:
-            return raw_turn
-
-        value = dict(raw_turn)
-        raw_spec = value.get("spec") or value.get("experiment_spec")
+            return value
         if not isinstance(raw_spec, Mapping):
             return value
         if "spec" not in value:
@@ -401,7 +465,7 @@ class ResearchPlanner:
         if not value.get("evidence_event_ids"):
             evidence = raw_spec.get("evidence_event_ids")
             if not isinstance(evidence, (list, tuple)) or not evidence:
-                evidence = _get(context, "source_event_ids", []) or []
+                evidence = sorted(_current_run_evidence_ids(context))
             if not evidence:
                 evidence = [
                     event_id
@@ -529,10 +593,7 @@ class ResearchPlanner:
                             "LITERATURE_REQUIRED_UNAVAILABLE",
                             "Required literature evidence was not available for the final plan.",
                         )
-                    known_evidence = set(
-                        str(item)
-                        for item in (_get(context, "source_event_ids", []) or [])
-                    )
+                    known_evidence = _current_run_evidence_ids(context)
                     known_evidence.update(
                         event_id
                         for observation in observations
@@ -559,6 +620,27 @@ class ResearchPlanner:
                         validation_context = context.model_copy(
                             update={"source_event_ids": sorted(known_evidence)}
                         )
+                    elif isinstance(context, Mapping):
+                        validation_context = dict(context)
+                        validation_context["source_event_ids"] = sorted(
+                            known_evidence
+                        )
+                    else:
+                        # Unit/custom providers may use a lightweight object
+                        # instead of the production Pydantic context model.
+                        # Preserve that compatibility without mutating the
+                        # caller's context in place.
+                        try:
+                            import copy
+
+                            validation_context = copy.copy(context)
+                            setattr(
+                                validation_context,
+                                "source_event_ids",
+                                sorted(known_evidence),
+                            )
+                        except (TypeError, AttributeError):
+                            validation_context = context
                     final_request = request
                     if selected_choice.choice_id != request.policy_choice.choice_id:
                         final_request = ProviderRequest(

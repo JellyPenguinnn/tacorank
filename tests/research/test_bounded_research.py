@@ -226,3 +226,67 @@ def test_bounded_research_normalizes_final_fields_from_current_plan(
 
     assert result.action.value == "propose"
     assert result.selected_action_id is not None
+
+
+def test_bounded_research_accepts_evidence_from_nested_current_run_frontier(
+    planner_context,
+):
+    frontier_event_id = "evt_000123"
+    planner_context.research_frontier = [
+        type("Frontier", (), {"source_event_ids": [frontier_event_id]})()
+    ]
+
+    class FrontierEvidenceProvider(MockResearchProvider):
+        async def research_turn(self, request):
+            choice = request.legal_choices[0]
+            spec = _proposal(planner_context, choice)
+            spec["evidence_event_ids"] = [frontier_event_id]
+            spec["duplicate_key"] = compute_duplicate_key(spec)
+            return {
+                "action": "finalize_plan",
+                "selected_action_id": choice.choice_id,
+                "claim": "Use one mechanism supported by the current frontier.",
+                "hypothesis": "A bounded mechanism improves ranking.",
+                "expected_mechanism": "It changes relative ordering conservatively.",
+                "success_criterion": "The stable primary score improves.",
+                "falsification_condition": "The stable score does not improve.",
+                "confidence": 0.5,
+                "evidence_event_ids": [frontier_event_id],
+                "conservative_parameter_guidance": {"default": "low capacity"},
+                "spec": spec,
+            }
+
+    planner = ResearchPlanner(
+        FrontierEvidenceProvider(None), research_agent_mode="bounded_react"
+    )
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result.action.value == "propose"
+    assert frontier_event_id in result.spec.evidence_event_ids
+
+
+def test_bounded_research_normalizes_missing_action_for_final_envelope(
+    planner_context,
+):
+    class MissingActionProvider(MockResearchProvider):
+        async def research_turn(self, request):
+            choice = request.legal_choices[0]
+            return {
+                "selected_action_id": choice.choice_id,
+                "claim": "Use one legal mechanism after the turn envelope repair.",
+                "hypothesis": "A bounded mechanism improves ranking.",
+                "expected_mechanism": "It changes relative ordering conservatively.",
+                "success_criterion": "The stable primary score improves.",
+                "falsification_condition": "The stable score does not improve.",
+                "confidence": 0.5,
+                "evidence_event_ids": ["evt_000001"],
+                "conservative_parameter_guidance": {"default": "low capacity"},
+                "spec": _proposal(planner_context, choice),
+            }
+
+    planner = ResearchPlanner(
+        MissingActionProvider(None), research_agent_mode="bounded_react"
+    )
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert result.action.value == "propose"
