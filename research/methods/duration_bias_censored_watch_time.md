@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"duration_bias_censored_watch_time","family":"duration_bias","status":"candidate","tags":["duration","calibration","residual"],"cost_tier":"high","prerequisites":["baseline_parity","duration_features_legal"],"allowed_data":["train_interactions","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["duration_signal_not_permitted"],"sources":[]}
+{"schema_version":"1.0","method_id":"duration_bias_censored_watch_time","family":"duration_bias","status":"candidate","tags":["duration","calibration","residual"],"cost_tier":"high","prerequisites":["baseline_parity","duration_features_legal"],"allowed_data":["train_interactions","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["duration_signal_not_permitted"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/train.py","solution/inference.py"],"sources":[]}
 ```
 
 ## Mechanism

@@ -111,6 +111,8 @@ trajectory = {
     "fake_environment": {
         "PYTHON_DOTENV_DISABLED": os.environ.get("PYTHON_DOTENV_DISABLED"),
         "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
+        "PYTHONUTF8": os.environ.get("PYTHONUTF8"),
+        "PYTHONIOENCODING": os.environ.get("PYTHONIOENCODING"),
         "PATH": os.environ.get("PATH"),
         "DOCKER_CONFIG": os.environ.get("DOCKER_CONFIG"),
         "HOME": os.environ.get("HOME"),
@@ -450,6 +452,12 @@ def _production_worker(parts: SimpleNamespace) -> tuple[TraeCodingWorker, Path]:
         source = package_root / relative
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text("# reviewed pinned source fixture\n", encoding="utf-8")
+    (package_root / "agent" / "docker_manager.py").write_text(
+        "# TacoRank: use cross-platform bounded stateless Docker exec\n"
+        "# self._execute_stateless(command, timeout)\n"
+        '# ["timeout", "--signal=KILL"]\n',
+        encoding="utf-8",
+    )
     docker = root / "docker"
     docker.write_text("#!/usr/bin/env python3\n" + _FAKE_DOCKER, encoding="utf-8")
     docker.chmod(0o755)
@@ -512,6 +520,8 @@ def test_real_adapter_seals_patch_and_redacted_evidence(
     assert trajectory["tacorank_adapter"]["isolation_mode"] == "trusted_test"
     assert trajectory["fake_environment"]["PYTHON_DOTENV_DISABLED"] == "1"
     assert trajectory["fake_environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert trajectory["fake_environment"]["PYTHONUTF8"] == "1"
+    assert trajectory["fake_environment"]["PYTHONIOENCODING"] == "utf-8"
     assert trajectory["fake_environment"]["HOME"] != "/sensitive-real-home"
     assert trajectory["fake_environment"]["HOME"].endswith("/home")
     assert trajectory["fake_environment"]["TMPDIR"].endswith("/tmp")
@@ -568,6 +578,9 @@ def test_semantic_review_revises_then_accepts_and_records_complete_evidence(
             encoding="utf-8"
         )
     )
+    assert "# TacoRank bounded implementation-fidelity revision" in trajectory["task"]
+    assert "The approved mechanism is not fully wired." in trajectory["task"]
+    assert "Complete the approved mechanism wiring." in trajectory["task"]
     verification_meta = trajectory["tacorank_solution_verification"]
     assert verification_meta["accepted"] is True
     assert verification_meta["completed_attempts"] == 2
@@ -999,7 +1012,40 @@ def test_production_preflight_executes_read_only_mounted_tool(
         "type=bind,src=%s,dst=/agent_tools,readonly,bind-propagation=rprivate"
         % (parts.config.trae_runtime_root / "trae_agent" / "dist")
     ) in calls[1]
+    entrypoint = calls[1].index("--entrypoint")
+    assert calls[1][entrypoint + 1] == "/bin/sh"
+    assert calls[1][-2:] == [
+        "-c",
+        "command -v timeout >/dev/null && /agent_tools/edit_tool --help",
+    ]
     assert calls[2] == ["start", "--attach", container_id]
+
+
+def test_runtime_preflight_requires_cross_platform_docker_bridge(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    parts = adapter_parts
+    worker, _ = _production_worker(parts)
+    manager = (
+        parts.config.trae_runtime_root
+        / "trae_agent"
+        / "agent"
+        / "docker_manager.py"
+    )
+    manager.write_text("# unpatched pinned source\n", encoding="utf-8")
+    parts.config = replace(
+        parts.config,
+        trae_runtime_manifest_sha256=hash_trae_runtime_package(
+            parts.config.trae_runtime_root
+        ),
+    )
+    worker = _worker(parts)
+
+    with pytest.raises(CodingWorkerError) as failure:
+        worker._verify_runtime_root()
+
+    assert failure.value.code == "TRAE_RUNTIME_IDENTITY_MISMATCH"
+    assert "cross-platform Docker bridge is missing" in str(failure.value)
 
 
 def test_local_preflight_does_not_require_provider_credential(
@@ -1291,3 +1337,20 @@ def test_production_sanitized_path_uses_host_separator(
         assert path_entries[1:] == os.environ.get("PATH", "").split(os.pathsep)
     else:
         assert path_entries[1:] == ["/usr/bin", "/bin"]
+
+
+def test_sanitized_environment_forces_utf8_console(
+    adapter_parts: SimpleNamespace,
+) -> None:
+    environment = _worker(adapter_parts)._sanitized_environment()
+
+    assert environment["PYTHONUTF8"] == "1"
+    assert environment["PYTHONIOENCODING"] == "utf-8"
+    result = subprocess.run(
+        (sys.executable, "-c", "print('\\u2705')"),
+        check=True,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert result.stdout.decode("utf-8").strip() == "\u2705"

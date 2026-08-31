@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -360,6 +361,81 @@ def test_patch_trae_read_only_attach_reuses_pre_mounted_tools(
     compile(patched, str(docker_manager), "exec")
 
 
+def test_patch_trae_docker_exec_is_cross_platform_and_bounded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    docker_manager = site_packages / "trae_agent/agent/docker_manager.py"
+    docker_manager.parent.mkdir(parents=True)
+    docker_manager.write_text(
+        '''class DockerException(Exception):
+    pass
+
+class DockerManager:
+    def start(self):
+            self._copy_tools_to_container()
+            # if self.interactive:
+            self._start_persistent_shell()
+
+    def execute(self, command: str, timeout: int = 300):
+        # if self.interactive:
+        return self._execute_interactive(command, timeout)
+        # else:
+        #     return self._execute_stateless(command)
+
+    def _start_persistent_shell(self):
+        pass
+''',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        deployment_module, "_trae_site_packages", lambda runtime: site_packages
+    )
+
+    deployment_module._patch_trae_cross_platform_docker_exec(
+        tmp_path / "runtime"
+    )
+
+    patched = docker_manager.read_text(encoding="utf-8")
+    assert deployment_module.TRAE_STATELESS_DOCKER_MARKER in patched
+    assert "return self._execute_stateless(command, timeout)" in patched
+    assert '"timeout", "--signal=KILL"' in patched
+    assert "workdir=self.container_workspace" in patched
+    assert "self._start_persistent_shell()" not in patched.split(
+        "def _start_persistent_shell", 1
+    )[0]
+    compile(patched, str(docker_manager), "exec")
+    namespace = {}
+    exec(compile(patched, str(docker_manager), "exec"), namespace)
+    calls = []
+
+    class Container:
+        def exec_run(self, argv, *, workdir):
+            calls.append((argv, workdir))
+            return SimpleNamespace(exit_code=0, output=b"portable output\n")
+
+    manager = namespace["DockerManager"]()
+    manager.container = Container()
+    manager.container_workspace = "/workspace"
+    code, output = manager.execute("printf portable", timeout=7)
+
+    assert code == 0
+    assert output == "portable output"
+    assert calls == [
+        (
+            [
+                "timeout",
+                "--signal=KILL",
+                "7s",
+                "/bin/bash",
+                "-lc",
+                "printf portable",
+            ],
+            "/workspace",
+        )
+    ]
+
+
 def test_patch_trae_deepseek_reasoning_is_explicit_and_continuous(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -472,6 +548,10 @@ def test_patch_trae_docker_edit_tool_filters_and_quotes_arguments(
 import os
 
 class Executor:
+    def translate(self, relative_path):
+            container_path = os.path.join(self._container_workspace_dir, relative_path)
+            return os.path.normpath(container_path)
+
     def run(self, processed_args, sub_command):
                 executable_path = f"{self._docker_manager.CONTAINER_TOOLS_PATH}/edit_tool"
                 cmd_parts = [executable_path, sub_command]
@@ -500,7 +580,16 @@ class Executor:
     assert '"view": ("path", "view_range")' in patched
     assert "for key in command_arguments" in patched
     assert "shlex.join(cmd_parts)" in patched
+    assert "posixpath.join(" in patched
+    assert 'relative_path.replace(os.sep, "/")' in patched
     compile(patched, str(executor), "exec")
+    namespace = {}
+    exec(compile(patched, str(executor), "exec"), namespace)
+    instance = namespace["Executor"]()
+    instance._container_workspace_dir = "/workspace"
+    assert instance.translate(os.path.join("solution", "candidate.py")) == (
+        "/workspace/solution/candidate.py"
+    )
 
 
 def test_generated_trae_yaml_uses_v4_flash() -> None:
@@ -511,9 +600,119 @@ def test_generated_trae_yaml_uses_v4_flash() -> None:
     assert "deepseek-v4-pro" not in document
 
 
+def test_generated_live_deployment_caps_repair_at_twenty_steps(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    site_packages = runtime / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    identity = {}
+    for key, name in (
+        ("executable", "trae.exe"),
+        ("direct_url", "direct_url.json"),
+        ("dotenv_metadata", "METADATA"),
+    ):
+        path = runtime / name
+        path.write_text(key, encoding="utf-8")
+        identity[key] = path
+    identity["site_packages"] = site_packages
+    trae_yaml = tmp_path / "trae.yaml"
+    trae_yaml.write_text("models: {}\n", encoding="utf-8")
+    docker = tmp_path / "docker.exe"
+    docker.write_text("docker", encoding="utf-8")
+    monkeypatch.setattr(
+        deployment_module,
+        "hash_trae_runtime_package",
+        lambda path: "a" * 64,
+    )
+
+    payload = deployment_module._trae_payload(
+        runtime=runtime,
+        runtime_identity=identity,
+        trae_yaml=trae_yaml,
+        docker=docker,
+        docker_host="npipe:////./pipe/dockerDesktopLinuxEngine",
+        image="sha256:" + "b" * 64,
+    )
+
+    assert payload["repair_step_limit"] == 20
+
+
 def test_trae_responses_sdk_is_exactly_pinned() -> None:
     requirements = (
         Path(__file__).parents[2] / "requirements-trae.txt"
     ).read_text(encoding="utf-8")
 
     assert "openai==3.6.0" in requirements.splitlines()
+
+
+def test_runtime_dockerfile_installs_reviewed_runtime_requirements() -> None:
+    dockerfile = (
+        Path(__file__).parents[2] / "docker" / "runtime.Dockerfile"
+    ).read_text(encoding="utf-8")
+
+    assert "--requirement requirements.txt" in dockerfile
+    assert "python -m pip install --no-cache-dir --no-deps ." in dockerfile
+    assert dockerfile.index("--requirement requirements.txt") < dockerfile.index(
+        "python -m pip install --no-cache-dir --no-deps ."
+    )
+
+
+def test_runtime_import_inventory_is_bound_to_built_image(
+    tmp_path: Path, monkeypatch
+) -> None:
+    observed = {}
+
+    def output(args, *, cwd, label):
+        observed.update(args=tuple(args), cwd=cwd, label=label)
+        roots = sorted(
+            {
+                "benchmarks",
+                "certifi",
+                "numpy",
+                "pandas",
+                "pydantic",
+                "tacorank",
+                "yaml",
+                "_sysconfigdata__linux_aarch64-linux-gnu",
+            }
+        )
+        return json.dumps(roots)
+
+    monkeypatch.setattr(deployment_module, "_run_output", output)
+    roots = deployment_module._runtime_image_import_roots(
+        tmp_path, tmp_path / "docker", "sha256:" + "a" * 64
+    )
+
+    assert "solution" in roots
+    assert "_sysconfigdata__linux_aarch64-linux-gnu" not in roots
+    assert set(deployment_module.RUNTIME_REQUIRED_IMPORTS) != set(roots)
+    assert observed["label"] == "Docker runtime import verification"
+    assert observed["args"][1:9] == (
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+    )
+    script = observed["args"][-1]
+    for name in deployment_module.RUNTIME_REQUIRED_IMPORTS:
+        assert name in script
+
+
+def test_runtime_import_inventory_rejects_malformed_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        deployment_module,
+        "_run_output",
+        lambda *args, **kwargs: '{"not":"a list"}',
+    )
+
+    with pytest.raises(deployment_module.DeploymentError, match="inventory is malformed"):
+        deployment_module._runtime_image_import_roots(
+            tmp_path, tmp_path / "docker", "sha256:" + "b" * 64
+        )

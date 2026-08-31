@@ -66,6 +66,8 @@ class RunConfig(StrictModel):
     evaluator_sha256: str
     baseline_commit_sha: NonEmptyStr
     max_experiments: int = Field(default=50, gt=0)
+    parallel_directions: int = Field(default=1, gt=0, le=7)
+    synthesize_parallel_improvements: bool = True
     wall_time_limit_seconds: int = Field(default=21_600, gt=0)
     token_limit: Optional[int] = Field(default=None, gt=0)
     gpu_seconds_limit: Optional[int] = Field(default=None, gt=0)
@@ -79,6 +81,7 @@ class RunConfig(StrictModel):
     max_confirmation_attempts: int = Field(default=2, ge=0)
     seed_schedule: List[int]
     context_token_limit: int = Field(default=6_000, gt=0)
+    synthesis_context_token_limit: int = Field(default=16_000, gt=0)
     adapter_mode: Literal["live"] = "live"
     live_adapter_config_sha256: Optional[str] = None
     editable_roots: List[str] = Field(default_factory=lambda: ["solution"])
@@ -127,10 +130,23 @@ class RunConfig(StrictModel):
     deepseek_model: NonEmptyStr = "deepseek-v4-flash"
     deepseek_base_url: NonEmptyStr = "https://api.deepseek.com"
     deepseek_api_key_env: NonEmptyStr = "DEEPSEEK_API_KEY"
-    deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
+    deepseek_timeout_seconds: int = Field(default=300, gt=0, le=600)
+    research_planning_max_attempts: int = Field(default=2, gt=0, le=3)
+    research_planning_retry_backoff_seconds: float = Field(
+        default=1.0, ge=0.0, le=30.0
+    )
     deepseek_max_output_tokens: int = Field(default=8_192, gt=0)
     deepseek_thinking_enabled: bool = True
     deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
+    # Historical run configs omit these fields and therefore keep the old
+    # offline-only planner behavior. New setup-live deployments explicitly
+    # enable the bounded online literature skill.
+    literature_research_enabled: bool = False
+    literature_provider: Literal["openalex"] = "openalex"
+    literature_base_url: NonEmptyStr = "https://api.openalex.org"
+    literature_timeout_seconds: int = Field(default=20, gt=0, le=120)
+    literature_max_papers: int = Field(default=3, gt=0, le=5)
+    literature_min_citation_count: int = Field(default=5, ge=0)
 
     @field_validator("run_id")
     @classmethod
@@ -237,6 +253,27 @@ class RunConfig(StrictModel):
             or parsed.fragment
         ):
             raise ValueError("deepseek_base_url must be a credential-free HTTPS origin")
+        return value
+
+    @field_validator("literature_base_url")
+    @classmethod
+    def validate_literature_base_url(cls, value: str) -> str:
+        value = value.rstrip("/")
+        parsed = urlparse(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "api.openalex.org"
+            or parsed.port is not None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "literature_base_url must be the credential-free OpenAlex "
+                "HTTPS origin"
+            )
         return value
 
     @field_validator("deepseek_api_key_env")

@@ -206,8 +206,10 @@ class MonitorAction(str, Enum):
 
 class RecoveryAction(str, Enum):
     TRAE_REPAIR = "trae_repair"
+    RESTART_FROM_TRUSTED_PARENT = "restart_from_trusted_parent"
     RETRY_SAME_COMMIT = "retry_same_commit"
     ADJUST_APPROVED_RUNTIME_SETTING = "adjust_approved_runtime_setting"
+    RETURN_TO_PLANNER = "return_to_planner"
     ROLLBACK = "rollback"
     ABANDON = "abandon"
 
@@ -664,6 +666,16 @@ class ResearchProposal(StrictModel):
             raise ValueError("component_experiment_ids must be unique")
         return normalized
 
+    @field_validator("literature_evidence")
+    @classmethod
+    def validate_literature_evidence(
+        cls, values: List[LiteratureEvidence]
+    ) -> List[LiteratureEvidence]:
+        identifiers = [value.evidence_id for value in values]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("literature_evidence must not contain duplicates")
+        return values
+
 
 class ExperimentSpec(ResearchProposal):
     """Controller-bound implementation assignment consumed by the coder."""
@@ -915,6 +927,31 @@ class AdapterFailureResult(StrictModel):
         if self.outcome in (RunOutcome.SUCCESS, RunOutcome.CANCELLED):
             raise ValueError("adapter failure must have a failed outcome")
         return self
+
+
+class PlanningFailureResult(StrictModel):
+    """A run-level failure raised before a new experiment exists.
+
+    Planning failures must not be attributed to the previously completed
+    experiment.  The planner context is the durable identity for this adapter
+    boundary.
+    """
+
+    run_id: NonEmptyStr
+    context_id: NonEmptyStr
+    failure_stage: Literal["planner"] = "planner"
+    error_class: NonEmptyStr
+    error_fingerprint: str
+    error_summary: NonEmptyStr
+    diagnostic_artifacts: List[ArtifactRef] = Field(default_factory=list)
+    resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
+
+    @field_validator("error_fingerprint")
+    @classmethod
+    def validate_error_fingerprint(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("error_fingerprint must be lowercase sha256")
+        return value
 
 
 class OutputCheckResult(StrictModel):
@@ -1731,6 +1768,9 @@ class CoderContext(ContextDocument):
     active_lessons: List[Dict[str, Any]] = Field(default_factory=list)
     coding_invariants: List[NonEmptyStr] = Field(default_factory=list)
     prior_result_summaries: List[CoderPriorResultSummary] = Field(default_factory=list)
+    component_patches: List[Dict[str, Any]] = Field(default_factory=list)
+    owner_retry_error_summary: Optional[NonEmptyStr] = None
+    owner_retry_instructions: Optional[NonEmptyStr] = None
     step_limit: int = Field(gt=0)
     token_limit: Optional[int] = Field(gt=0)
     wall_time_limit_seconds: int = Field(gt=0)
@@ -1807,6 +1847,7 @@ class EventType(str, Enum):
     BASELINE_VERIFIED = "baseline.verified"
     CONTEXT_CREATED = "context.created"
     PLANNER_RECOMMENDED = "planner.recommended"
+    PLANNING_FAILED = "planning.failed"
     EXPERIMENT_PROPOSED = "experiment.proposed"
     PATCH_CREATED = "patch.created"
     PATCH_CHECKED = "patch.checked"
@@ -1832,6 +1873,13 @@ class RunStartedPayload(StrictModel):
     contract_sha256: str
     protected_paths_sha256: str
     max_experiments: int = Field(gt=0)
+    parallel_directions: int = Field(default=1, gt=0, le=7)
+    synthesize_parallel_improvements: bool = True
+    deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
+    research_planning_max_attempts: int = Field(default=1, gt=0, le=3)
+    research_planning_retry_backoff_seconds: float = Field(
+        default=0.0, ge=0.0, le=30.0
+    )
     wall_time_limit_seconds: int = Field(gt=0)
     token_limit: Optional[int] = Field(default=None, gt=0)
     gpu_seconds_limit: Optional[int] = Field(default=None, gt=0)
@@ -1894,6 +1942,11 @@ class PlannerRecommendedPayload(StrictModel):
         if self.output.action == PlannerAction.PROPOSE:
             raise ValueError("planner.recommended cannot contain a proposal")
         return self
+
+
+class PlanningFailedPayload(StrictModel):
+    type: Literal["planning.failed"] = "planning.failed"
+    result: PlanningFailureResult
 
 
 class ExperimentProposedPayload(StrictModel):
@@ -2007,6 +2060,7 @@ EventPayload = Annotated[
         BaselineVerifiedPayload,
         ContextCreatedPayload,
         PlannerRecommendedPayload,
+        PlanningFailedPayload,
         ExperimentProposedPayload,
         PatchCreatedPayload,
         PatchCheckedPayload,
@@ -2034,6 +2088,7 @@ EVENT_PAYLOAD_MODELS: Mapping[EventType, Type[StrictModel]] = {
     EventType.BASELINE_VERIFIED: BaselineVerifiedPayload,
     EventType.CONTEXT_CREATED: ContextCreatedPayload,
     EventType.PLANNER_RECOMMENDED: PlannerRecommendedPayload,
+    EventType.PLANNING_FAILED: PlanningFailedPayload,
     EventType.EXPERIMENT_PROPOSED: ExperimentProposedPayload,
     EventType.PATCH_CREATED: PatchCreatedPayload,
     EventType.PATCH_CHECKED: PatchCheckedPayload,
@@ -2176,12 +2231,27 @@ def payload_artifacts(payload: EventPayload) -> List[ArtifactRef]:
                 visit(item)
 
     visit(payload)
-    unique: Dict[str, ArtifactRef] = {}
+    # ``sha256-<digest>`` identifiers name content, not a single filesystem
+    # path.  Empty stdout and telemetry files therefore legitimately share an
+    # artifact_id while remaining distinct references that must both be
+    # verified.  Reject only an actual content-identity contradiction.
+    content_identities: Dict[str, Tuple[str, int]] = {}
+    unique: Dict[Tuple[str, str, str, str, int, str], ArtifactRef] = {}
     for item in found:
-        previous = unique.get(item.artifact_id)
-        if previous is not None and previous != item:
+        content_identity = (item.sha256, item.size_bytes)
+        previous = content_identities.get(item.artifact_id)
+        if previous is not None and previous != content_identity:
             raise ValueError("conflicting payload artifacts share artifact_id %r" % item.artifact_id)
-        unique[item.artifact_id] = item
+        content_identities[item.artifact_id] = content_identity
+        key = (
+            item.artifact_id,
+            item.path,
+            item.kind.value,
+            item.sha256,
+            item.size_bytes,
+            item.content_type or "",
+        )
+        unique[key] = item
     return [unique[key] for key in sorted(unique)]
 
 

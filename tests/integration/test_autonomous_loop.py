@@ -4,24 +4,38 @@ import asyncio
 
 import pytest
 
+from tacorank.coding import CodingWorkerError
 from tacorank.orchestrator.convergence import StopDecision
 from tacorank.orchestrator.fakes import (
+    FakeCodingWorker,
     FakeEvaluator,
     FakeExecutionRunner,
     FakeResearchPlanner,
 )
-from tacorank.orchestrator.router import ResumablePlanningError
+from tacorank.orchestrator.router import OrchestrationError, ResumablePlanningError
+from tacorank.orchestrator.finalize import FinalizationError
+from tacorank.orchestrator.state import ExperimentStatus
+from tacorank.providers.research_provider import ProviderError
 from tacorank.recovery import RecoveryManager
 from tacorank.schemas import (
     ArtifactKind,
     CheckResult,
     CheckStatus,
+    CostEstimate,
+    CostTier,
     EventType,
     ExperimentDecisionKind,
     PlannerAction,
     PlannerOutput,
     PatchCheckResult,
+    ResearchProposal,
+    Stability,
+    PlannerAction,
+    PlannerOutput,
+    PatchCheckResult,
+    RecoveryAction,
     SubmissionCheckedPayload,
+    TrustVerdict,
     Violation,
     ResearchCampaign,
     TrustVerdict,
@@ -57,6 +71,107 @@ class SequentialPlanner:
                 }
             )
         return output.model_copy(update={"spec": spec})
+
+
+class ParallelPlanner:
+    def __init__(self, parent_commit_sha: str) -> None:
+        self.parent_commit_sha = parent_commit_sha
+
+    async def propose_parallel_direction(self, context, index, count):
+        output = await FakeResearchPlanner(self.parent_commit_sha).propose(context)
+        spec = output.spec.model_copy(
+            update={
+                "hypothesis": "Independent parallel hypothesis %d of %d." % (index + 1, count),
+                "duplicate_key": "parallel:direction:%d" % index,
+            }
+        )
+        return output.model_copy(update={"spec": spec})
+
+    async def propose_synthesis(self, context, component_experiment_ids):
+        by_id = {
+            item.experiment_id: item
+            for item in [context.baseline, *context.family_history]
+        }
+        parent_id = component_experiment_ids[0]
+        parent = by_id[parent_id]
+        spec = ResearchProposal(
+            run_id=context.run_id,
+            experiment_id="exp_pending",
+            parent_experiment_id=parent_id,
+            parent_commit_sha=parent.commit_sha,
+            context_id=context.context_id,
+            hypothesis="Align every accepted parallel improvement without interaction drift.",
+            family="ensemble",
+            change_summary="Combine all compatible accepted round patches.",
+            expected_mechanism="Complementary changes retain independent gains.",
+            success_criteria="The synthesis exceeds its strongest member.",
+            falsification_condition="Any gate failure or no gain rejects synthesis.",
+            estimated_cost=CostEstimate(
+                llm_tokens_upper_bound=500,
+                wall_time_seconds_upper_bound=60,
+                gpu_seconds_upper_bound=0,
+                cost_tier=CostTier.MEDIUM,
+            ),
+            method_card_ids=["ensemble_parallel_round_synthesis"],
+            component_experiment_ids=list(component_experiment_ids[1:]),
+            evidence_event_ids=context.source_event_ids,
+            duplicate_key="parallel:round:synthesis",
+        )
+        return PlannerOutput(
+            action=PlannerAction.PROPOSE,
+            spec=spec,
+            reason_code="parallel_round_synthesis",
+            reason="Combine accepted lanes through the normal coding and gate path.",
+        )
+
+
+class ConcurrentCodingWorker:
+    def __init__(self, delegate) -> None:
+        self.delegate = delegate
+        self.active = 0
+        self.max_active = 0
+
+    async def create_patch(self, context, spec):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(0.02)
+            return await self.delegate.create_patch(context, spec)
+        finally:
+            self.active -= 1
+
+    async def repair_patch(self, context, decision):
+        return await self.delegate.repair_patch(context, decision)
+
+
+class SameMechanismReimplementationPlanner:
+    """Model the tree planner selecting its one bounded reimplementation."""
+
+    def __init__(self, parent_commit_sha: str) -> None:
+        self.parent_commit_sha = parent_commit_sha
+
+    async def propose(self, context):
+        output = await FakeResearchPlanner(
+            self.parent_commit_sha,
+            experiment_id="exp_002",
+        ).propose(context)
+        return output.model_copy(
+            update={
+                "spec": output.spec.model_copy(
+                    update={
+                        "duplicate_key": "feature_cross:user_item:v1",
+                        "hypothesis": (
+                            "A corrected implementation of the approved cross "
+                            "should alter within-user ordering."
+                        ),
+                        "change_summary": (
+                            "Reimplement the same approved mechanism from its "
+                            "trusted parent."
+                        ),
+                    }
+                )
+            }
+        )
 
 
 class NonImprovingEvaluator(FakeEvaluator):
@@ -379,11 +494,14 @@ def test_integrity_violation_is_recorded_and_stops_the_run(
     state = asyncio.run(harness.run_until_stopped())
 
     assert state.stop_reason_code == "fatal_integrity"
+    assert state.status.value == "failed"
     assert state.experiments_proposed == 1
     assert [event.event_type for event in harness.events()][-2:] == [
         EventType.LESSON_RECORDED,
         EventType.RUN_STOPPED,
     ]
+    with pytest.raises(FinalizationError, match="stopped run"):
+        asyncio.run(harness.finalize())
 
 
 def test_selected_candidate_cleanly_reproduces_and_checks_final_submission(
@@ -393,7 +511,9 @@ def test_selected_candidate_cleanly_reproduces_and_checks_final_submission(
     harness.runner = runner
     harness.bootstrap(baseline_evaluation)
     asyncio.run(harness.run_one_experiment())
-    harness.stop(StopDecision(True, "test_complete", "Finish the test search."))
+    harness.stop(
+        StopDecision(True, "no_legal_proposal", "Finish the test search.")
+    )
 
     state = asyncio.run(harness.finalize())
 

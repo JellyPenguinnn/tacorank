@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
+
+from ..schemas import LiteratureEvidence
 
 from .code_blind import find_implementation_reference
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
@@ -33,6 +35,75 @@ HIDDEN_PATTERNS = (
     "secret label",
     "ground truth test",
 )
+
+
+def _is_no_op_summary(summary: Any, context: Any) -> bool:
+    if str(enum_value(get_value(summary, "trust_verdict", ""))).lower() == "no_op":
+        return True
+    change = get_value(summary, "prediction_change", None)
+    if change is not None and not isinstance(change, (int, float)):
+        change = get_value(change, "changed_row_fraction", None)
+    try:
+        numeric_change = None if change is None else float(change)
+    except (TypeError, ValueError):
+        return False
+    threshold = get_value(
+        get_value(context, "contract_summary", None),
+        "prediction_change_no_op_threshold",
+        0.001,
+    )
+    try:
+        numeric_threshold = float(threshold)
+    except (TypeError, ValueError):
+        numeric_threshold = 0.001
+    return numeric_change is not None and numeric_change <= numeric_threshold
+
+
+def _authorized_no_op_reimplementation(
+    spec: Any, context: Any, choice: Any
+) -> bool:
+    """Allow one policy-selected duplicate mechanism after its first no-op."""
+
+    if (
+        str(get_value(choice, "phase", "")) != "no_op_reimplementation"
+        or str(get_value(choice, "reason_code", ""))
+        != "NO_OP_REIMPLEMENT_MECHANISM"
+    ):
+        return False
+    history = as_list(get_value(context, "family_history", None))
+    if not history:
+        return False
+    latest = history[-1]
+    parent = get_value(choice, "parent", None)
+    parent_id = str(get_value(latest, "parent_experiment_id", ""))
+    method_ids = {
+        str(item) for item in as_list(get_value(latest, "method_card_ids", None))
+    }
+    if (
+        not _is_no_op_summary(latest, context)
+        or str(get_value(latest, "status", "")).lower() != "no_op"
+        or str(get_value(parent, "experiment_id", "")) != parent_id
+        or str(get_value(spec, "parent_experiment_id", "")) != parent_id
+        or str(get_value(spec, "family", ""))
+        != str(get_value(latest, "family", ""))
+        or set(map(str, as_list(get_value(spec, "method_card_ids", None))))
+        != method_ids
+        or len(method_ids) != 1
+    ):
+        return False
+    matching_no_ops = 0
+    for summary in history:
+        if (
+            _is_no_op_summary(summary, context)
+            and str(get_value(summary, "parent_experiment_id", "")) == parent_id
+            and str(get_value(summary, "family", ""))
+            == str(get_value(latest, "family", ""))
+            and method_ids.intersection(
+                map(str, as_list(get_value(summary, "method_card_ids", None)))
+            )
+        ):
+            matching_no_ops += 1
+    return matching_no_ops == 1
 
 SHARED_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 EVENT_ID_PATTERN = re.compile(r"evt_\d{6,}$")
@@ -145,6 +216,15 @@ def _budget_value(budget: Any, *names: str) -> float | None:
     return None
 
 
+def _literature_snapshot(value: Any) -> dict[str, Any] | None:
+    try:
+        return LiteratureEvidence.model_validate(value).model_dump(
+            mode="json", exclude_none=False
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 class PlanValidator:
     """Validate a code-blind research proposal against verified context only."""
 
@@ -154,6 +234,7 @@ class PlanValidator:
         context: Any,
         choice: Any | None = None,
         duplicate_detector: DuplicateDetector | None = None,
+        literature_evidence: Sequence[Any] = (),
     ) -> ValidationResult:
         errors: list[str] = []
         warnings: list[str] = []
@@ -604,7 +685,9 @@ class PlanValidator:
         for field in ("baseline", "current_best", "eligible_frontier", "family_history"):
             known_summaries.extend(as_list(get_value(context, field, None)))
         seen_detector = duplicate_detector or DuplicateDetector(known_summaries)
-        if seen_detector.contains(spec):
+        if seen_detector.contains(spec) and not _authorized_no_op_reimplementation(
+            spec, context, choice
+        ):
             errors.append("DUPLICATE_EXPERIMENT")
 
         cost = get_value(spec, "estimated_cost", None)

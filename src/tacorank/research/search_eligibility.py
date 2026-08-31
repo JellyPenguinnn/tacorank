@@ -19,6 +19,7 @@ class PruneDisposition(str, Enum):
     FRONTIER = "frontier"
     SOFT = "soft_prune"
     HARD = "hard_prune"
+    NULL = "null_result"
     PENDING = "pending"
 
 
@@ -89,15 +90,38 @@ def classify_search_eligibility(summary: Any, context: Any) -> SearchEligibility
     branch = bool(get_value(summary, "parent_eligible", False))
     best = bool(get_value(summary, "best_eligible", False))
 
-    hard_reasons: list[str] = []
+    safety_reasons: list[str] = []
     if output_accepted is False:
-        hard_reasons.append("OUTPUT_REJECTED")
+        safety_reasons.append("OUTPUT_REJECTED")
     if integrity == "compromised" or verdict == "suspicious":
-        hard_reasons.append("INTEGRITY_UNTRUSTED")
-    if verdict == "no_op" or (
+        safety_reasons.append("INTEGRITY_UNTRUSTED")
+    if safety_reasons:
+        return SearchEligibility(
+            False,
+            False,
+            False,
+            False,
+            PruneDisposition.HARD,
+            tuple(safety_reasons),
+        )
+
+    no_op = verdict == "no_op" or (
         prediction_change is not None and prediction_change <= no_op_threshold
-    ):
-        hard_reasons.append("NO_MEANINGFUL_PREDICTION_CHANGE")
+    )
+    if no_op:
+        # A no-op is evidence, not a controller prune. It cannot itself become
+        # a checkpoint or parent, but the planner separately receives the
+        # bounded same-mechanism and independent-mechanism choices.
+        return SearchEligibility(
+            False,
+            False,
+            False,
+            False,
+            PruneDisposition.NULL,
+            ("NO_MEANINGFUL_PREDICTION_CHANGE",),
+        )
+
+    hard_reasons: list[str] = []
     if stability == "unstable":
         hard_reasons.append("UNSTABLE")
     if status in {"invalid", "retracted", "suspicious"} or decision == "invalid":

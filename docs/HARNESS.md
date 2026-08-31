@@ -8,7 +8,7 @@ TacoRank is the integration backbone for the five-person autonomous KuaiRand-Pur
 frozen contract + official baseline
                 |
                 v
-ledger-derived research feedback -> DeepSeek researcher -> ResearchProposal
+ledger-derived research feedback -> bounded keyless OpenAlex evidence -> DeepSeek researcher -> ResearchProposal
                 |                                      |
                 |                                      v
                 |                     controller binds code targets + ladder
@@ -35,7 +35,7 @@ ledger-derived research feedback -> DeepSeek researcher -> ResearchProposal
 clean reproduce validation best -> test inference -> Gate B -> submission check
 ```
 
-`Harness.run_until_stopped()` executes one experiment at a time. Each terminal decision and lesson is appended before the next planner context is built, so later proposals consume durable evidence rather than in-memory messages. `Harness.run_to_completion()` adds finalization after a frozen convergence, experiment, wall-time, token, GPU, integrity, or no-legal-proposal stop.
+`Harness.run_until_stopped()` uses the configured round width. Production requests seven directions concurrently from one planner snapshot and retries typed transient provider failures once under the frozen planning timeout. The controller atomically seals the complete distinct batch before fan-out; each direction then gets its own Trae worktree, Gate A receipt, execution seal, Gate B result, protected evaluation, and terminal decision. Protected public-query indices are serialized at the evaluator boundary even though coding and execution are concurrent. When two or more round members independently improve the incumbent, a synthesis-capable research and coding pass receives their verified component patches, creates a fresh candidate from the strongest member, and traverses the same gates and evaluation ladder. Only then does the next planner snapshot begin. `Harness.run_to_completion()` adds finalization after a frozen convergence, experiment, wall-time, token, GPU, integrity, or no-legal-proposal stop.
 
 Confirmation seeds are additional executions of the same experiment and commit. They are fully recorded and charged to resource totals, but only the terminal full-fidelity experiment decision consumes one convergence-patience slot. The default frozen rule is no improvement greater than `0.002` for three consecutive terminal full iterations.
 
@@ -61,6 +61,11 @@ durable fact. `PlannerContext.active_lessons` contains only active `lesson.recor
 events selected by the deterministic retrieval policy. Hidden-final evaluations enter
 neither layer, and `lessons/*.md` remains a generated human-readable projection rather
 than a planner input or source of truth.
+
+Suspicious non-compromised experiments are quarantined as non-reward evidence
+and cannot become parents, refinements, or ensemble members. The search policy
+continues from a verified eligible frontier parent when an independent legal
+method remains. Compromised integrity still fails closed.
 
 ## Experiment lifecycle and gates
 
@@ -92,9 +97,24 @@ removed to meet the context budget. Gate B also rejects outputs in which one exa
 score value occupies more than the hash-bound run limit, preventing clipping-driven
 zero/one collapse before protected evaluation.
 
-Execution, Gate A, Gate B, and evaluation no-op failures enter the bounded recovery route. Recovery may retry the same commit once, apply an approved runtime adjustment, ask Trae for at most two repair patches, roll back, or abandon. Every replacement patch needs a new Gate A receipt. Repeated fingerprints stop repair cycling, and deliberate credential, hidden-label, target-label, or network boundary violations are recorded and terminate the run.
+Execution, Gate A, Gate B, and adapter failures enter the bounded recovery route. A verified evaluation no-op (`NO_PREDICTION_CHANGE`) first receives one implementation-level Trae repair action, capped at 20 internal Trae steps in newly generated production deployments. The repair task preserves the approved hypothesis, begins from the accepted diff and score-output path, and asks for the smallest wiring fix that produces non-identical predictions. The replacement patch must pass Gate A and the same fidelity is rerun. If predictions remain identical, recovery records `return_to_planner` and the node becomes a neutral terminal `no_op`; recovery does **not** emit an experiment prune decision. If Trae exhausts the bounded repair task without producing a valid patch, TacoRank preserves that worker failure and returns the original no-op evidence to planning by the same neutral route instead of stopping the run. The no-op node cannot become a parent or checkpoint. The research tree planner then ranks the legal next directions when available: one modified same-mechanism plan from the last trusted parent, or an independent mechanism that effectively retires the branch. A second planner-selected no-op for that parent/family/method removes the same-mechanism option.
 
-The pinned DeepSeek Responses client catches malformed or truncated function arguments before Trae executes them and asks for one smaller valid JSON call inside the existing step budget. The implementation verifier likewise retries malformed or truncated JSON once in a compact form before failing closed. An unsuccessful coding trajectory retains a redacted trajectory and process log when available, provider token usage, and elapsed wall time in `adapter.failed`. Any failure that remains after the internal solver/verifier loop is routed through Waihong's unchanged bounded self-recovery policy; only classified transient coding failures receive its one same-commit retry, and all other abandon or stop outcomes remain policy-owned. Generated experiment reports expose these failure and recovery records without changing ledger authority.
+Recovery is owner-aware. A malformed verifier or transient provider response retries that verifier, Gate A and Gate B adapter failures retry their own gate, evaluator failures retry the evaluator, and execution infrastructure failures retry the sealed execution input. Each owner retry is globally bounded and event replay restores its exact stage checkpoint; it does not rerun an unrelated earlier stage. A validated candidate code, interface, numerical, or output-contract defect may instead invoke Trae. That prompt contains the redacted error, fingerprint, failed checks, prior attempts, contract limits, and a bounded proposed correction; Trae must validate the proposal against the evidence before making the smallest edit. Every replacement patch needs a new Gate A receipt.
+
+Candidate-scoped integrity findings—including protected-path edits, path/symlink/submodule escape, hidden or future-label access, unauthorized network use, and protected data in output—are never repaired in place. The controller preserves the rejected commit and violation evidence, resets only the disposable experiment branch to its declared trusted parent, and gives Trae one bounded clean restart with the exact finding as a hard constraint. If that restart repeats the violation or the repair budget is exhausted, only the experiment is abandoned and planning may continue. Credential detection, protected identity/receipt/hash inconsistency, ambiguous controller failure, disk/quota exhaustion, and exhausted run budgets remain fail-closed because the trusted recovery point or operating environment is not safe to assume.
+
+The pinned DeepSeek Responses client catches malformed or truncated function arguments before Trae executes them and asks for one smaller valid JSON call inside the existing step budget. The implementation verifier likewise retries malformed or schema-invalid JSON once with the exact safe parser diagnostic and required key shape. A valid rejection supplies grounded findings and required changes to Trae's bounded implementation-revision loop; a still-malformed verifier response remains a verifier protocol failure rather than evidence that candidate code is defective. An unsuccessful coding trajectory retains a redacted trajectory and process log when available, provider token usage, and elapsed wall time in `adapter.failed`. Generated experiment reports expose these failure and recovery records without changing ledger authority.
+
+The pinned Trae Docker manager is patched during setup to use bounded stateless
+Docker exec rather than an interactive host pseudo-terminal. The same reviewed
+path works through Docker Desktop's Windows named pipe and macOS/Linux Unix
+socket, always starts commands in `/workspace`, converts host paths to POSIX
+container paths, and applies an in-container timeout. Runtime identity checks
+require this patch, while preflight verifies the timeout utility and read-only
+tool mount before any research ledger is created. The isolated host-side Trae
+process also forces Python UTF-8 mode and UTF-8 standard streams, preventing
+Windows legacy code pages from crashing on Rich status glyphs while preserving
+the same deterministic environment on macOS and Linux.
 
 Resource failures are typed and fail closed. OOM and hard memory-limit signals may use an allowlisted runtime adjustment; disk-full, `ENOSPC`, output-quota, and storage-floor signals abandon the experiment without retrying or asking the coding worker to make an unrelated patch. The controller records the stable reason code and an operational lesson, so an operator can reclaim space or choose a fresh runtime before resuming. Evidence and prior run directories are never deleted automatically.
 
@@ -149,7 +169,7 @@ Production exposes no fake runtime flag. Test doubles are constructed directly b
 
 ## DeepSeek and credential boundary
 
-The researcher and pinned Trae worker use `deepseek-v4-flash` with high reasoning through separate bounded adapters. `SearchPolicy` still owns the parent, family, phase, and reviewed method card. DeepSeek receives only research policy, method overviews, experiment feedback, lessons, and budget, then returns a code-blind hypothesis and intervention. It does not receive repository paths, implementation interfaces, commit lineage, pipeline stages, commands, or the execution ladder. After validation, the deterministic controller binds the authorized code targets and frozen smoke/proxy/full ladder before Trae receives the coding context. Invalid provider output is recorded at a durable planner checkpoint and raises a resumable error rather than becoming false convergence.
+The researcher and pinned Trae worker use `deepseek-v4-flash` with high reasoning through separate bounded adapters. `SearchPolicy` still owns the parent, family, phase, and reviewed method card. Once that method is selected, the live planner sends only a static method-derived query to the keyless OpenAlex Works API and snapshots a bounded set of papers; no dataset rows, metrics, run identifiers, or user identifiers leave the controller. DeepSeek receives the research policy, method overviews, experiment feedback, lessons, budget, and untrusted paper snapshot, then must cite an exact retrieved evidence ID in its code-blind hypothesis and intervention. It cannot invent or alter citations. DeepSeek does not receive repository paths, implementation interfaces, commit lineage, pipeline stages, commands, or the execution ladder. After validation, the deterministic controller binds the authorized code targets and frozen smoke/proxy/full ladder before Trae receives the coding context. Candidate coding and execution remain network-disabled. Invalid provider output is recorded at a durable planner checkpoint and raises a resumable error rather than becoming false convergence.
 
 The API key is read only from the configured environment variable. It must never appear in configuration, prompts, Git, logs, trajectories, fixtures, or artifacts.
 

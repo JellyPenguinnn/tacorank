@@ -89,6 +89,25 @@ class ExperimentNodeView:
         }
 
     @property
+    def is_exploratory_parent(self) -> bool:
+        """Allow only controller-approved, confirmed near-best exploration."""
+
+        verdict = str(enum_value(self.trust_verdict) or "").lower()
+        integrity = str(enum_value(self.integrity) or "").lower()
+        stability = str(enum_value(self.stability) or "").lower()
+        fidelity = str(enum_value(self.highest_completed_fidelity) or "").lower()
+        decision = str(enum_value(self.decision) or "").lower()
+        explicitly_eligible = bool(get_value(self.summary, "parent_eligible", False))
+        return (
+            explicitly_eligible
+            and verdict == "inconclusive"
+            and integrity == "clean"
+            and stability == "confirmed"
+            and fidelity == "full"
+            and decision in {"accept", "accepted"}
+        )
+
+    @property
     def is_parent_eligible(self) -> bool:
         explicit = get_value(self.summary, "parent_eligible", None)
         if explicit is False:
@@ -98,7 +117,7 @@ class ExperimentNodeView:
             return False
         if str(enum_value(self.decision) or "").lower() in {"reject", "prune", "invalid"}:
             return False
-        if not self.is_trusted:
+        if not (self.is_trusted or self.is_exploratory_parent):
             return False
         if self.is_root:
             # A root is parent-eligible only after the orchestrator has

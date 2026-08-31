@@ -24,8 +24,10 @@ from .coding import (
     TRAE_DEEPSEEK_REASONING_MARKER,
     TRAE_DEEPSEEK_TOOL_JSON_MARKER,
     TRAE_DOCKER_EDIT_TOOL_MARKER,
+    TRAE_STATELESS_DOCKER_MARKER,
     hash_trae_runtime_package,
 )
+from .config import PRODUCTION_TARGET_INTERFACE_EXCERPTS
 from .docker_host import normalize_local_docker_host
 from .evaluation.proxy import split_validation_indices
 from .feature_materialization import (
@@ -50,6 +52,16 @@ RAW_REQUIRED = (
 TRAE_ONLY_DATA_BOUNDARY_SHA256 = hashlib.sha256(
     b"tacorank-trae-only-no-dataset-v1"
 ).hexdigest()
+RUNTIME_REQUIRED_IMPORTS = (
+    "benchmarks.kuairand_pure.pipeline",
+    "certifi",
+    "numpy",
+    "pandas",
+    "pydantic",
+    "tacorank",
+    "yaml",
+)
+RUNTIME_SOURCE_IMPORT_ROOTS = ("solution",)
 
 
 class DeploymentError(RuntimeError):
@@ -131,6 +143,7 @@ def setup_trae_deployment(
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
         "data_boundary_sha256": TRAE_ONLY_DATA_BOUNDARY_SHA256,
+        "allowed_import_roots": list(assets["allowed_import_roots"]),
         "trae": _trae_payload(
             runtime=runtime,
             runtime_identity=assets["runtime_identity"],
@@ -192,6 +205,7 @@ def setup_live_deployment(
     assets = _prepare_trae_runtime(root, runtime, python, docker)
     image = str(assets["image"])
     image_environment_sha256 = str(assets["image_environment_sha256"])
+    allowed_import_roots = list(assets["allowed_import_roots"])
     runtime_identity = assets["runtime_identity"]
     generated_data = _prepare_data(root, deployment, data)
 
@@ -264,7 +278,7 @@ def setup_live_deployment(
         "protected_columns": ["label"],
         "hidden_path_tokens": ["hidden_labels", "final_labels", "test_labels"],
         "future_column_patterns": ["(?:^|_)future(?:_|$)"],
-        "allowed_import_roots": None,
+        "allowed_import_roots": allowed_import_roots,
         "allowed_capability_imports": [],
         "allowed_dependency_changes": [],
     }
@@ -388,10 +402,18 @@ def setup_live_deployment(
         "deepseek_model": DEEPSEEK_MODEL,
         "deepseek_base_url": DEEPSEEK_BASE_URL,
         "deepseek_api_key_env": "DEEPSEEK_API_KEY",
-        "deepseek_timeout_seconds": 120,
+        "deepseek_timeout_seconds": 300,
+        "research_planning_max_attempts": 2,
+        "research_planning_retry_backoff_seconds": 1.0,
         "deepseek_max_output_tokens": 8192,
         "deepseek_thinking_enabled": True,
         "deepseek_reasoning_effort": "high",
+        "literature_research_enabled": True,
+        "literature_provider": "openalex",
+        "literature_base_url": "https://api.openalex.org",
+        "literature_timeout_seconds": 20,
+        "literature_max_papers": 3,
+        "literature_min_citation_count": 5,
     }
     _write_json_exclusive(run_path, run_payload)
     return {
@@ -436,9 +458,12 @@ def _prepare_trae_runtime(
 
     _install_trae(python, runtime, root)
     _patch_trae_read_only_attach(runtime)
+    _patch_trae_cross_platform_docker_exec(runtime)
     _patch_trae_deepseek_reasoning(runtime)
     _patch_trae_docker_edit_tool(runtime)
-    image, image_environment_sha256 = _build_runtime_image(root, docker)
+    image, image_environment_sha256, allowed_import_roots = _build_runtime_image(
+        root, docker
+    )
     _install_trae_tools(runtime, docker, image, root)
     runtime_identity = _trae_identity(runtime)
     trae_yaml = runtime / "trae-agent.yaml"
@@ -447,6 +472,7 @@ def _prepare_trae_runtime(
     return {
         "image": image,
         "image_environment_sha256": image_environment_sha256,
+        "allowed_import_roots": allowed_import_roots,
         "runtime_identity": runtime_identity,
         "trae_yaml": trae_yaml,
     }
@@ -473,7 +499,7 @@ def _trae_payload(
         "max_steps_cap": 64,
         "max_token_cap": None,
         "max_wall_time_seconds_cap": 1800,
-        "repair_step_limit": 48,
+        "repair_step_limit": 20,
         "repair_token_limit": None,
         "repair_wall_time_limit_seconds": 1200,
         "repair_allowed_command_ids": ["candidate_smoke"],
@@ -995,6 +1021,104 @@ def _patch_trae_read_only_attach(runtime: Path) -> None:
         raise DeploymentError("pinned Trae read-only attach patch is invalid") from exc
 
 
+def _patch_trae_cross_platform_docker_exec(runtime: Path) -> None:
+    """Replace Trae's Unix-only interactive pexpect shell with Docker exec.
+
+    The reviewed container remains the security boundary. Each tool call starts
+    in ``/workspace`` and is bounded inside the container by coreutils
+    ``timeout``. This works through Docker Desktop's named pipe on Windows and
+    its Unix socket on macOS/Linux without relying on a host pseudo-terminal.
+    """
+
+    docker_manager = (
+        _trae_site_packages(runtime) / "trae_agent" / "agent" / "docker_manager.py"
+    )
+    try:
+        if (
+            docker_manager.is_symlink()
+            or not docker_manager.is_file()
+            or docker_manager.resolve(strict=True) != docker_manager
+        ):
+            raise DeploymentError("Trae Docker manager is not a canonical source file")
+        original = docker_manager.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DeploymentError("Trae Docker manager could not be read") from exc
+
+    startup_anchor = '''            self._copy_tools_to_container()
+            # if self.interactive:
+            self._start_persistent_shell()
+'''
+    execute_anchor = '''        # if self.interactive:
+        return self._execute_interactive(command, timeout)
+        # else:
+        #     return self._execute_stateless(command)
+'''
+    helper_anchor = '''    def _start_persistent_shell(self):
+'''
+    if (
+        original.count(startup_anchor) != 1
+        or original.count(execute_anchor) != 1
+        or original.count(helper_anchor) != 1
+        or TRAE_STATELESS_DOCKER_MARKER in original
+    ):
+        raise DeploymentError(
+            "pinned Trae cross-platform Docker patch does not apply cleanly"
+        )
+
+    startup_replacement = f'''            self._copy_tools_to_container()
+            # {TRAE_STATELESS_DOCKER_MARKER}.
+            probe = self.container.exec_run(
+                ["/bin/sh", "-c", "command -v timeout >/dev/null"],
+                workdir=self.container_workspace,
+            )
+            if probe.exit_code != 0:
+                raise DockerException(
+                    "Container does not provide the reviewed timeout command."
+                )
+            print("Stateless Docker execution is ready.")
+'''
+    stateless_helper = '''    def _execute_stateless(self, command: str, timeout_seconds: int) -> tuple[int, str]:
+        """Execute one bounded command without a host pseudo-terminal."""
+        if not self.container:
+            raise RuntimeError("Container is not running. Call start() first.")
+        try:
+            bounded_timeout = max(1, int(timeout_seconds))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Docker command timeout must be a positive integer.") from exc
+        result = self.container.exec_run(
+            [
+                "timeout", "--signal=KILL", f"{bounded_timeout}s",
+                "/bin/bash", "-lc", command,
+            ],
+            workdir=self.container_workspace,
+        )
+        output = result.output
+        if isinstance(output, tuple):
+            output = b"".join(part or b"" for part in output)
+        if isinstance(output, bytes):
+            rendered = output.decode("utf-8", errors="replace")
+        else:
+            rendered = str(output or "")
+        return int(result.exit_code), rendered.strip()
+
+'''
+    patched = (
+        original.replace(startup_anchor, startup_replacement)
+        .replace(
+            execute_anchor,
+            "        return self._execute_stateless(command, timeout)\n",
+        )
+        .replace(helper_anchor, stateless_helper + helper_anchor)
+    )
+    try:
+        compile(patched, str(docker_manager), "exec")
+        docker_manager.write_text(patched, encoding="utf-8")
+    except (OSError, SyntaxError) as exc:
+        raise DeploymentError(
+            "pinned Trae cross-platform Docker patch is invalid"
+        ) from exc
+
+
 def _patch_trae_deepseek_reasoning(runtime: Path) -> None:
     """Make the pinned Responses client explicit and continuous for DeepSeek thinking."""
 
@@ -1163,6 +1287,9 @@ def _patch_trae_docker_edit_tool(runtime: Path) -> None:
         raise DeploymentError("Trae Docker edit executor could not be read") from exc
 
     import_anchor = "import os\n"
+    path_anchor = '''            container_path = os.path.join(self._container_workspace_dir, relative_path)
+            return os.path.normpath(container_path)
+'''
     block_anchor = '''                executable_path = f"{self._docker_manager.CONTAINER_TOOLS_PATH}/edit_tool"
                 cmd_parts = [executable_path, sub_command]
 
@@ -1179,6 +1306,7 @@ def _patch_trae_docker_edit_tool(runtime: Path) -> None:
 '''
     if (
         original.count(import_anchor) != 1
+        or original.count(path_anchor) != 1
         or original.count(block_anchor) != 1
         or TRAE_DOCKER_EDIT_TOOL_MARKER in original
     ):
@@ -1208,8 +1336,17 @@ def _patch_trae_docker_edit_tool(runtime: Path) -> None:
 
                 command_to_run = shlex.join(cmd_parts)
 '''
-    patched = original.replace(import_anchor, import_anchor + "import shlex\n").replace(
-        block_anchor, replacement
+    patched = (
+        original.replace(import_anchor, import_anchor + "import posixpath\nimport shlex\n")
+        .replace(
+            path_anchor,
+            '''            container_path = posixpath.join(
+                self._container_workspace_dir, relative_path.replace(os.sep, "/")
+            )
+            return posixpath.normpath(container_path)
+''',
+        )
+        .replace(block_anchor, replacement)
     )
     try:
         compile(patched, str(executor), "exec")
@@ -1335,7 +1472,9 @@ def _trae_identity(runtime: Path) -> Mapping[str, Path]:
     }
 
 
-def _build_runtime_image(root: Path, docker: Path) -> Tuple[str, str]:
+def _build_runtime_image(
+    root: Path, docker: Path
+) -> Tuple[str, str, Tuple[str, ...]]:
     commit = _git_text(root, ("rev-parse", "--short=12", "HEAD"))
     tag = "tacorank-runtime:" + commit
     platform = _run_output(
@@ -1390,7 +1529,76 @@ def _build_runtime_image(root: Path, docker: Path) -> Tuple[str, str]:
     payload = json.dumps(environment, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
-    return image_id, hashlib.sha256(payload).hexdigest()
+    allowed_import_roots = _runtime_image_import_roots(root, docker, image_id)
+    return image_id, hashlib.sha256(payload).hexdigest(), allowed_import_roots
+
+
+def _runtime_image_import_roots(
+    root: Path, docker: Path, image: str
+) -> Tuple[str, ...]:
+    """Verify core runtime imports and inventory exact top-level image modules."""
+
+    required = json.dumps(RUNTIME_REQUIRED_IMPORTS, separators=(",", ":"))
+    script = (
+        "import importlib,json,pkgutil,sys;"
+        "required=" + required + ";"
+        "[importlib.import_module(name) for name in required];"
+        "roots=set(sys.builtin_module_names);"
+        "roots.update(getattr(sys,'stdlib_module_names',()));"
+        "roots.update(item.name for item in pkgutil.iter_modules());"
+        "print(json.dumps(sorted(roots),separators=(',',':')))"
+    )
+    output = _run_output(
+        (
+            str(docker),
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--entrypoint",
+            "/usr/local/bin/python3",
+            image,
+            "-I",
+            "-c",
+            script,
+        ),
+        cwd=root,
+        label="Docker runtime import verification",
+    )
+    try:
+        discovered = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise DeploymentError("Docker runtime import inventory is malformed") from error
+    if (
+        not isinstance(discovered, list)
+        or not discovered
+        or len(discovered) > 10_000
+        or not all(
+            isinstance(value, str)
+            and len(value) <= 200
+            and "\x00" not in value
+            for value in discovered
+        )
+        or len(discovered) != len(set(discovered))
+    ):
+        raise DeploymentError("Docker runtime import inventory is malformed")
+    # ``pkgutil`` may report interpreter-internal filenames such as
+    # ``_sysconfigdata__linux_aarch64-linux-gnu``. They are loadable through
+    # importlib but cannot appear as an AST import root, so omit them from the
+    # Gate A allowlist instead of rejecting an otherwise valid runtime image.
+    roots = {value for value in discovered if value.isidentifier()}
+    roots.update(RUNTIME_SOURCE_IMPORT_ROOTS)
+    required_roots = {name.split(".", 1)[0] for name in RUNTIME_REQUIRED_IMPORTS}
+    if not required_roots.issubset(roots):
+        raise DeploymentError("Docker runtime import inventory is incomplete")
+    return tuple(sorted(roots))
 
 
 def _discover_docker_host(docker: Path, root: Path) -> str:

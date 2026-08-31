@@ -36,33 +36,63 @@ pruned on the sign of a tiny delta. Results below `-0.0016` remain hard proxy
 regressions; proxy results never become parents or best checkpoints directly.
 
 Full-fidelity branching and validation-best selection use separate gates. A
-clean three-seed mean that is positive by more than two standard errors may be
-an accepted DFS parent even when its gain is below the `0.0016` Ladder floor.
-It remains ineligible for validation-best selection until it clears the full
-Ladder threshold against the current best.
+clean, confirmed result within `0.0016` of the current validation best may be
+an explicitly accepted exploratory DFS parent, even if its small delta is not
+directionally positive. It remains ineligible for validation-best selection
+until it clears the full Ladder threshold against the current best. This lets
+research deepen a near-best mechanism without allowing cumulative drift away
+from the protected best.
+
+Proxy/full direction disagreement is advisory rather than an integrity
+failure. The controller records `PROXY_FULL_DIRECTION_CONFLICT` and completes
+seed confirmation. Only concrete evaluator, contract, alignment,
+forbidden-input, or output evidence causes integrity quarantine. A suspicious
+but non-compromised experiment is excluded from reward and all future lineage,
+then search backtracks to a verified eligible parent and an independent legal
+method. Only compromised integrity, or actual exhaustion of legal choices,
+stops the loop at this gate.
 
 ## Search policy
 
 The core policy is deterministic, score-guided AIDE-style depth-first search:
 
-- rank at most three trusted frontier nodes by higher trusted primary score,
+- rank at most three trusted or controller-approved exploratory frontier nodes
+  by higher confirmed primary score,
   deeper lineage, and stable newest-ID tie-breaking;
 - continue from the best-ranked branch while it has a legal untried method,
   and backtrack to the next trusted branch only when that branch is exhausted;
+- when the latest clean result changes predictions but has no trusted gain,
+  select the highest-scoring non-baseline eligible node rather than blindly
+  extending the newest node; prefer an untried method in that node's family,
+  permit one materially different same-card child when the family exposes only
+  one method, and switch families only after that parent/family route is used;
 - do not require every research family to be probed from the baseline before
   deepening a better branch; family order remains a deterministic tie-break for
   legal methods on the selected parent;
 - only baseline roots with a verified decision and non-root experiments with a
-  trusted full-fidelity result may be normal branch parents; a soft node can be
-  used only as the base of its one authorized refinement;
+  clean, confirmed full-fidelity result may be branch parents; an inconclusive
+  node additionally requires explicit exploratory parent approval and must
+  remain within `0.0016` of validation best;
 - clean proxy/full results within `max(5 * epsilon, 0.01)` of their parent, or
   with a component-metric trade-off, are soft-pruned rather than forgotten;
 - a soft result may receive at most one documented metric-trade-off refinement
   and never becomes validation-best eligible through that permission;
 - a clean soft result whose prediction Spearman magnitude is below `0.98` may
   enter one fixed residual-ensemble test from the trusted parent;
-- severe regressions, rejected outputs, suspicious/compromised results, no-ops,
-  unstable results, and invalid/retracted nodes are hard-pruned;
+- severe regressions, rejected outputs, suspicious/compromised results,
+  unstable results, and invalid/retracted nodes are hard-pruned as parents and
+  checkpoints;
+- a suspicious non-compromised node is quarantined and does not stop search
+  while an independent method remains legal from a verified eligible frontier
+  node;
+- after Person 4's single bounded Trae wiring-repair action still produces a
+  no-op, recovery returns a neutral `no_op` node and its unchanged-prediction
+  evidence to the planner without emitting a prune decision;
+- the legal-choice ranker then receives both one bounded same-mechanism
+  reimplementation from the last trusted parent and the available independent
+  mechanisms; choosing an independent mechanism retires that branch, while a
+  second no-op for the same parent/family/method retires the reimplementation
+  option;
 - a stateless LinUCB ranker is reconstructed from verified ledger history and
   reorders only the legal choices emitted by these deterministic gates. It
   cannot invent a family, method, parent, refinement, or ensemble component.
@@ -74,9 +104,11 @@ Person 1 does not resurrect candidates from generic history. Canonical
 checkpoint selection.
 
 Semantic duplicate identity is `parent + family + method cards + ensemble
-components`. Rephrasing the same method does not authorize another trial from
-the same parent. A genuine refinement receives a new parent commit and therefore
-a distinct identity.
+components`. Rephrasing the same method does not normally authorize another
+trial from the same parent. The only exception is the policy-selected, single
+reimplementation after a verified no-op; the planner cannot repeat it after a
+second no-op. A genuine refinement receives a new parent commit and therefore a
+distinct identity.
 
 ## Interfaces owned by Person 1
 

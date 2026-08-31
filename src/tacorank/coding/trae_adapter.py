@@ -65,6 +65,9 @@ TRAE_DEEPSEEK_TOOL_JSON_MARKER = (
 TRAE_DOCKER_EDIT_TOOL_MARKER = (
     "TacoRank: normalize and shell-quote command-specific edit arguments"
 )
+TRAE_STATELESS_DOCKER_MARKER = (
+    "TacoRank: use cross-platform bounded stateless Docker exec"
+)
 _PINNED_IMAGE_RE = re.compile(r"^(?:[^\s@]+@)?sha256:([0-9a-f]{64})$")
 _CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _DEFAULT_REVIEWED_TOOLS = (
@@ -497,6 +500,108 @@ class TraeCodingWorker:
             self.config.repair_token_limit,
             self.config.repair_wall_time_limit_seconds,
         )
+
+    async def restart_from_trusted_parent(
+        self, context: Any, decision: Any
+    ) -> Any:
+        """Discard an integrity-rejected candidate and recode from its parent."""
+
+        self._schema_factories()
+        self._verify_install_identity()
+        self._verify_runtime_root()
+        identity = self._resolve_identity(
+            self.identity_resolver.for_repair(context, decision)
+        )
+        repair_attempt = _context_int(context, "repair_attempt")
+        if identity.attempt != repair_attempt + 1:
+            raise CodingWorkerError(
+                "CANDIDATE_IDENTITY_MISMATCH",
+                "resolved coding attempt does not follow the recovery attempt",
+            )
+        rejected = _context_text(context, "current_patch_commit_sha")
+        original_spec = getattr(context, "original_experiment_spec", None)
+        if original_spec is None:
+            raise CodingWorkerError(
+                "RECOVERY_CONTEXT_INVALID", "missing original_experiment_spec"
+            )
+        trusted_parent = _model_field(original_spec, "parent_commit_sha")
+        prompt = build_repair_prompt(
+            context,
+            decision,
+            step_limit=self.config.repair_step_limit,
+            token_limit=self.config.repair_token_limit,
+            wall_time_limit_seconds=self.config.repair_wall_time_limit_seconds,
+            allowed_command_ids=self.config.repair_allowed_command_ids,
+            redactor=self.redactor,
+        )
+        run_id = _context_text(context, "run_id")
+        experiment_id = _context_text(context, "experiment_id")
+        try:
+            record = self.worktrees.attach(
+                run_id, experiment_id, rejected, require_clean=True
+            )
+        except GitOperationError as exc:
+            raise CodingWorkerError(exc.code, str(exc)) from exc
+        return await asyncio.to_thread(
+            self._restart_candidate,
+            context,
+            record,
+            rejected,
+            trusted_parent,
+            identity,
+            prompt,
+        )
+
+    def _restart_candidate(
+        self,
+        context: Any,
+        record: WorktreeRecord,
+        rejected_commit_sha: str,
+        trusted_parent_commit_sha: str,
+        identity: CandidateIdentity,
+        prompt: str,
+    ) -> Any:
+        try:
+            with self.worktrees.acquire_lease(
+                record,
+                timeout_seconds=self.config.worktree_lease_timeout_seconds,
+            ):
+                restored = self.worktrees.restore_trusted_parent(
+                    record,
+                    rejected_commit_sha=rejected_commit_sha,
+                    trusted_parent_commit_sha=trusted_parent_commit_sha,
+                )
+                try:
+                    return self._produce_candidate_with_lease(
+                        context,
+                        restored,
+                        trusted_parent_commit_sha,
+                        identity,
+                        prompt,
+                        self.config.repair_step_limit,
+                        self.config.repair_token_limit,
+                        self.config.repair_wall_time_limit_seconds,
+                    )
+                except Exception as primary_error:
+                    try:
+                        self.worktrees.discard_uncommitted_changes(
+                            restored,
+                            expected_commit_sha=trusted_parent_commit_sha,
+                        )
+                    except GitOperationError as cleanup_error:
+                        raise CodingWorkerError(
+                            "CODING_WORKTREE_CLEANUP_FAILED",
+                            "failed clean restart could not be restored to the trusted parent",
+                            resource_delta=getattr(
+                                primary_error, "resource_delta", None
+                            ),
+                            diagnostic_artifacts=getattr(
+                                primary_error, "diagnostic_artifacts", ()
+                            ),
+                        ) from primary_error
+                    raise
+        except GitOperationError as exc:
+            raise CodingWorkerError(exc.code, str(exc)) from exc
 
     def _produce_candidate(
         self,
@@ -1890,9 +1995,13 @@ class TraeCodingWorker:
             "--pull",
             "never",
             "--entrypoint",
-            "/agent_tools/edit_tool",
+            "/bin/sh",
             image,
-            "--help",
+            "-c",
+            (
+                "command -v timeout >/dev/null && "
+                "/agent_tools/edit_tool --help"
+            ),
         )
         try:
             created = self._run_docker_cli(
@@ -2652,6 +2761,23 @@ class TraeCodingWorker:
                 "TRAE_RUNTIME_IDENTITY_MISMATCH",
                 "Trae Docker tool assets differ from the reviewed manifest",
             )
+        docker_manager = root / "trae_agent" / "agent" / "docker_manager.py"
+        try:
+            docker_manager_source = docker_manager.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise CodingWorkerError(
+                "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                "reviewed cross-platform Docker bridge is unavailable",
+            ) from exc
+        if (
+            TRAE_STATELESS_DOCKER_MARKER not in docker_manager_source
+            or "self._execute_stateless(command, timeout)" not in docker_manager_source
+            or '"timeout", "--signal=KILL"' not in docker_manager_source
+        ):
+            raise CodingWorkerError(
+                "TRAE_RUNTIME_IDENTITY_MISMATCH",
+                "reviewed cross-platform Docker bridge is missing",
+            )
         if self.config.provider_base_url == "https://api.deepseek.com":
             reasoning_client = (
                 root / "trae_agent" / "utils" / "llm_clients" / "openai_client.py"
@@ -2689,6 +2815,7 @@ class TraeCodingWorker:
                 TRAE_DOCKER_EDIT_TOOL_MARKER not in edit_source
                 or "command_arguments =" not in edit_source
                 or "shlex.join(cmd_parts)" not in edit_source
+                or "posixpath.join(" not in edit_source
             ):
                 raise CodingWorkerError(
                     "TRAE_RUNTIME_IDENTITY_MISMATCH",
@@ -2910,6 +3037,12 @@ class TraeCodingWorker:
         environment["LC_ALL"] = "C.UTF-8"
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PYTHONUNBUFFERED"] = "1"
+        # Trae's Rich console emits Unicode status glyphs.  The host process is
+        # captured through a pipe, so native Windows otherwise falls back to
+        # the legacy ANSI code page and can crash before the first tool call.
+        # These settings are deterministic and are also safe on macOS/Linux.
+        environment["PYTHONUTF8"] = "1"
+        environment["PYTHONIOENCODING"] = "utf-8"
         environment["PYTHON_DOTENV_DISABLED"] = "1"
         environment["GIT_TERMINAL_PROMPT"] = "0"
         if os.name == "nt":
@@ -3140,6 +3273,12 @@ class FakeCodingWorker:
 
     async def repair_patch(self, context: Any, decision: Any) -> Any:
         self.calls.append(("repair_patch", context, decision))
+        return _fake_result(self.repair_result)
+
+    async def restart_from_trusted_parent(
+        self, context: Any, decision: Any
+    ) -> Any:
+        self.calls.append(("restart_from_trusted_parent", context, decision))
         return _fake_result(self.repair_result)
 
 

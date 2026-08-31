@@ -150,6 +150,28 @@ def decide(
             None,
         )
 
+    if (
+        trust.verdict == Verdict.INCONCLUSIVE
+        and trust.stability == Stability.CONFIRMED
+        and trust.integrity == Integrity.CLEAN
+        and "WITHIN_NOISE" in trust.flags
+        and trust.seed_mean is not None
+    ):
+        current_best = (
+            result.metric_set.primary_score - result.previous_best_delta.primary
+        )
+        eta = trust.eta_applied or 0.0
+        if trust.seed_mean >= current_best - eta:
+            return _decision(
+                result,
+                context,
+                Decision.ACCEPT,
+                "EXPLORATORY_PARENT_WITHIN_TOLERANCE",
+                True,
+                False,
+                None,
+            )
+
     reason_by_verdict = {
         Verdict.INCONCLUSIVE: (
             "SEED_VARIANCE_HIGH"

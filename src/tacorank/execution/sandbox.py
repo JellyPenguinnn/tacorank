@@ -1427,12 +1427,17 @@ def _translate_value(
     for source, target in sorted(
         translations, key=lambda item: len(str(item[0])), reverse=True
     ):
+        before = translated
         pattern = re.compile(
-            r"(?<![A-Za-z0-9_.-]){0}(?=$|[/\s'\";,):\]])".format(
+            r"(?<![A-Za-z0-9_.-]){0}(?=$|[/\\\s'\";,):\]])".format(
                 re.escape(str(source))
             )
         )
         translated = pattern.sub(target, translated)
+        if translated != before and "\\" in str(source):
+            # A Windows host path may be followed by backslash separators;
+            # container paths must use POSIX separators after translation.
+            translated = translated.replace("\\", "/")
     if "\x00" in translated:
         raise SandboxPolicyError("container command value contains NUL")
     return translated

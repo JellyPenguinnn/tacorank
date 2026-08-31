@@ -151,6 +151,20 @@ def _planner_parent_metric_deltas(
     }
 
 
+def _planner_primary_score(
+    evaluation: Optional[object], metric_set: Optional[object]
+) -> Optional[float]:
+    """Prefer the confirmed seed mean when ranking research parents."""
+
+    trust = getattr(evaluation, "trust", None) if evaluation is not None else None
+    seed_mean = getattr(trust, "seed_mean", None)
+    if seed_mean is not None:
+        return float(seed_mean)
+    if metric_set is None:
+        return None
+    return float(metric_set.primary_score)
+
+
 def _path_is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
@@ -175,16 +189,12 @@ ContextT = TypeVar("ContextT", bound=ContextDocument)
 
 
 CODER_SCORE_INVARIANTS = (
-    "The setup-verified FM parent scores are unconstrained real-valued ranking "
-    "scores, not probabilities.",
-    "Never apply sigmoid, probability calibration, clipping, min/max clamping, "
-    "normalization, or rescaling to the FM parent or to parent-plus-residual scores.",
-    "For additive experiments, bound only the learned residual and add it on the "
-    "parent's original scale; preserve the exact parent score when no supported "
-    "residual is available.",
-    "Treat prior negative result summaries as implementation constraints: do not "
-    "repeat transformations that collapsed score diversity, parent correlation, "
-    "or within-user rankability.",
+    "Preserve the selected Git parent's executable behavior; setup-verified FM "
+    "scores are original unconstrained real-valued ranking inputs, not "
+    "probabilities or non-baseline parent outputs.",
+    "Never transform the FM parent or parent-plus-residual scores.",
+    "Bound only additive residuals; preserve the exact parent when unsupported.",
+    "Use negative-result summaries to prevent score collapse or lost rankability.",
 )
 
 
@@ -532,6 +542,24 @@ class ContextBuilder:
                     "implementation target is protected: %s" % target
                 )
 
+        requested_targets = {
+            target
+            for method_id in proposal.method_card_ids
+            for target in cards[method_id].implementation_targets
+        }
+        # Older/custom method cards without an assignment retain the narrow
+        # stable-entrypoint behavior. Shipped cards name every helper needed by
+        # their mechanism, so unrelated editable files are not exposed to Trae.
+        if not requested_targets:
+            requested_targets = {"solution/candidate.py"}
+        if "solution/candidate.py" not in requested_targets:
+            raise ContextBuildError(
+                "method implementation targets must include the production entrypoint"
+            )
+        targets = [
+            target for target in interfaces if target in requested_targets
+        ]
+
         return ExperimentSpec(
             **proposal.model_dump(mode="python"),
             # The research family is sufficient as a stable lesson-retrieval tag;
@@ -694,7 +722,12 @@ class ContextBuilder:
             elif event.event_type == EventType.EVALUATION_COMPLETED:
                 evaluation_by_experiment[event.payload.result.experiment_id] = event
             elif event.event_type == EventType.EXPERIMENT_DECIDED:
-                decision_by_experiment[event.payload.decision.experiment_id] = event
+                # Smoke promotion is an execution-routing decision, not the
+                # terminal research outcome. In particular, a candidate that
+                # later remains a verified no-op must reach Person 1 as a
+                # neutral no-op, not as a misleading promoted experiment.
+                if event.payload.decision.fidelity_completed != Fidelity.SMOKE:
+                    decision_by_experiment[event.payload.decision.experiment_id] = event
 
         children = Counter(
             event.payload.spec.parent_experiment_id
@@ -1205,6 +1238,8 @@ class ContextBuilder:
         effective_max_tokens = (
             max_tokens if max_tokens is not None else self.config.context_token_limit
         )
+        if spec.component_experiment_ids and max_tokens is None:
+            effective_max_tokens = self.config.synthesis_context_token_limit
         selected_method_cards: List[Dict[str, object]] = []
         wanted = set(spec.method_card_ids)
         for path in sorted((self.config.repository_root / "research/methods").glob("*.md")):
@@ -1228,6 +1263,71 @@ class ContextBuilder:
                 % ", ".join(missing_method_ids)
             )
         prior_result_summaries = self._coder_prior_result_summaries(visible, spec)
+        component_patches = []
+        component_bytes = 0
+        for component_id in spec.component_experiment_ids:
+            patch_event = next(
+                (
+                    event
+                    for event in reversed(visible)
+                    if event.event_type == EventType.PATCH_CREATED
+                    and event.payload.candidate.experiment_id == component_id
+                ),
+                None,
+            )
+            if patch_event is None:
+                raise ContextBuildError(
+                    "synthesis component patch is unavailable: %s" % component_id
+                )
+            candidate = patch_event.payload.candidate
+            gate_event = next(
+                (
+                    event
+                    for event in reversed(visible)
+                    if event.event_type == EventType.PATCH_CHECKED
+                    and event.payload.result.experiment_id == component_id
+                    and event.payload.result.patch_commit_sha
+                    == candidate.patch_commit_sha
+                    and event.payload.result.accepted
+                ),
+                None,
+            )
+            if gate_event is None:
+                raise ContextBuildError(
+                    "synthesis component has no matching accepted Gate A receipt: %s"
+                    % component_id
+                )
+            self.artifact_store.verify(candidate.diff_artifact)
+            path = self.config.repository_root / candidate.diff_artifact.path
+            raw_diff = path.read_bytes()
+            component_bytes += len(raw_diff)
+            if component_bytes > 320_000:
+                raise ContextBuildError(
+                    "synthesis component patches exceed the bounded prompt budget"
+                )
+            component_patches.append(
+                {
+                    "experiment_id": component_id,
+                    "patch_commit_sha": candidate.patch_commit_sha,
+                    "gate_a_receipt_id": gate_event.payload.result.receipt_id,
+                    "diff_sha256": candidate.diff_sha256,
+                    "changed_files": list(candidate.changed_files),
+                    "diff": raw_diff.decode("utf-8", errors="strict"),
+                }
+            )
+        target_interfaces = {
+            target: self.config.target_interface_excerpts[target]
+            for target in spec.target_files
+            if target in self.config.target_interface_excerpts
+        }
+        missing_target_interfaces = sorted(
+            set(spec.target_files) - set(target_interfaces)
+        )
+        if missing_target_interfaces:
+            raise ContextBuildError(
+                "coder target interface is unavailable: %s"
+                % missing_target_interfaces[0]
+            )
         mandatory = [
             (
                 "Coding assignment",
@@ -1235,9 +1335,7 @@ class ContextBuilder:
                     {
                         "spec": spec.model_dump(mode="json"),
                         "protected_paths": self._protected_digest(),
-                        "target_interface_excerpts": (
-                            self.config.target_interface_excerpts
-                        ),
+                        "target_interface_excerpts": target_interfaces,
                         "allowed_output": "PatchCandidate",
                         "hypothesis_drift": "forbidden",
                     }
@@ -1321,7 +1419,7 @@ class ContextBuilder:
                 "contract_sha256": self.verified_contract.contract_sha256,
                 "experiment_spec": spec,
                 "parent_commit_sha": spec.parent_commit_sha,
-                "target_interface_excerpts": self.config.target_interface_excerpts,
+                "target_interface_excerpts": target_interfaces,
                 "editable_roots": self.config.editable_roots,
                 "protected_paths": self._protected_paths(),
                 "allowed_command_ids": self.config.command_ids,
@@ -1338,6 +1436,7 @@ class ContextBuilder:
                 ],
                 "coding_invariants": list(CODER_SCORE_INVARIANTS),
                 "prior_result_summaries": prior_result_summaries,
+                "component_patches": component_patches,
                 "step_limit": self.config.coding_step_limit,
                 "token_limit": self.config.coding_token_limit,
                 "wall_time_limit_seconds": (

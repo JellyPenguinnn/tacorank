@@ -12,6 +12,7 @@ from ..orchestrator.state import (
     RunState,
     RunStatus,
 )
+from ..orchestrator.convergence import is_finalizable_stop_reason
 from ..schemas import (
     Event,
     EventType,
@@ -35,9 +36,11 @@ def _node(state: RunState, experiment_id: str) -> ExperimentNode:
 def project(events: Iterable[Event]) -> RunState:
     state = RunState()
     materialized = list(events)
+    events_by_id = {}
     convergence_incumbent = None
 
     for event in materialized:
+        events_by_id[event.event_id] = event
         payload = event.payload
         state.run_id = event.run_id
         state.last_event_id = event.event_id
@@ -49,6 +52,10 @@ def project(events: Iterable[Event]) -> RunState:
             state.phase = "contract_verification"
             state.started_at = event.timestamp
             state.max_experiments = payload.max_experiments
+            state.parallel_directions = payload.parallel_directions
+            state.synthesize_parallel_improvements = (
+                payload.synthesize_parallel_improvements
+            )
             state.wall_time_limit_seconds = payload.wall_time_limit_seconds
             state.token_limit = payload.token_limit
             state.gpu_seconds_limit = payload.gpu_seconds_limit
@@ -126,10 +133,18 @@ def project(events: Iterable[Event]) -> RunState:
             node.status = ExperimentStatus.RECOVERING
             node.last_error_fingerprint = result.error_fingerprint
             state.phase = "recovery"
+        elif event.event_type == EventType.PLANNING_FAILED:
+            state.active_experiment_id = None
+            state.active_attempt = None
+            state.active_fidelity = None
+            state.phase = "planning_failure"
         elif event.event_type == EventType.RECOVERY_DECIDED:
             decision = payload.decision
             node = _node(state, decision.experiment_id)
-            if decision.action == RecoveryAction.TRAE_REPAIR:
+            if decision.action in {
+                RecoveryAction.TRAE_REPAIR,
+                RecoveryAction.RESTART_FROM_TRUSTED_PARENT,
+            }:
                 node.repair_count = max(node.repair_count, decision.repair_attempt)
             if decision.action == RecoveryAction.RETRY_SAME_COMMIT:
                 node.same_commit_retry_count += 1
@@ -139,13 +154,54 @@ def project(events: Iterable[Event]) -> RunState:
             ):
                 node.status = ExperimentStatus.INVALID
                 node.terminal_event_id = event.event_id
+                state.active_experiment_id = None
+                state.active_attempt = None
+                state.active_fidelity = None
                 state.phase = "planning"
             elif decision.action in (
                 RecoveryAction.RETRY_SAME_COMMIT,
                 RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING,
             ):
-                node.status = ExperimentStatus.READY_TO_RUN
-                state.phase = "execution"
+                if decision.action == RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING:
+                    node.status = ExperimentStatus.READY_TO_RUN
+                    state.phase = "execution"
+                else:
+                    failure_event = events_by_id.get(decision.failure_event_id)
+                    failed_result = getattr(
+                        getattr(failure_event, "payload", None), "result", None
+                    )
+                    failure_stage = getattr(failed_result, "failure_stage", None)
+                    if failure_stage == "coding":
+                        node.status = ExperimentStatus.PROPOSED
+                        state.phase = "coding"
+                    elif failure_stage == "patch_gate":
+                        node.status = ExperimentStatus.PATCH_READY
+                        state.phase = "patch_gate"
+                    elif failure_stage == "output_gate":
+                        node.status = ExperimentStatus.OUTPUT_READY
+                        state.phase = "output_gate"
+                    elif failure_stage == "evaluation":
+                        cause = events_by_id.get(
+                            getattr(failure_event, "causation_event_id", None)
+                        )
+                        if (
+                            cause is not None
+                            and cause.event_type == EventType.EVALUATION_COMPLETED
+                        ):
+                            node.status = ExperimentStatus.EVALUATED
+                            state.phase = "decision"
+                        else:
+                            node.status = ExperimentStatus.OUTPUT_VERIFIED
+                            state.phase = "evaluation"
+                    else:
+                        # Typed execution results and execution-adapter failures
+                        # retry the sealed candidate with identical settings.
+                        node.status = ExperimentStatus.READY_TO_RUN
+                        state.phase = "execution"
+            elif decision.action == RecoveryAction.RETURN_TO_PLANNER:
+                node.status = ExperimentStatus.NO_OP
+                node.terminal_event_id = event.event_id
+                state.phase = "planning"
             else:
                 node.status = ExperimentStatus.RECOVERING
                 state.phase = "recovery"
@@ -196,6 +252,9 @@ def project(events: Iterable[Event]) -> RunState:
                 state.phase = "execution"
             else:
                 node.terminal_event_id = event.event_id
+                state.active_experiment_id = None
+                state.active_attempt = None
+                state.active_fidelity = None
                 state.phase = "planning"
                 if (
                     decision.fidelity_completed == Fidelity.FULL
@@ -241,8 +300,9 @@ def project(events: Iterable[Event]) -> RunState:
         elif event.event_type == EventType.MANUAL_INTERVENTION:
             state.manual_intervention_count += 1
         elif event.event_type == EventType.RUN_STOPPED:
-            state.status = RunStatus.STOPPED
-            state.phase = "stopped"
+            finalizable = is_finalizable_stop_reason(payload.reason_code)
+            state.status = RunStatus.STOPPED if finalizable else RunStatus.FAILED
+            state.phase = "stopped" if finalizable else "failed"
             state.stop_reason_code = payload.reason_code
             state.active_experiment_id = None
             state.active_attempt = None

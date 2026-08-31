@@ -3,7 +3,9 @@ from types import SimpleNamespace
 
 from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.research.plan_validation import PlanValidator
-from tacorank.schemas import CostTier
+from tacorank.schemas import CostTier, LiteratureEvidence
+
+from .conftest import make_summary
 
 
 def make_spec(planner_context, **overrides):
@@ -443,6 +445,45 @@ def test_validator_rejects_duplicate_experiment(planner_context):
     assert "DUPLICATE_EXPERIMENT" in result.errors
 
 
+def test_validator_allows_one_policy_selected_no_op_reimplementation(
+    planner_context,
+):
+    from tacorank.research.search_policy import SearchPolicy
+
+    prior = make_spec(planner_context, experiment_id="exp_0001")
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        parent_eligible=False,
+        trust_verdict="no_op",
+        stability="not_applicable",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+        status="no_op",
+    )
+    latest.duplicate_key = prior.duplicate_key
+    planner_context.family_history = [latest]
+    choice = SearchPolicy(
+        legal_choice_ranker=lambda choices, context: next(
+            item
+            for item in choices
+            if item.reason_code == "NO_OP_REIMPLEMENT_MECHANISM"
+        )
+    ).choose(planner_context)
+    proposal = make_spec(
+        planner_context,
+        experiment_id="exp_0002",
+        hypothesis="A corrected pairwise formulation should alter within-user ordering.",
+        change_summary="Reimplement the bounded pairwise mechanism from its trusted parent.",
+    )
+
+    result = PlanValidator().validate(proposal, planner_context, choice=choice)
+
+    assert choice.phase == "no_op_reimplementation"
+    assert result.accepted, result.errors
+
+
 def test_validator_enforces_memory_schema_identifiers(planner_context):
     spec = make_spec(
         planner_context,
@@ -609,3 +650,62 @@ def test_validator_fails_closed_without_allowed_data(planner_context):
 
     assert not result.accepted
     assert "CONTRACT_ALLOWED_DATA_MISSING" in result.errors
+
+
+def _paper_evidence():
+    return LiteratureEvidence(
+        evidence_id="lit_paper_001",
+        paper_id="W1234567890",
+        title="Bayesian Personalized Ranking from Implicit Feedback",
+        abstract="Pairwise ranking optimizes relative preference ordering.",
+        year=2009,
+        authors=["Steffen Rendle"],
+        venue="UAI",
+        citation_count=1000,
+        influential_citation_count=100,
+        url="https://openalex.org/W1234567890",
+        query="Bayesian personalized ranking recommender systems",
+    )
+
+
+def test_validator_requires_retrieved_literature_in_proposal(planner_context):
+    result = PlanValidator().validate(
+        make_spec(planner_context),
+        planner_context,
+        literature_evidence=[_paper_evidence()],
+    )
+
+    assert not result.accepted
+    assert "LITERATURE_EVIDENCE_REQUIRED" in result.errors
+
+
+def test_validator_accepts_exact_retrieved_literature_snapshot(planner_context):
+    evidence = _paper_evidence()
+
+    result = PlanValidator().validate(
+        make_spec(planner_context, literature_evidence=[evidence]),
+        planner_context,
+        literature_evidence=[evidence],
+    )
+
+    assert result.accepted, result.errors
+
+
+def test_validator_rejects_invented_or_tampered_literature(planner_context):
+    evidence = _paper_evidence()
+    tampered = evidence.model_copy(update={"title": "Invented stronger result"})
+    outside = evidence.model_copy(update={"evidence_id": "lit_outside_001"})
+
+    tampered_result = PlanValidator().validate(
+        make_spec(planner_context, literature_evidence=[tampered]),
+        planner_context,
+        literature_evidence=[evidence],
+    )
+    outside_result = PlanValidator().validate(
+        make_spec(planner_context, literature_evidence=[outside]),
+        planner_context,
+        literature_evidence=[evidence],
+    )
+
+    assert "LITERATURE_EVIDENCE_TAMPERED" in tampered_result.errors
+    assert "LITERATURE_EVIDENCE_OUTSIDE_SKILL" in outside_result.errors

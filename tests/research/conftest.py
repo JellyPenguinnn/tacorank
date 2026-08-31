@@ -33,6 +33,7 @@ def make_summary(
     method_card_ids=None,
     component_experiment_ids=None,
     best_eligible: bool = False,
+    status: str = "accepted",
 ):
     return SimpleNamespace(
         experiment_id=experiment_id,
@@ -61,7 +62,7 @@ def make_summary(
         component_experiment_ids=component_experiment_ids or [],
         parent_eligible=parent_eligible,
         best_eligible=best_eligible,
-        status="accepted",
+        status=status,
     )
 
 

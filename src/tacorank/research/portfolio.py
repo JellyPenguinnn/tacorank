@@ -211,6 +211,13 @@ def default_portfolio() -> ExperimentPortfolio:
                 ),
                 expected_effect="Improve ranking through additional interactions.",
                 falsifier="No improvement after a bounded, mechanism-driven trial.",
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/model.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
             ),
             MethodCard(
                 method_id="multitask_single_auxiliary",
@@ -227,6 +234,13 @@ def default_portfolio() -> ExperimentPortfolio:
                 ),
                 expected_effect="Improve generalization of the primary ranking head.",
                 falsifier="Auxiliary task degrades primary validation or violates the contract.",
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/model.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
             ),
             MethodCard(
                 method_id="duration_bias_censored_watch_time",
@@ -239,6 +253,107 @@ def default_portfolio() -> ExperimentPortfolio:
                 allowed_data=("train_interactions", "duration_ms", "long_view"),
                 expected_effect="Improve long-view ranking through duration bias correction.",
                 falsifier="No primary improvement or mismatch with the competition definition.",
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
+            ),
+            MethodCard(
+                method_id="features_author_affinity_past_only",
+                family="features",
+                summary="Add a strictly past-only author affinity residual.",
+                tags=("features", "author", "temporal", "residual"),
+                cost_tier="medium",
+                mechanism=(
+                    "Capture creator-level preference not fully represented by "
+                    "the supplied FM score."
+                ),
+                prerequisites=("baseline_parity", "strict_temporal_cutoff"),
+                allowed_data=("train_interactions", "date", "author_id", "long_view"),
+                expected_effect="Improve ranking when recent author preference has residual signal.",
+                falsifier="No reproducible primary gain from the bounded residual.",
+                prohibition_conditions=("future_aggregate_required",),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/inference.py",
+                ),
+            ),
+            MethodCard(
+                method_id="features_tab_context_residual",
+                family="features",
+                summary="Add one train-only tab-context long-view residual.",
+                tags=("features", "tab", "context", "residual"),
+                cost_tier="medium",
+                mechanism=(
+                    "Model systematic long-view-rate differences across feed "
+                    "contexts missing from the FM score."
+                ),
+                prerequisites=("baseline_parity",),
+                allowed_data=("train_interactions", "tab", "long_view"),
+                expected_effect="Improve relative scores across feed contexts.",
+                falsifier="No primary gain or a constant residual within user candidates.",
+                prohibition_conditions=("evaluator_or_split_change_required",),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/inference.py",
+                ),
+            ),
+            MethodCard(
+                method_id="sampling_deterministic_coverage",
+                family="sampling",
+                summary="Use deterministic per-user coverage-preserving training samples.",
+                tags=("sampling", "coverage", "within_user"),
+                cost_tier="medium",
+                mechanism=(
+                    "Prevent high-volume users from dominating the bounded "
+                    "residual learner."
+                ),
+                prerequisites=("baseline_parity",),
+                allowed_data=("train_interactions", "user_id", "long_view"),
+                expected_effect="Improve generalization through representative user coverage.",
+                falsifier="No primary gain or loss of useful positive/negative evidence.",
+                prohibition_conditions=("adaptive_validation_sampling",),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
+            ),
+            MethodCard(
+                method_id="ensemble_parallel_round_synthesis",
+                family="ensemble",
+                summary="Align all independently accepted parallel-round members.",
+                tags=("ensemble", "parallel_round", "alignment", "composition"),
+                cost_tier="medium",
+                mechanism=(
+                    "Preserve compatible improvements on the strongest accepted "
+                    "member and resolve overlapping score-path changes explicitly."
+                ),
+                prerequisites=("two_confirmed_clean_members",),
+                allowed_data=(
+                    "train_interactions",
+                    "user_id",
+                    "video_id",
+                    "author_id",
+                    "tab",
+                    "date",
+                    "duration_ms",
+                    "long_view",
+                    "verified_predictions",
+                ),
+                expected_effect="Retain complementary gains in one reproducible candidate.",
+                falsifier="The aligned candidate fails a gate or does not improve the best member.",
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/model.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
             ),
             MethodCard(
                 method_id="ensemble_diverse_residual_candidate",
@@ -273,7 +388,11 @@ def default_portfolio() -> ExperimentPortfolio:
                     "contributes complementary within-user ordering."
                 ),
                 falsifier="No fixed blend improves over the trusted parent.",
-                implementation_targets=("solution/candidate.py",),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/inference.py",
+                ),
             ),
             MethodCard(
                 method_id="ensemble_confirmed_members",
@@ -286,6 +405,10 @@ def default_portfolio() -> ExperimentPortfolio:
                 allowed_data=("verified_predictions",),
                 expected_effect="Improve stability or small residual headroom.",
                 falsifier="No gain over the best member or incompatible score behavior.",
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/inference.py",
+                ),
             ),
         ]
     )

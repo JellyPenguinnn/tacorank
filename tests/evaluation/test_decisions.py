@@ -138,6 +138,44 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(decision.decision, Decision.ACCEPT)
         self.assertEqual(decision.reason_code, "TRUSTED_PARENT_ONLY")
 
+    def test_confirmed_near_best_result_can_be_exploratory_parent(self):
+        decision = decide(
+            result(
+                Verdict.INCONCLUSIVE,
+                Stability.CONFIRMED,
+                best_delta=-0.0002,
+                current_primary=0.6014,
+                seed_mean=0.6013,
+                flags=("WITHIN_NOISE",),
+            ),
+            CTX,
+        )
+
+        self.assertEqual(decision.decision, Decision.ACCEPT)
+        self.assertEqual(
+            decision.reason_code,
+            "EXPLORATORY_PARENT_WITHIN_TOLERANCE",
+        )
+        self.assertTrue(decision.parent_eligible)
+        self.assertFalse(decision.best_eligible)
+
+    def test_confirmed_result_beyond_best_tolerance_is_rejected(self):
+        decision = decide(
+            result(
+                Verdict.INCONCLUSIVE,
+                Stability.CONFIRMED,
+                best_delta=-0.002,
+                current_primary=0.6014,
+                seed_mean=0.6013,
+                flags=("WITHIN_NOISE",),
+            ),
+            CTX,
+        )
+
+        self.assertEqual(decision.decision, Decision.REJECT)
+        self.assertEqual(decision.reason_code, "WITHIN_NOISE")
+        self.assertFalse(decision.parent_eligible)
+
     def test_confirmed_decision_compares_aggregate_seed_mean_to_best(self):
         confirmed = result(
             Verdict.ACCEPTED,

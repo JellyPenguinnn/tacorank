@@ -45,7 +45,9 @@ WORKDIR /opt/tacorank
 COPY pyproject.toml setup.cfg setup.py requirements.txt ./
 COPY src ./src
 COPY benchmarks ./benchmarks
-RUN python -m pip install --no-cache-dir .
+RUN python -m pip install --no-cache-dir \
+        --requirement requirements.txt \
+    && python -m pip install --no-cache-dir --no-deps .
 COPY --from=trae-tools \
     /usr/local/lib/python3.12/site-packages/trae_agent/dist \
     /opt/tacorank-trae-tools

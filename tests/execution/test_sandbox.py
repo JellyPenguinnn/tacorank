@@ -76,6 +76,7 @@ def _bounded_test_filesystem(monkeypatch: pytest.MonkeyPatch) -> None:
         os,
         "statvfs",
         lambda path: SimpleNamespace(f_frsize=4096, f_bsize=4096, f_blocks=1024),
+        raising=False,
     )
 
     def inspect_image(

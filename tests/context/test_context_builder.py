@@ -11,12 +11,14 @@ from tacorank.context.builder import (
     _mentions_protected_validation_arm,
     _planner_primary_score,
     _planner_parent_metric_deltas,
+    _planner_primary_score,
 )
 from tacorank.context.redaction import redact
 from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.schemas import (
     ArtifactKind,
     CostEstimate,
+    LiteratureEvidence,
     ResearchProposal,
 )
 
@@ -157,6 +159,16 @@ def test_planner_metric_deltas_are_authoritative_and_route_safe() -> None:
     ) == pytest.approx({"GAUC": -0.03, "nDCG@5": -0.02})
 
 
+def test_planner_parent_ranking_uses_confirmed_seed_mean() -> None:
+    metric_set = SimpleNamespace(primary_score=0.6007)
+    confirmed = SimpleNamespace(trust=SimpleNamespace(seed_mean=0.60063))
+    unconfirmed = SimpleNamespace(trust=SimpleNamespace(seed_mean=None))
+
+    assert _planner_primary_score(confirmed, metric_set) == 0.60063
+    assert _planner_primary_score(unconfirmed, metric_set) == 0.6007
+    assert _planner_primary_score(None, None) is None
+
+
 def test_planner_context_separates_active_lessons_from_experiment_history(
     harness, baseline_evaluation
 ):
@@ -223,6 +235,19 @@ def test_controller_binds_codeblind_proposal_to_coder_contract(
 ):
     harness.bootstrap(baseline_evaluation)
     context = harness.context_builder.build_planner(harness.events())
+    literature = LiteratureEvidence(
+        evidence_id="lit_paper_001",
+        paper_id="W1234567890",
+        title="Bayesian Personalized Ranking from Implicit Feedback",
+        abstract="Pairwise ranking optimizes relative preference ordering.",
+        year=2009,
+        authors=["Steffen Rendle"],
+        venue="UAI",
+        citation_count=1000,
+        influential_citation_count=100,
+        url="https://openalex.org/W1234567890",
+        query="Bayesian personalized ranking recommender systems",
+    )
     values = {
         "run_id": context.run_id,
         "experiment_id": "exp_001",
@@ -243,6 +268,7 @@ def test_controller_binds_codeblind_proposal_to_coder_contract(
         ),
         "method_card_ids": ["objective_pairwise_bpr"],
         "evidence_event_ids": list(context.source_event_ids),
+        "literature_evidence": [literature],
     }
     values["duplicate_key"] = compute_duplicate_key(values)
 
@@ -351,9 +377,18 @@ def test_coder_context_contains_the_real_worker_contract(harness, baseline_evalu
     assert context.step_limit == harness.config.coding_step_limit
     assert context.token_limit == harness.config.coding_token_limit
     assert context.estimated_tokens <= harness.config.context_token_limit
+    assert context.target_interface_excerpts == {
+        "solution/candidate.py": (
+            harness.config.target_interface_excerpts["solution/candidate.py"]
+        )
+    }
+    assert "solution/model.py" not in context.content
     assert "unconstrained real-valued ranking" in " ".join(
         context.coding_invariants
     )
+    invariants = " ".join(context.coding_invariants)
+    assert "selected Git parent's executable behavior" in invariants
+    assert "not probabilities or non-baseline parent outputs" in invariants
 
 
 def test_coder_context_makes_cited_prior_results_non_optional(

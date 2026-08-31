@@ -25,6 +25,7 @@ from .orchestrator.state_machine import validator
 from .providers import DeepSeekResearchProvider, ProviderError
 from .reporting import rebuild_views, runtime_status
 from .research.eda import PlannerEdaToolbox
+from .research.literature import OpenAlexLiteratureSkill
 from .run_layout import RunLayout
 from .schemas import EvaluationResult
 
@@ -97,10 +98,19 @@ def _planner_for(config: RunConfig):
         thinking_enabled=config.deepseek_thinking_enabled,
         reasoning_effort=config.deepseek_reasoning_effort,
     )
+    literature_skill = None
+    if config.literature_research_enabled:
+        literature_skill = OpenAlexLiteratureSkill(
+            base_url=config.literature_base_url,
+            timeout_seconds=config.literature_timeout_seconds,
+            max_papers=config.literature_max_papers,
+            min_citation_count=config.literature_min_citation_count,
+        )
     return ResearchPlanner(
         provider,
         input_token_limit=config.context_token_limit,
         output_token_limit=config.deepseek_max_output_tokens,
+        literature_skill=literature_skill,
     )
 
 
@@ -147,7 +157,7 @@ def _runtime(
     }
     baseline = built.baseline
     planner = _planner_for(config)
-    planner.provider.preflight()
+    planner.preflight()
     eda_toolbox = PlannerEdaToolbox(live.input_roots["candidate_full"])
     eda_toolbox.inspect()
     harness = Harness(
@@ -342,6 +352,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             "status": "passed",
                             "runtime": "live",
                             "research_provider": config.research_provider,
+                            "literature_research": (
+                                config.literature_provider
+                                if config.literature_research_enabled
+                                else "disabled"
+                            ),
                             "planner_data_profile_sha256": data_profile.profile_sha256,
                             "baseline_primary": baseline.metric_set.primary_score,
                             "ledger_created": False,

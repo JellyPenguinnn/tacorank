@@ -97,6 +97,7 @@ TacoRank 有三类相互独立的权威来源：
 | Python | 3.12.x | 由 setup 创建的隔离 Trae 固定运行时 |
 | Docker | 正在运行的兼容 Docker 守护进程 | 加固 Trae 编辑工具与 CPU 候选执行 |
 | DeepSeek | 可访问目标模型的 `DEEPSEEK_API_KEY` | 研究规划、Trae 编码与有界实现校验 |
+| OpenAlex | 可访问外部 HTTPS；不需要 API key | 为每个实时研究方案提供有界论文证据 |
 | KuaiRand-Pure | 本地官方数据，或允许 setup 下载的网络 | 训练、评测和生成提交 |
 
 实时工作流当前仅使用 CPU。在 macOS 上可使用 Docker Desktop，或 Colima 等兼容 Docker 的本地守护进程。
@@ -179,7 +180,7 @@ export DEEPSEEK_API_KEY='your-key'
   --input examples/trae/experiment-spec.json
 ```
 
-本地 preflight 会在不读取凭证的情况下检查固定 Trae 运行时和 Docker 工具边界。实时 preflight 会向 DeepSeek 认证，并以 high reasoning 验证 `deepseek-v4-flash` 访问。示例会在一次性 worktree 中生成真实补丁，按原始 ExperimentSpec 完成最多 5 轮有界校验/修订并执行 Gate A，随后有意在访问数据、训练、评测或创建账本之前停止。
+本地 preflight 会在不读取凭证的情况下检查固定 Trae 运行时和 Docker 工具边界。完整实时 preflight 还会验证 DeepSeek 模型访问和无需 key 的 OpenAlex 论文检索；候选编码与执行仍保持无网络。示例会在一次性 worktree 中生成真实补丁，按原始 ExperimentSpec 完成最多 5 轮有界校验/修订并执行 Gate A，随后有意在访问数据、训练、评测或创建账本之前停止。
 
 ## 运行操作
 

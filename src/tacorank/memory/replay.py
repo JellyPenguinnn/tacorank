@@ -30,9 +30,15 @@ def replay(
         seen = set()
         for event in events:
             for artifact in event.artifact_refs:
-                if artifact.artifact_id not in seen:
+                identity = (
+                    artifact.artifact_id,
+                    artifact.path,
+                    artifact.sha256,
+                    artifact.size_bytes,
+                )
+                if identity not in seen:
                     artifact_store.verify(artifact)
-                    seen.add(artifact.artifact_id)
+                    seen.add(identity)
     return project(events)
 
 

@@ -2,7 +2,13 @@ import unittest
 
 from tacorank.evaluation.no_op import NoOpConfig, analyze_prediction_change, is_no_op
 from tacorank.evaluation.trust import TrustConfig, TrustEvidence, assess_trust
-from tacorank.evaluation.types import Fidelity, Population, Stability, Verdict
+from tacorank.evaluation.types import (
+    Fidelity,
+    Integrity,
+    Population,
+    Stability,
+    Verdict,
+)
 
 
 def evidence(change, parent_delta=0.0, **overrides):
@@ -102,6 +108,24 @@ class NoOpTrustTests(unittest.TestCase):
         self.assertEqual(near_negative.verdict, Verdict.INCONCLUSIVE)
         self.assertIn("WITHIN_NOISE", near_negative.flags)
         self.assertEqual(negative.verdict, Verdict.NEGATIVE)
+
+    def test_proxy_full_direction_conflict_is_advisory_during_confirmation(self):
+        change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
+        trust = assess_trust(
+            evidence(
+                change,
+                parent_primary=0.601468756352959,
+                parent_delta=0.00007795016284650735,
+                seed_scores=(0.6015467065158056,),
+                internal_proxy_delta=-0.0006046776713612978,
+            )
+        )
+
+        self.assertEqual(trust.verdict, Verdict.ACCEPTED)
+        self.assertEqual(trust.stability, Stability.SINGLE_SEED)
+        self.assertEqual(trust.integrity, Integrity.CLEAN)
+        self.assertIn("PROXY_FULL_DIRECTION_CONFLICT", trust.flags)
+        self.assertNotIn("PROXY_FULL_SIGN_CONFLICT", trust.flags)
 
     def test_cross_population_and_metric_conflicts_are_visible(self):
         change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])

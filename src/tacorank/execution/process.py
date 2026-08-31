@@ -620,7 +620,7 @@ def _extract_bounded_tar(
             env=dict(environment),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             shell=False,
             close_fds=True,
         )
@@ -722,8 +722,19 @@ def _extract_bounded_tar(
         process.wait()
         return_code = -1
     if return_code != 0:
+        detail = ""
+        if process.stderr is not None:
+            try:
+                detail = process.stderr.read().decode("utf-8", errors="replace").strip()
+            except OSError:
+                detail = ""
+        if detail:
+            detail = " " + detail[-512:]
         extraction_errors.append(
-            ProcessLaunchError("container output copy command failed")
+            ProcessLaunchError(
+                "container output copy command failed "
+                f"(exit {return_code}).{detail}"
+            )
         )
     if extraction_errors:
         for created in reversed(created_files):

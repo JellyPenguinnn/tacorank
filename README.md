@@ -48,7 +48,7 @@ After completing [installation](#installation) and [deployment setup](#configura
   --live-config .tacorank/deployment/live-adapters.json
 ```
 
-This is the canonical end-to-end entry point. It runs one experiment at a time, rebuilds each planner context from durable memory, stops on a frozen convergence or resource rule, and finalizes the selected test submission automatically.
+This is the canonical end-to-end entry point. Production deployments request seven distinct research directions concurrently from one ledger snapshot, retry typed transient provider failures once, and atomically seal the complete batch before starting Trae. Trae and candidate execution then run in independent worktrees concurrently, each lane is evaluated with serialized protected-query authority, and all independently accepted improvements are synthesized into one newly gated candidate. The next round starts from durable post-synthesis memory. Frozen convergence and resource rules still own stopping and final selection.
 
 ## Agent-assisted operation
 
@@ -99,9 +99,10 @@ Only the controller may append events or change workflow state. Role components 
 | Python | 3.12.x | Isolated pinned Trae runtime created by setup |
 | Docker | Running Docker-compatible daemon | Hardened Trae tools and CPU candidate execution |
 | DeepSeek | `DEEPSEEK_API_KEY` with model access | Research planning, Trae coding, and bounded implementation review |
+| OpenAlex | Outbound HTTPS; no API key | Bounded paper evidence for each live research proposal |
 | KuaiRand-Pure | Local official data, or network access for setup download | Training, evaluation, and submission generation |
 
-The live workflow is CPU-only. On macOS, Docker Desktop or a Docker-compatible daemon such as Colima is sufficient.
+The live workflow is CPU-only. On macOS, Docker Desktop or a Docker-compatible daemon such as Colima is sufficient. Native Windows PowerShell is also supported with Docker Desktop in Linux-container mode. Trae tool calls use the same reviewed stateless Docker-exec bridge on Windows, macOS, and Linux; they do not depend on a host pseudo-terminal or `pexpect.spawn`.
 
 ## Installation
 
@@ -327,9 +328,10 @@ This proves a real integrated baseline path, live cross-iteration continuation, 
 - Candidate code runs in disposable worktrees and CPU Docker containers with bounded resources and output quotas.
 - Gate B validates prediction structure, row identity, finiteness, and producer lineage before evaluation.
 - Expected failures produce typed, redacted, hash-addressed evidence; repair and same-commit retries are bounded.
+- Recovery retries only the owning stage on immutable input. Verified candidate defects receive a grounded Trae repair prompt; malformed agent protocol, infrastructure, quota, and controller failures are not misrepresented as code defects. A candidate-scoped integrity rejection receives one clean Trae restart from the declared trusted parent, never an edit to the rejected candidate or a safety gate.
 - Every semantic solver pass records its diff hash, redacted Trae trajectory/process log, verifier findings, provider calls, tokens, and elapsed action time in attempt-local artifacts.
 - Malformed or truncated DeepSeek tool arguments are converted into an in-loop Trae correction step. If Trae still exits unsuccessfully, its redacted process log, trajectory when available, exact provider-token accounting, and wall time are ledgered; the same frozen coding assignment receives one clean retry before only that experiment is abandoned.
-- Deliberate integrity violations terminate the run and remain in the ledger.
+- Candidate-scoped integrity violations remain in the ledger, discard the rejected candidate, and receive at most one clean restart from the trusted parent. Credential findings, protected identity/control-plane mismatches, and repeated integrity violations remain fail-closed; only those system-scoped cases terminate the run as `fatal_integrity`.
 - Convergence counts terminal trusted full-fidelity research iterations, not confirmation-seed executions.
 - Finalization selects only the validation best, requires clean reproduction for a candidate, and keeps test identities out of planning and evaluation feedback.
 - Datasets, credentials, `.tacorank/`, submissions, environments, run ledgers, and generated artifacts are ignored and must never be committed.
@@ -392,7 +394,28 @@ Run `setup-live` only once for a deployment directory; if one already exists,
 choose new `--deployment-dir` and `--runtime-dir` values. Each setup creates a
 new hash-bound deployment. Native Windows uses Docker
 Desktop's local `npipe://` endpoint; keep Docker Desktop in Linux-container
-mode (the WSL2 backend is recommended).
+mode (the WSL2 backend is recommended). Newly generated deployments patch the
+pinned Trae runtime to use bounded stateless Docker exec, translate host paths
+to POSIX container paths, and verify both the patch and the container `timeout`
+command during preflight. Deployments generated before this compatibility patch
+must not be reused; create a new deployment and run ID.
+
+For a reproducible end-to-end run, the repository also includes
+`run-new-live.ps1`. It creates a unique deployment/runtime/run identity, so it
+does not collide with an earlier attempt. From the repository root, export the
+key in the same PowerShell session and run:
+
+```powershell
+$env:DEEPSEEK_API_KEY = "your-key"
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\run-new-live.ps1 -DownloadData
+```
+
+Omit `-DownloadData` only when the required files are already present under
+`KuaiRand-Pure\data`. The script fails before setup if the tracked checkout or
+starter-kit submodule is dirty, Docker is unavailable, Python 3.12 cannot be
+found, or the API-key variable is missing. It prints the final status and runs
+`validate-ledger` before reporting success; it never prints the key.
 
 ### macOS
 
@@ -428,9 +451,10 @@ On Apple Silicon, Docker Desktop should use its default Linux/ARM64 engine;
 the pinned runtime image must be available for the selected Docker
 architecture. If the data directory is already complete, omit
 `--download-data`. Do not run `setup-live` twice against the same deployment
-directory. macOS uses Docker Desktop's local Unix socket.
+directory. macOS uses Docker Desktop's local Unix socket and the same stateless
+Docker-exec bridge as Windows, without changing its existing socket behavior.
 
-Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, pinned Trae install/config/runtime, credential presence and DeepSeek model access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
+Preflight is deliberately non-mutating with respect to run state. It verifies the clean baseline and exact submodule, frozen contract and protected paths, every data-manifest file, official evaluator and FM baseline, pinned Trae install/config/runtime, credential presence and DeepSeek model access, keyless OpenAlex search access, Docker daemon/image/environment, execution of the manifest-verified Trae edit tool through its read-only container mount, and the Docker tmpfs hard-output quota. A successful result reports `"ledger_created": false`.
 
 After a run starts, inspect or rebuild its state with:
 
@@ -470,6 +494,9 @@ Production never falls back to fake adapters. Deterministic fakes remain behind 
 | `setup-live` reports a dirty checkout | Preserve or commit intended tracked changes, then rerun setup from the exact clean commit that should anchor the experiment. |
 | Python 3.12 or Docker cannot be found | Pass absolute executable paths with `setup-live --python312 ... --docker ...`. |
 | Docker preflight cannot reach the daemon | Start Docker Desktop or the configured compatible daemon, then rerun `preflight`. |
+| Trae reports `pexpect` has no `spawn` | The deployment predates the cross-platform Docker bridge. Preserve its evidence, update TacoRank, and create a fresh `setup-live` deployment and run ID. |
+| Trae exits with a Windows `UnicodeEncodeError` for a status glyph | Update TacoRank to a revision that forces UTF-8 for the isolated Trae subprocess, commit the tracked change, and create a fresh deployment and run ID. Do not reuse the finalized or hash-bound deployment. |
+| Gate A reports many protected paths changed although Git and `changed_file_match` are clean | Preserve the run evidence and update TacoRank. Protected manifests canonicalize tracked non-binary CRLF/LF checkout variants across Windows, macOS, and Linux while continuing to reject genuine text or binary tampering. Create a fresh deployment from the fixed commit. |
 | DeepSeek authentication or model preflight fails | Export a valid `DEEPSEEK_API_KEY` in the current shell; never place it in a tracked file. |
 | The run identifier already has a ledger | Choose a new `--run-id` in `setup-live`; completed ledgers are immutable and are not reused for new runs. |
 | `resume` rejects the current phase | The last durable state is mid-adapter and ambiguous. Preserve the ledger and evidence for operator review instead of fabricating a result. |

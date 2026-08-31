@@ -10,7 +10,9 @@
   "change_summary": "Add one deterministic recency-decayed item and author statistic, blend it with the existing smoothed item rate, and preserve the reviewed candidate interface.",
   "target_stage": "candidate_scoring",
   "target_files": [
-    "solution/candidate.py"
+    "solution/candidate.py",
+    "solution/features.py",
+    "solution/inference.py"
   ],
   "fidelity_plan": [
     "smoke",

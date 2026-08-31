@@ -17,6 +17,7 @@ from tacorank.schemas import (
     MetricSet,
     PlannerAction,
     PlannerOutput,
+    payload_artifacts,
 )
 
 
@@ -69,6 +70,48 @@ def test_artifact_paths_must_be_normalized_relative(path):
             sha256="0" * 64,
             size_bytes=0,
         )
+
+
+def test_content_addressed_artifacts_allow_distinct_paths_for_same_bytes():
+    digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    log = ArtifactRef(
+        artifact_id="sha256-" + digest,
+        kind=ArtifactKind.LOG,
+        path="runs/run_1/artifacts/exp_1/attempt_001/execution.log",
+        sha256=digest,
+        size_bytes=0,
+        content_type="text/plain; charset=utf-8",
+    )
+    telemetry = ArtifactRef(
+        artifact_id="sha256-" + digest,
+        kind=ArtifactKind.OTHER,
+        path="runs/run_1/artifacts/exp_1/attempt_001/telemetry.jsonl",
+        sha256=digest,
+        size_bytes=0,
+        content_type="application/x-ndjson",
+    )
+
+    assert payload_artifacts({"log": log, "telemetry": telemetry}) == [log, telemetry]
+
+
+def test_content_addressed_artifacts_reject_same_id_for_different_content():
+    first = ArtifactRef(
+        artifact_id="shared",
+        kind=ArtifactKind.LOG,
+        path="artifacts/first.log",
+        sha256="a" * 64,
+        size_bytes=1,
+    )
+    second = ArtifactRef(
+        artifact_id="shared",
+        kind=ArtifactKind.LOG,
+        path="artifacts/second.log",
+        sha256="b" * 64,
+        size_bytes=1,
+    )
+
+    with pytest.raises(ValueError, match="conflicting payload artifacts"):
+        payload_artifacts({"first": first, "second": second})
 
 
 def test_planner_discriminator_invariant():

@@ -8,8 +8,26 @@ import sys
 import tarfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from tacorank.execution import container_supervisor
+
+
+def test_self_test_probes_candidate_runtime_dependencies(monkeypatch) -> None:
+    observed = {}
+
+    def run(argv, **kwargs):
+        observed["argv"] = argv
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(container_supervisor.subprocess, "run", run)
+    monkeypatch.setattr(container_supervisor, "_candidate_preexec", lambda uid, gid: None)
+
+    assert container_supervisor._self_test(501, 20) == 0
+    script = observed["argv"][2]
+    assert "import certifi,numpy,pandas,pydantic,yaml" in script
+    assert "import tacorank.execution.solution_cli" in script
+    assert "import benchmarks.kuairand_pure.pipeline" in script
 
 
 def test_self_test_command_does_not_require_control_directory(

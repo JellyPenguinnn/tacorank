@@ -254,6 +254,13 @@ def assess_trust(
 
 def _directional_flags(evidence: TrustEvidence, config: TrustConfig) -> list:
     flags = []
+    if (
+        evidence.internal_proxy_delta is not None
+        and evidence.parent_delta * evidence.internal_proxy_delta < 0
+    ):
+        # Proxy and full use different samples.  A sign change is useful
+        # generalization evidence, but is not an integrity failure by itself.
+        flags.append("PROXY_FULL_DIRECTION_CONFLICT")
     deltas = list(evidence.metric_deltas.values())
     if deltas and min(deltas) < 0 < max(deltas):
         flags.append("METRIC_DIRECTION_CONFLICT")
