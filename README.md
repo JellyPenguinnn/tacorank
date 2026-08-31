@@ -412,7 +412,7 @@ Actual ownership mapping:
 Primary output: a validated ExperimentSpec derived from experiment history,
 method cards, budget, and convergence state.
 
-### Person 2 — Jing Ming: agent harness and Trae integration
+### Person 2 — Jing Min: agent harness and Trae integration
 
 Research references: ReAct, Karpathy's autoresearch loop, autoresearch program
 design, and Trae Agent.

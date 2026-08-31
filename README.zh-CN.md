@@ -338,7 +338,7 @@ Preflight 必须成功退出并报告：
 
 主要输出：根据实验历史、方法卡、预算和收敛状态生成并通过验证的 `ExperimentSpec`。
 
-### Person 2——Jing Ming：智能体框架与 Trae 集成
+### Person 2——Jing Min：智能体框架与 Trae 集成
 
 研究参考：ReAct、Karpathy 的 autoresearch 循环、autoresearch program 设计和 Trae Agent。
 
