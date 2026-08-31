@@ -9,11 +9,9 @@ remain with the outer harness and evaluation owners.
 ## Control flow
 
 1. Person 2 assembles a deterministic, code-blind context from the frozen
-   research policy and append-only evaluation feedback. It also adds a bounded
-   read-only history of prior runs only when their ledger, contract, evaluator,
-   and baseline are compatible; repository paths and implementation details stay
-   controller-side. For the current run it also retrieves the applicable
-   high-level research rule and scientific method overviews.
+   research policy and append-only evaluation feedback. For the current run it
+   also retrieves the applicable high-level research rule and scientific method
+   overviews; repository paths and implementation details stay controller-side.
 2. `ConvergenceAdvisor` checks only advisory budget/patience conditions.
 3. `SearchPolicy` creates a transient `GraphView`, applies the authoritative
    branch/refinement/ensemble portfolios, and chooses one legal search action.
@@ -95,19 +93,9 @@ The core policy is deterministic, score-guided AIDE-style depth-first search:
   mechanisms; choosing an independent mechanism retires that branch, while a
   second no-op for the same parent/family/method retires the reimplementation
   option;
-- a stateless LinUCB ranker is reconstructed from current-run outcomes and
-  bounded compatible prior-run observations. It uses method-card features,
-  stable seed means, negative/inconclusive clean results, and a standard-error
-  risk charge, then reorders only the legal choices emitted by these
-  deterministic gates. Single-seed results receive less weight. It cannot
-  invent a family, method, parent, refinement, or ensemble component.
-
-Prior-run observations are directional learning feedback, not durable lessons
-and not event citations. The loader rejects malformed ledgers, hidden-final
-evidence, incompatible contract/evaluator hashes, baseline mismatches, and
-unclean outputs. This lets the system learn which mechanisms replicate or
-regress without copying a winning run's exact settings or overfitting to one
-seed.
+- a stateless LinUCB ranker is reconstructed from verified ledger history and
+  reorders only the legal choices emitted by these deterministic gates. It
+  cannot invent a family, method, parent, refinement, or ensemble component.
 
 `eligible_frontier`, `refinement_frontier_ids`, and `ensemble_candidate_ids`
 are separate authoritative context collections. Empty collections remain empty;

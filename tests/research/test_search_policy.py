@@ -28,36 +28,6 @@ def test_parallel_direction_is_indexed_and_legal(planner_context):
     assert choice.method_card_id == "objective_pairwise_bpr"
 
 
-def test_parallel_directions_are_reordered_by_historical_method_feedback(
-    planner_context,
-):
-    planner_context.historical_feedback = [
-        SimpleNamespace(
-            source_run_id="run_prior",
-            experiment_id="exp_0042",
-            parent_experiment_id="exp_0000",
-            family="objective",
-            method_card_ids=["objective_pairwise_bpr"],
-            parent_stable_primary_score=0.5946,
-            stable_primary_score=0.5746,
-            risk_adjusted_reward=-0.02,
-            seed_count=3,
-            seed_stderr=0.0002,
-            stability="confirmed",
-            trust_verdict="negative",
-            integrity="clean",
-            trust_flags=[],
-        )
-    ]
-
-    choice = SearchPolicy().choose_parallel_direction(planner_context, 0, 7)
-
-    assert (choice.family, choice.method_card_id) != (
-        "objective",
-        "objective_pairwise_bpr",
-    )
-
-
 def test_parallel_directions_use_distinct_eligible_method_cards(planner_context):
     policy = SearchPolicy()
     contract = SimpleNamespace(**vars(planner_context.contract_summary))

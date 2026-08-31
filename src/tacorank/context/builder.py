@@ -9,7 +9,6 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Type, TypeVa
 from ..artifacts import ArtifactStore
 from ..config import RunConfig, VerifiedContract
 from ..memory.projections import project
-from ..memory.historical import load_historical_feedback
 from ..memory.retrieval import (
     active_lessons,
     failure_chain,
@@ -568,11 +567,6 @@ class ContextBuilder:
             highest_completed_fidelity=baseline_evaluation.fidelity,
             population=baseline_evaluation.population,
             primary_score=baseline_payload.metric_set.primary_score,
-            stable_primary_score=_planner_primary_score(
-                baseline_evaluation, baseline_payload.metric_set
-            ),
-            seed_stderr=baseline_evaluation.trust.seed_stderr,
-            seed_count=baseline_evaluation.trust.seed_count,
             metric_set=baseline_payload.metric_set,
             metric_deltas={name: 0.0 for name in baseline_payload.metric_set.metrics},
             baseline_delta=0.0,
@@ -694,9 +688,6 @@ class ContextBuilder:
                     output_checks=(dict(output.checks) if output else {}),
                     output_violations=(list(output.violations) if output else []),
                     primary_score=_planner_primary_score(evaluation, metric_set),
-                    stable_primary_score=_planner_primary_score(evaluation, metric_set),
-                    seed_stderr=(evaluation.trust.seed_stderr if evaluation else None),
-                    seed_count=(evaluation.trust.seed_count if evaluation else 1),
                     metric_set=metric_set,
                     metric_deltas=metric_deltas,
                     baseline_delta=evaluation.baseline_delta if evaluation else None,
@@ -748,15 +739,6 @@ class ContextBuilder:
         state = project(events)
         baseline, current_best, eligible_frontier, family_history = (
             self._planner_experiments(events)
-        )
-        historical_feedback = load_historical_feedback(
-            repository_root=self.config.repository_root,
-            current_run_id=self.config.run_id,
-            contract_sha256=self.verified_contract.contract_sha256,
-            evaluator_sha256=self.config.evaluator_sha256,
-            baseline_score=baseline.stable_primary_score,
-            max_runs=8,
-            max_observations=32,
         )
         card_directory = self.config.repository_root / "research/methods"
         method_cards = []
@@ -848,7 +830,6 @@ class ContextBuilder:
             "refinement_frontier_ids": refinement_frontier_ids,
             "ensemble_candidate_ids": ensemble_candidate_ids,
             "family_history": family_history,
-            "historical_feedback": historical_feedback,
             "active_lessons": [
                 self._planner_lesson_summary(event)
                 for event in active_lesson_events
@@ -967,15 +948,6 @@ class ContextBuilder:
             source_path="research/CURRENT_RUN_IMPROVEMENT_PLAN.md",
         )
         baseline, current_best, _, family_history = self._planner_experiments(visible)
-        historical_feedback = load_historical_feedback(
-            repository_root=self.config.repository_root,
-            current_run_id=self.config.run_id,
-            contract_sha256=self.verified_contract.contract_sha256,
-            evaluator_sha256=self.config.evaluator_sha256,
-            baseline_score=baseline.stable_primary_score,
-            max_runs=8,
-            max_observations=32,
-        )
         feedback_by_experiment = {
             summary.experiment_id: summary
             for summary in [baseline, *family_history]
@@ -1021,19 +993,6 @@ class ContextBuilder:
                 )
             )
         optional: List[Tuple[str, str, str]] = []
-        if historical_feedback:
-            optional.append(
-                (
-                    "historical_feedback",
-                    "Compatible prior-run learning feedback",
-                    compact_json(
-                        [
-                            item.model_dump(mode="json", exclude_none=False)
-                            for item in historical_feedback
-                        ]
-                    ),
-                )
-            )
         if current_best is not None:
             optional.append(
                 (
@@ -1084,10 +1043,6 @@ class ContextBuilder:
                 "max_tokens": effective_max_tokens,
                 "mandatory": mandatory,
                 "optional": optional,
-                "historical_feedback": [
-                    item.model_dump(mode="json", exclude_none=False)
-                    for item in historical_feedback
-                ],
             },
         )
 

@@ -62,15 +62,6 @@ events selected by the deterministic retrieval policy. Hidden-final evaluations 
 neither layer, and `lessons/*.md` remains a generated human-readable projection rather
 than a planner input or source of truth.
 
-New planner contexts also expose a bounded `historical_feedback` layer. It is built by
-reading prior hash-valid, stopped ledgers whose contract hash, evaluator hash, and FM
-baseline match the current deployment. It retains public full-fidelity method outcomes,
-including clean regressions and inconclusive results, using confirmed seed means and a
-standard-error risk charge. This evidence trains the stateless legal-choice ranker and
-guides the research model across runs, but it cannot authorize a parent, cite a prior
-run as current evidence, or copy exact parameters. Malformed, incompatible, hidden-final,
-or unclean output records are excluded.
-
 Suspicious non-compromised experiments are quarantined as non-reward evidence
 and cannot become parents, refinements, or ensemble members. The search policy
 continues from a verified eligible frontier parent when an independent legal

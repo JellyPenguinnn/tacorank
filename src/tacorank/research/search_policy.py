@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from .graph_view import (
@@ -1010,19 +1010,6 @@ class SearchPolicy:
         ranked = self.legal_choice_ranker(tuple(candidates), context)
         return ranked if ranked in candidates else candidates[0]
 
-    def _rank_order(
-        self, candidates: Sequence[PolicyChoice], context: Any
-    ) -> tuple[PolicyChoice, ...]:
-        """Rank a legal portfolio without allowing duplicate lane selection."""
-
-        remaining = list(candidates)
-        ordered: list[PolicyChoice] = []
-        while remaining:
-            selected = self._rank(remaining, context)
-            ordered.append(selected)
-            remaining.remove(selected)
-        return tuple(ordered)
-
     def choose(self, context: Any) -> PolicyChoice:
         graph = GraphView.from_context(context)
         eligible = list(graph.eligible_parents())
@@ -1126,7 +1113,7 @@ class SearchPolicy:
 
         if direction_index < 0 or direction_index >= direction_count:
             raise ValueError("parallel direction index is out of range")
-        choices = self._parallel_choices(context, direction_count, rank=True)
+        choices = self._parallel_choices(context, direction_count)
         if not choices:
             return self.choose(context)
         if direction_index >= len(choices):
@@ -1138,10 +1125,10 @@ class SearchPolicy:
     def parallel_direction_capacity(self, context: Any) -> int:
         """Return the number of unique legal parent/method lanes at a checkpoint."""
 
-        return len(self._parallel_choices(context, direction_count=None, rank=False))
+        return len(self._parallel_choices(context, direction_count=None))
 
     def _parallel_choices(
-        self, context: Any, direction_count: int | None, *, rank: bool = False
+        self, context: Any, direction_count: int | None
     ) -> tuple[PolicyChoice, ...]:
         """Build the same legal lane set used by capacity and lane selection.
 
@@ -1194,17 +1181,6 @@ class SearchPolicy:
                             ),
                         )
                     )
-        if rank and len(choices) > 1:
-            ordered = self._rank_order(choices, context)
-            total = direction_count or len(ordered)
-            return tuple(
-                replace(
-                    choice,
-                    reason_code="PARALLEL_DIRECTION_%d_OF_%d"
-                    % (index + 1, total),
-                )
-                for index, choice in enumerate(ordered)
-            )
         return tuple(choices)
 
     def choose_synthesis(
