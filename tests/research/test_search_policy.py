@@ -96,7 +96,13 @@ def test_policy_returns_to_trusted_frontier_with_family_diversity(planner_contex
 
     assert choice.phase == "depth"
     assert choice.parent.experiment_id == "exp_0001"
-    assert choice.family == "ensemble"
+    # Family diversity would reach for ensemble here, but the generic
+    # depth route cannot name component_experiment_ids, and an ensemble
+    # without components fails Person 1 validation with
+    # ENSEMBLE_COMPONENT_REQUIRED. Only the soft-portfolio route can
+    # propose one, so diversity falls through to the next allowed family.
+    assert choice.family == "objective"
+    assert choice.component_experiment_ids == ()
 
 
 def test_policy_deepens_best_branch_before_untried_baseline_family(planner_context):

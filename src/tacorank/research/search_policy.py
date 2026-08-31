@@ -189,9 +189,15 @@ def _method_for_family(
         for card in eligible_method_cards(context, family)
     }
     if preferred is None:
-        # This card requires an explicit secondary component chosen by the
-        # soft-portfolio route. Generic depth-first proposals have no such
-        # component contract and must not select it.
+        # Every ensemble card combines named prior experiments, and only the
+        # soft-portfolio route knows which. The generic depth-first and
+        # independent-family routes emit component_experiment_ids=(), so an
+        # ensemble chosen here fails Person 1 validation with
+        # ENSEMBLE_COMPONENT_REQUIRED and ends the run on an invalid-provider-
+        # plan checkpoint. Leave the family to the route that can name its
+        # components.
+        if family == "ensemble":
+            return None
         eligible.pop("ensemble_diverse_residual_candidate", None)
     attempted = _attempted_methods_for_parent(context, parent_experiment_id)
     if preferred is not None:
