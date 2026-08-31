@@ -50,6 +50,39 @@ TacoRank 是控制平面系统，而不是一个独立的推荐模型。候选�
         -> 干净复现验证集最优候选，或使用受保护 FM fallback
         -> 无标签最终推理、最终 Gate B 与官方提交检查
 
+### 单次实验的生命周期
+
+```mermaid
+flowchart LR
+    A["从账本派生的<br/>规划上下文"]
+    B["选择合法方法与<br/>研究方向"]
+    C["DeepSeek<br/>研究方案"]
+    D["由控制器绑定的<br/>ExperimentSpec"]
+    E["Trae 编辑与有界<br/>实现审核"]
+    F{"Gate A"}
+    G["Smoke、proxy 与 full<br/>沙箱执行"]
+    H{"Gate B"}
+    I["受保护评测与<br/>可信度评估"]
+    J{"实验决策"}
+    K["记录经验并构建<br/>下一轮上下文"]
+    R["有界恢复"]
+
+    A --> B --> C --> D --> E --> F
+    F -- 通过 --> G --> H
+    H -- 通过 --> I --> J
+    J -- 提升 fidelity --> G
+    J -- 接受、拒绝或剪枝 --> K --> A
+
+    E -. 错误 .-> R
+    F -. 失败 .-> R
+    G -. 失败 .-> R
+    H -. 失败 .-> R
+    I -. 无变化或错误 .-> R
+    R -- 重试或修复 --> E
+    R -- 运行时重试 --> G
+    R -- 放弃或回滚 --> K
+```
+
 控制器是确定性的，也是唯一可以修改工作流状态或追加事件账本的组件。外部智能体只返回类型化记录；它们不能选择最终检查点、修改预算、绕过 gate、访问隐藏标签或改写评测器。
 
 ### 已观察结果与证据边界
@@ -397,13 +430,14 @@ Preflight 必须成功退出并报告：
 
 主要输出：根据实验历史、方法卡、预算和收敛状态生成确定性策略选择，以及通过验证且不读取代码的 `ResearchProposal`。控制器随后将其绑定为 `ExperimentSpec`。
 
-### Person 2——Jing Ming：智能体框架与 Trae 集成
+### Person 2——Jing Min：智能体框架、记忆、基础设施
 
 研究参考：ReAct、Karpathy 的 autoresearch 循环、autoresearch program 设计和 Trae Agent。
 
 职责：
 
 - 实现 planner 到 coder 再到 reviewer 的交接。
+- 管理事件溯源记忆并搭建运行基础设施。
 - 构建有界的 reasoning、action、tool、observation 和 revision 循环。
 - 构建提供给 Trae 的上下文。
 - 在正确的一次性 Git worktree 中启动 Trae。
