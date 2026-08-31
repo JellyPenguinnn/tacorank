@@ -5,8 +5,9 @@
 **Primary task:** within-user ranking of `long_view`
 **Primary score:** contract-defined mean of GAUC and nDCG@5
 **Core rule:** one experiment changes one research mechanism.
-**Traversal:** score-guided depth-first search; deepen the best trusted branch
-before backtracking, rather than probing every research family from baseline.
+**Traversal:** an adaptive, evidence-ranked portfolio; explore distinct legal
+families first, then compare bounded sibling implementations around the
+strongest stable frontier before backtracking.
 
 ```json
 {
@@ -38,16 +39,17 @@ before backtracking, rather than probing every research family from baseline.
     "other"
   ],
   "method_order": {
-    "objective": ["objective_pairwise_bpr", "objective_loss_aligned_features", "objective_listwise_user_softmax"],
-    "temporal_history": ["temporal_history_compact"],
-    "multitask": ["multitask_single_auxiliary"],
+    "objective": ["objective_pairwise_bpr", "objective_weighted_cross_entropy", "objective_distill_softmax", "objective_loss_aligned_features", "objective_listwise_user_softmax"],
+    "temporal_history": ["temporal_history_compact", "temporal_deep_interest_network", "temporal_search_interest_model", "temporal_time_series_interest"],
+    "multitask": ["multitask_single_auxiliary", "multitask_shared_bottom", "multitask_gsu", "multitask_esu", "multitask_mmoe", "multitask_ple"],
     "duration_bias": ["duration_bias_censored_watch_time"],
     "features": [
+      "features_general_bounded_engineering",
       "temporal_drift_past_only",
       "features_author_affinity_past_only",
       "features_tab_context_residual"
     ],
-    "model": ["model_compact_ranker"],
+    "model": ["model_field_aware_fm", "model_deep_cross_network", "model_lhuc", "model_compact_ranker"],
     "sampling": ["sampling_deterministic_coverage"],
     "ensemble": ["ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]

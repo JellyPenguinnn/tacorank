@@ -30,14 +30,36 @@ DEFAULT_FAMILY_ORDER = HIGH_VALUE_FAMILIES + (
 DEFAULT_METHOD_ORDER = {
     "objective": (
         "objective_pairwise_bpr",
+        "objective_weighted_cross_entropy",
+        "objective_distill_softmax",
         "objective_loss_aligned_features",
         "objective_listwise_user_softmax",
     ),
-    "temporal_history": ("temporal_history_compact",),
-    "multitask": ("multitask_single_auxiliary",),
+    "temporal_history": (
+        "temporal_history_compact",
+        "temporal_deep_interest_network",
+        "temporal_search_interest_model",
+        "temporal_time_series_interest",
+    ),
+    "multitask": (
+        "multitask_single_auxiliary",
+        "multitask_shared_bottom",
+        "multitask_gsu",
+        "multitask_esu",
+        "multitask_mmoe",
+        "multitask_ple",
+    ),
     "duration_bias": ("duration_bias_censored_watch_time",),
-    "features": ("temporal_drift_past_only",),
-    "model": ("model_compact_ranker",),
+    "features": (
+        "features_general_bounded_engineering",
+        "temporal_drift_past_only",
+    ),
+    "model": (
+        "model_field_aware_fm",
+        "model_deep_cross_network",
+        "model_lhuc",
+        "model_compact_ranker",
+    ),
     "ensemble": (
         "ensemble_parallel_round_synthesis",
         "ensemble_diverse_residual_candidate",

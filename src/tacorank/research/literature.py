@@ -79,11 +79,44 @@ METHOD_QUERIES = {
         "feature engineering pairwise learning to rank recommender systems "
         "within user interaction features"
     ),
+    "objective_weighted_cross_entropy": (
+        "weighted cross entropy implicit feedback recommender ranking "
+        "long tail users"
+    ),
+    "objective_distill_softmax": (
+        "knowledge distillation softmax recommender systems ranking teacher "
+        "student"
+    ),
     "temporal_history_compact": (
         "sequential recommendation temporal user behavior history attention"
     ),
+    "temporal_deep_interest_network": (
+        "deep interest network DIN sequential recommendation user interest "
+        "attention"
+    ),
+    "temporal_search_interest_model": (
+        "search based interest model SIM long term user interest recommender"
+    ),
+    "temporal_time_series_interest": (
+        "time series user interest evolution sequential recommendation"
+    ),
     "multitask_single_auxiliary": (
         "multi task learning recommender systems auxiliary engagement ranking"
+    ),
+    "multitask_shared_bottom": (
+        "shared bottom multi task learning recommender systems ranking"
+    ),
+    "multitask_gsu": (
+        "gated shared unit GSU multi task recommender systems"
+    ),
+    "multitask_esu": (
+        "expert sharing unit ESU multi task recommender systems"
+    ),
+    "multitask_mmoe": (
+        "multi gate mixture of experts MMOE recommender systems ranking"
+    ),
+    "multitask_ple": (
+        "progressive layered extraction PLE multi task recommender systems"
     ),
     "duration_bias_censored_watch_time": (
         "duration bias censored watch time video recommendation ranking"
@@ -93,6 +126,18 @@ METHOD_QUERIES = {
     ),
     "model_compact_ranker": (
         "DeepFM deep cross network recommender ranking feature interaction"
+    ),
+    "features_general_bounded_engineering": (
+        "feature engineering train only recommender systems learning to rank"
+    ),
+    "model_field_aware_fm": (
+        "field aware factorization machine FFM recommender systems ranking"
+    ),
+    "model_deep_cross_network": (
+        "deep cross network DCN recommender systems feature interactions ranking"
+    ),
+    "model_lhuc": (
+        "learning hidden unit contribution LHUC recommendation ranking"
     ),
     "ensemble_diverse_residual_candidate": (
         "rank ensemble diverse recommender systems score fusion"
