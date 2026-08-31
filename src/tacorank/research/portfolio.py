@@ -185,8 +185,8 @@ def default_portfolio() -> ExperimentPortfolio:
                 tags=("temporal", "causal", "history"),
                 cost_tier="medium",
                 mechanism=(
-                    "Test whether information from earlier interactions improves "
-                    "ranking without using the scored row or future interactions."
+                    "Implement and test a causal-history score path using earlier "
+                    "interactions without using the scored row or future data."
                 ),
                 prerequisites=("baseline_parity", "strict_temporal_cutoff"),
                 allowed_data=(

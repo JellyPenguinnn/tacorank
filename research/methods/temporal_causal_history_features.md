@@ -4,8 +4,8 @@
 
 ## Mechanism
 
-Explore whether causal history signals from earlier interactions improve
-ranking when added to the verified FM parent.
+Implement and evaluate whether causal history signals from earlier interactions
+improve ranking when added to the verified FM parent.
 
 ## Preconditions
 
@@ -26,9 +26,9 @@ for unsupported histories.
 
 ## Falsification condition
 
-Reject when the candidate relies on current-row or future information, uses an
-unapproved input, or fails to produce a trusted full-fidelity gain at matched
-budget.
+Reject a plan-only, no-op, or non-wired patch. Also reject when the candidate
+relies on current-row or future information, uses an unapproved input, or fails
+to produce a trusted full-fidelity gain at matched budget.
 
 ## Do not use when
 
@@ -38,11 +38,14 @@ authenticated FM parent.
 
 ## Minimal implementation
 
-The coding agent should choose a bounded, deterministic causal-history
-representation from the available contract fields, compare it against the
-verified parent, and demonstrate through tests that no current-row or future
-information is used. Preserve the parent fallback and the existing output and
-fidelity contracts.
+The coding agent must implement and wire one bounded, deterministic
+causal-history score path through the approved target files. It chooses the
+representation, horizon, and training procedure from the available contract
+fields and records those choices in its candidate patch; this card supplies no
+recipe. The patch must produce non-no-op scores, compare them with the verified
+parent, and demonstrate through tests that no current-row or future information
+is used. Preserve the parent fallback and the existing output and fidelity
+contracts.
 
 ## Sources
 

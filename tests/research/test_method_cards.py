@@ -98,6 +98,8 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
     )
 
     card_text = Path(causal_history.source_path).read_text(encoding="utf-8")
+    assert "plan-only" in card_text
+    assert "must implement and wire" in card_text
     for undisclosed_detail in (
         "0.6121",
         "LightGBM",
