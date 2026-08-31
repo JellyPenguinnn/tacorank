@@ -49,6 +49,12 @@ from tacorank.execution.telemetry import (
 )
 
 
+# Docker Desktop can stall a single ``docker stats`` probe for several
+# seconds while the candidate is CPU-bound; only a sustained loss of
+# telemetry is evidence of an unhealthy runtime.
+_MAX_CONSECUTIVE_TELEMETRY_MISSES = 3
+
+
 class ExecutionAuthorizationError(RuntimeError):
     """Raised when receipt, commit, diff, or protected hashes do not match."""
 
@@ -334,6 +340,7 @@ class ExecutionRunner:
         termination: Optional[Tuple[str, str, str]] = None
         telemetry_error: Optional[BaseException] = None
 
+        consecutive_sample_failures = 0
         try:
             with TelemetryJournal(manager.telemetry_path) as journal:
                 while True:
@@ -352,7 +359,10 @@ class ExecutionRunner:
                         # A short-lived ``docker run --rm`` can disappear after
                         # the liveness check but before ``docker stats``.  That
                         # is normal completion; metrics loss while the launcher
-                        # remains alive is still fail-closed.
+                        # remains alive stays fail-closed, but only after the
+                        # bounded consecutive-miss window below, because Docker
+                        # Desktop stalls ``docker stats`` for seconds under
+                        # host load without the candidate being unhealthy.
                         if not process.is_alive():
                             break
                         if time.monotonic() - started >= limits.wall_time_seconds:
@@ -362,7 +372,20 @@ class ExecutionRunner:
                                 "hard wall-time limit exceeded",
                             )
                             break
-                        raise
+                        consecutive_sample_failures += 1
+                        if consecutive_sample_failures >= _MAX_CONSECUTIVE_TELEMETRY_MISSES:
+                            raise
+                        remaining = limits.wall_time_seconds - (
+                            time.monotonic() - started
+                        )
+                        time.sleep(
+                            min(
+                                self.policy.telemetry_interval_seconds,
+                                max(0.001, remaining),
+                            )
+                        )
+                        continue
+                    consecutive_sample_failures = 0
                     journal.append(sample)
                     tracker.observe(
                         rss_mb=_field(sample, "rss_mb", None),
@@ -446,11 +469,15 @@ class ExecutionRunner:
                                 "runtime output could not be written because storage is full",
                             )
                             break
-                        except ProcessLaunchError:
+                        except ProcessLaunchError as error:
+                            detail = str(error).strip()
+                            summary = "bounded container output extraction failed"
+                            if detail:
+                                summary = f"{summary}: {detail}"
                             termination = (
                                 "infrastructure_error",
                                 "RUNTIME_OUTPUT_EXTRACTION_FAILURE",
-                                "bounded container output extraction failed",
+                                summary,
                             )
                             break
                         release_wait = limits.wall_time_seconds - elapsed

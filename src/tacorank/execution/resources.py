@@ -107,7 +107,9 @@ class DockerStatsUsageReader:
         # Windows named-pipe backend).  Give initial discovery a bounded grace
         # window; once a sample has been observed, telemetry loss remains
         # fail-closed.
-        attempts = 6 if self._previous_monotonic is None else 1
+        # After the first sample a probe may still fail transiently under
+        # host load; retry within the same bounded budget before failing.
+        attempts = 6 if self._previous_monotonic is None else 3
         budget = self.specification.timeout_seconds
         if timeout_seconds is not None:
             budget = min(budget, max(0.0, timeout_seconds))

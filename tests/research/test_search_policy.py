@@ -441,8 +441,8 @@ def test_playbook_branches_after_terminal_proxy_prune(planner_context):
     assert choice.action == "propose"
     assert choice.reason_code == "EARLY_FIDELITY_REJECTED"
     assert choice.parent.experiment_id == "exp_0000"
-    assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    assert choice.family == "model"
+    assert choice.method_card_id == "model_gbdt_stack"
 
 
 def test_soft_pairwise_tradeoff_gets_one_bounded_listwise_child(planner_context):
@@ -579,7 +579,7 @@ def test_severe_proxy_regression_is_not_refined_or_ensembled(planner_context):
 
     assert choice.phase == "playbook"
     assert choice.reason_code == "EARLY_FIDELITY_REJECTED"
-    assert choice.family == "temporal_history"
+    assert choice.family == "model"
     assert choice.component_experiment_ids == ()
 
 
@@ -901,7 +901,7 @@ def test_playbook_abandons_trusted_regression(planner_context):
     choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
 
     assert choice.reason_code == "TRUSTED_FULL_REGRESSION"
-    assert choice.family == "temporal_history"
+    assert choice.family == "model"
 
 
 def test_optional_ranker_cannot_inject_an_illegal_choice(planner_context):
@@ -919,8 +919,8 @@ def test_optional_ranker_cannot_inject_an_illegal_choice(planner_context):
 
     choice = policy.choose(planner_context)
 
-    assert choice.family == "objective"
-    assert choice.method_card_id == "objective_pairwise_bpr"
+    assert choice.family == "model"
+    assert choice.method_card_id == "model_gbdt_stack"
 
 
 def test_policy_fails_closed_when_contract_has_no_allowed_families(planner_context):

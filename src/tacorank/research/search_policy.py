@@ -33,7 +33,7 @@ DEFAULT_METHOD_ORDER = {
     "multitask": ("multitask_single_auxiliary",),
     "duration_bias": ("duration_bias_censored_watch_time",),
     "features": ("temporal_drift_past_only",),
-    "model": ("model_compact_ranker",),
+    "model": ("model_gbdt_stack", "model_compact_ranker"),
     "ensemble": (
         "ensemble_diverse_residual_candidate",
         "ensemble_confirmed_members",

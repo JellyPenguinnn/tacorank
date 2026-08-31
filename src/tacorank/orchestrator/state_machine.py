@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Iterable, List, Optional
 
 from ..memory.projections import project
+from ..recovery.policy import MAX_SAME_COMMIT_RETRIES
 from ..schemas import (
     Event,
     EventPayload,
@@ -436,7 +437,10 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             "remaining repair budget is inconsistent",
         )
         if decision.action == RecoveryAction.RETRY_SAME_COMMIT:
-            _require(node.same_commit_retry_count == 0, "same-commit retry has already been used")
+            _require(
+                node.same_commit_retry_count < MAX_SAME_COMMIT_RETRIES,
+                "same-commit retries have already been used",
+            )
     elif event_type == EventType.OUTPUT_CHECKED:
         result = payload.result
         node = state.experiments.get(result.experiment_id)
