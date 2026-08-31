@@ -295,6 +295,7 @@ class Harness:
                 contract_sha256=self.verified_contract.contract_sha256,
                 protected_paths_sha256=self.verified_contract.protected_paths_sha256,
                 max_experiments=self.config.max_experiments,
+                run_mode=self.config.run_mode,
                 parallel_directions=self.config.parallel_directions,
                 synthesize_parallel_improvements=(
                     self.config.synthesize_parallel_improvements
@@ -2264,7 +2265,12 @@ class Harness:
                 raise OrchestrationError("outer loop made no durable ledger progress")
 
     async def run_to_completion(self) -> object:
-        """Drive research to a deterministic stop and finalize its selected best."""
+        """Drive research to its configured terminal boundary.
+
+        Discovery runs preserve a stopped research ledger for inspection and
+        never enter test inference or submission checking automatically.
+        Submission runs retain the complete competition workflow.
+        """
 
         state = await self.run_until_stopped()
         if state.status.value != "stopped":
@@ -2272,6 +2278,8 @@ class Harness:
                 "run stopped abnormally: %s"
                 % (state.stop_reason_code or state.status.value)
             )
+        if self.config.run_mode == "discovery":
+            return state
         return await self.finalize()
 
     async def _run_final_execution(

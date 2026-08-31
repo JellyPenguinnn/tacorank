@@ -19,6 +19,7 @@ export type LedgerEvent = {
 
 export type RunSummary = {
   run_id: string;
+  run_mode: 'discovery' | 'submission' | null;
   source: 'ledger' | 'launch';
   status: string;
   phase: string;
@@ -51,6 +52,7 @@ export type LaunchRecord = {
   schema_version: 'tacorank.dashboard-launch.v1';
   launch_id: string;
   run_id: string;
+  run_mode?: 'discovery' | 'submission' | null;
   started_at: string;
   pid: number | null;
   stop_requested_at: string | null;
@@ -101,6 +103,7 @@ function validLaunchRecord(value: unknown): LaunchRecord | null {
   const candidate = record(value);
   const launchId = text(candidate.launch_id);
   const runId = text(candidate.run_id);
+  const runMode = candidate.run_mode == null ? null : text(candidate.run_mode);
   const startedAt = text(candidate.started_at);
   const stopRequestedAt = candidate.stop_requested_at == null ? null : text(candidate.stop_requested_at);
   const pid = candidate.pid;
@@ -108,6 +111,7 @@ function validLaunchRecord(value: unknown): LaunchRecord | null {
     candidate.schema_version !== 'tacorank.dashboard-launch.v1'
     || !launchId || !LAUNCH_ID.test(launchId)
     || !runId || !RUN_ID.test(runId)
+    || (runMode !== null && !['discovery', 'submission'].includes(runMode))
     || !startedAt || !Number.isFinite(new Date(startedAt).getTime())
     || (candidate.stop_requested_at != null && (!stopRequestedAt || !Number.isFinite(new Date(stopRequestedAt).getTime())))
     || !(pid === null || (typeof pid === 'number' && Number.isInteger(pid) && pid > 0))
@@ -116,6 +120,7 @@ function validLaunchRecord(value: unknown): LaunchRecord | null {
     schema_version: 'tacorank.dashboard-launch.v1',
     launch_id: launchId,
     run_id: runId,
+    run_mode: runMode as 'discovery' | 'submission' | null,
     started_at: startedAt,
     pid: pid as number | null,
     stop_requested_at: stopRequestedAt,
@@ -193,6 +198,7 @@ async function legacyActiveLaunch(existing: LaunchRecord[]): Promise<LaunchRecor
           schema_version: 'tacorank.dashboard-launch.v1',
           launch_id: launchId,
           run_id: match[1],
+          run_mode: null,
           started_at: startedAt,
           pid,
           stop_requested_at: null,
@@ -293,6 +299,7 @@ async function summarizeLaunch(item: LaunchRecord, lockedPid: number | null): Pr
   const stopped = !isLive && item.stop_requested_at !== null;
   return {
     run_id: item.run_id,
+    run_mode: item.run_mode ?? null,
     source: 'launch',
     status: stopping ? 'stopping' : stopped ? 'interrupted' : isLive ? 'initializing' : 'failed',
     phase: stopping ? 'setup_stopping' : stopped ? 'setup_stopped' : isLive ? 'setup' : 'setup_failed',
@@ -352,6 +359,7 @@ function metricScore(payload: JsonRecord): number | null {
 }
 
 export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
+  let runMode: 'discovery' | 'submission' | null = null;
   let status = 'initializing';
   let phase = 'not_started';
   let proposed = 0;
@@ -371,7 +379,11 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
     const payload = record(event.payload);
     const previousPhase = phase;
     switch (event.event_type) {
-      case 'run.started': phase = 'contract_verification'; break;
+      case 'run.started': {
+        phase = 'contract_verification';
+        runMode = payload.run_mode === 'discovery' ? 'discovery' : 'submission';
+        break;
+      }
       case 'contract.verified': phase = 'baseline'; break;
       case 'baseline.verified':
         status = 'ready'; phase = 'planning'; baselineScore = metricScore(payload);
@@ -429,6 +441,7 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
   const lastEvent = events.at(-1);
   return {
     run_id: runId,
+    run_mode: runMode,
     source: 'ledger',
     status,
     phase,

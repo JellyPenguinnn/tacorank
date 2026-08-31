@@ -59,6 +59,19 @@ def test_run_config_accepts_explicit_legacy_campaign_without_changing_patience(c
     assert parsed.convergence_patience == 3
 
 
+def test_run_mode_is_backward_compatible_and_strict(config):
+    payload = config.model_dump(mode="python")
+    payload.pop("run_mode")
+    assert RunConfig.model_validate(payload).run_mode == "submission"
+
+    payload["run_mode"] = "discovery"
+    assert RunConfig.model_validate(payload).run_mode == "discovery"
+
+    payload["run_mode"] = "explore_forever"
+    with pytest.raises(ValueError, match="run_mode"):
+        RunConfig.model_validate(payload)
+
+
 def test_blank_contract_is_a_hard_stop(config, repository):
     (repository / config.contract_path).write_text("")
     with pytest.raises(ContractError, match="empty"):

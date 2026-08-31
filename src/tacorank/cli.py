@@ -54,6 +54,7 @@ def _status_dict(events) -> dict:
 
     return {
         "run_id": state.run_id,
+        "run_mode": state.run_mode,
         "status": state.status.value,
         "phase": state.phase,
         "current_experiment_id": runtime["experiment_id"],
@@ -195,6 +196,15 @@ def build_parser() -> argparse.ArgumentParser:
     setup_live.add_argument("--python312", type=Path)
     setup_live.add_argument("--docker", type=Path)
     setup_live.add_argument("--run-id", default="run_001")
+    setup_live.add_argument(
+        "--run-mode",
+        choices=("discovery", "submission"),
+        default="discovery",
+        help=(
+            "discovery stops at budget/exhaustion without test inference or "
+            "submission checking; submission runs the complete finalization workflow"
+        ),
+    )
     setup_live.add_argument("--download-data", action="store_true")
     setup_live.add_argument(
         "--research-campaign",
@@ -289,6 +299,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 python312=python312,
                 docker_executable=docker,
                 run_id=args.run_id,
+                run_mode=args.run_mode,
                 download_data=args.download_data,
                 research_campaign_path=args.research_campaign,
             )
@@ -352,6 +363,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     json.dumps(
                         {
                             "run_id": config.run_id,
+                            "run_mode": config.run_mode,
                             "status": "passed",
                             "runtime": "live",
                             "research_provider": config.research_provider,

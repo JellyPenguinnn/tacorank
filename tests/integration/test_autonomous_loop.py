@@ -410,6 +410,33 @@ def test_negative_full_results_consume_convergence_patience(
     assert state.consecutive_non_improving_full_evaluations == 3
 
 
+def test_discovery_mode_ignores_early_convergence_and_never_auto_finalizes(
+    harness, baseline_evaluation
+):
+    planner = SequentialPlanner(harness.config.baseline_commit_sha)
+    harness.config.run_mode = "discovery"
+    harness.config.max_experiments = 4
+    harness.planner = planner
+    harness.evaluator = NonImprovingEvaluator(
+        harness.config.metric_names,
+        harness.config.primary_metric_name,
+        harness.event_store,
+    )
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_to_completion())
+
+    assert state.status.value == "stopped"
+    assert state.stop_reason_code == "experiment_budget"
+    assert state.experiments_proposed == 4
+    assert state.consecutive_non_improving_full_evaluations == 4
+    assert state.final_experiment_id is None
+    assert EventType.FINAL_SELECTED not in [event.event_type for event in harness.events()]
+    assert EventType.SUBMISSION_CHECKED not in [
+        event.event_type for event in harness.events()
+    ]
+
+
 def test_global_patience_still_bounds_explicit_depth_campaign(
     harness, baseline_evaluation
 ):

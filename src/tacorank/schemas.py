@@ -1937,6 +1937,7 @@ class RunStartedPayload(StrictModel):
     contract_sha256: str
     protected_paths_sha256: str
     max_experiments: int = Field(gt=0)
+    run_mode: Literal["discovery", "submission"] = "submission"
     parallel_directions: int = Field(default=1, gt=0, le=7)
     synthesize_parallel_improvements: bool = True
     deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)

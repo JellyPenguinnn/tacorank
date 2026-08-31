@@ -177,17 +177,21 @@ def stop_decision(
     if runtime_stop.stop:
         return runtime_stop
     pressure = convergence_pressure(events, config)
-    if campaign_converged(events, config):
+    if config.run_mode == "submission" and campaign_converged(events, config):
         return StopDecision(
             True,
             "campaign_converged",
             "Every campaign family reached its frozen minimum depth and "
             "non-improvement patience.",
         )
-    # The official convergence contract applies to every run mode. Research
-    # plans and legacy explicit campaigns may bound legal search, but cannot
-    # turn the 50-iteration cap into a quota or bypass three-result patience.
-    if pressure >= config.convergence_patience:
+    # Submission mode uses early convergence to bound the competition workflow.
+    # Discovery mode intentionally spends its frozen research budget (or stops
+    # when the planner exhausts legal non-duplicates) before any explicit
+    # operator-requested finalization.
+    if (
+        config.run_mode == "submission"
+        and pressure >= config.convergence_patience
+    ):
         return StopDecision(
             True,
             "converged",

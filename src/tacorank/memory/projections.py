@@ -52,6 +52,7 @@ def project(events: Iterable[Event]) -> RunState:
             state.phase = "contract_verification"
             state.started_at = event.timestamp
             state.max_experiments = payload.max_experiments
+            state.run_mode = payload.run_mode
             state.parallel_directions = payload.parallel_directions
             state.synthesize_parallel_improvements = (
                 payload.synthesize_parallel_improvements

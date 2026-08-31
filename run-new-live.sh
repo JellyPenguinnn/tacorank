@@ -10,6 +10,7 @@
 #   TACORANK_DOCKER     Absolute path to the Docker executable.
 #   TACORANK_RESEARCH_CAMPAIGN  Repository-relative depth-campaign JSON.
 #   TACORANK_RUN_ID     New run identity reserved by a trusted launcher.
+#   TACORANK_RUN_MODE   discovery (no auto-finalization) or submission.
 
 set -eu
 
@@ -179,13 +180,19 @@ fi
 data_dir="$repo_root/KuaiRand-Pure/data"
 config="$deployment_dir/run-config.json"
 live_config="$deployment_dir/live-adapters.json"
+run_mode=${TACORANK_RUN_MODE:-discovery}
+case "$run_mode" in
+    discovery|submission) ;;
+    *) die "TACORANK_RUN_MODE must be discovery or submission" ;;
+esac
 
 printf '%s\n' "Starting new TacoRank live run: $run_id"
 printf '%s\n' "Repository: $repo_root"
+printf '%s\n' "Run mode: $run_mode"
 
-set --
+set -- --run-mode "$run_mode"
 if [ -n "${TACORANK_RESEARCH_CAMPAIGN:-}" ]; then
-    set -- --research-campaign "$TACORANK_RESEARCH_CAMPAIGN"
+    set -- "$@" --research-campaign "$TACORANK_RESEARCH_CAMPAIGN"
     printf '%s\n' "Research campaign: $TACORANK_RESEARCH_CAMPAIGN"
 fi
 
@@ -223,13 +230,25 @@ import json
 import sys
 
 status = json.loads(sys.argv[1])
-if status.get("status") != "finalized" or status.get("phase") != "finalized":
-    raise SystemExit(
-        "run did not finalize: status=%r phase=%r"
-        % (status.get("status"), status.get("phase"))
-    )
-if not status.get("final_experiment_id"):
-    raise SystemExit("run finalized without final_experiment_id")
+run_mode = status.get("run_mode")
+if run_mode == "discovery":
+    if status.get("status") != "stopped" or status.get("phase") != "stopped":
+        raise SystemExit(
+            "discovery run did not stop cleanly: status=%r phase=%r"
+            % (status.get("status"), status.get("phase"))
+        )
+    if status.get("final_experiment_id") is not None:
+        raise SystemExit("discovery run unexpectedly selected a final experiment")
+elif run_mode == "submission":
+    if status.get("status") != "finalized" or status.get("phase") != "finalized":
+        raise SystemExit(
+            "submission run did not finalize: status=%r phase=%r"
+            % (status.get("status"), status.get("phase"))
+        )
+    if not status.get("final_experiment_id"):
+        raise SystemExit("submission run finalized without final_experiment_id")
+else:
+    raise SystemExit("run status has invalid run_mode=%r" % run_mode)
 normal_stop_reasons = {
     "experiment_budget",
     "converged",
@@ -240,7 +259,7 @@ normal_stop_reasons = {
 }
 if status.get("stop_reason_code") not in normal_stop_reasons:
     raise SystemExit(
-        "run finalized after an abnormal stop: stop_reason_code=%r"
+        "run ended after an abnormal stop: stop_reason_code=%r"
         % status.get("stop_reason_code")
     )
 ' "$status_json"
@@ -253,4 +272,4 @@ if status.get("stop_reason_code") not in normal_stop_reasons:
     --run-id "$run_id" \
     --repository-root "$repo_root"
 
-printf '%s\n' "TacoRank live run completed and validated: $run_id"
+printf '%s\n' "TacoRank $run_mode run completed and validated: $run_id"

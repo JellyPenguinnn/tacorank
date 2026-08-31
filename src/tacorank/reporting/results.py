@@ -462,6 +462,7 @@ def _state_payload(events: Sequence[Event]) -> dict:
     return {
         "schema_version": "1.0",
         "run_id": state.run_id,
+        "run_mode": state.run_mode,
         "execution_mode": (
             "parallel_rounds" if state.parallel_directions > 1 else "sequential"
         ),
@@ -471,6 +472,7 @@ def _state_payload(events: Sequence[Event]) -> dict:
         },
         "current": runtime,
         "global": {
+            "run_mode": state.run_mode,
             "status": state.status.value,
             "phase": state.phase,
             "best_experiment_id": state.best_experiment_id,

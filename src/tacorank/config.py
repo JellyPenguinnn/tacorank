@@ -134,6 +134,7 @@ class RunConfig(StrictModel):
     evaluator_sha256: str
     baseline_commit_sha: NonEmptyStr
     max_experiments: int = Field(default=50, gt=0)
+    run_mode: Literal["discovery", "submission"] = "submission"
     parallel_directions: int = Field(default=1, gt=0, le=7)
     synthesize_parallel_improvements: bool = True
     wall_time_limit_seconds: int = Field(default=21_600, gt=0)

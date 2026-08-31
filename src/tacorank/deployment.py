@@ -187,11 +187,14 @@ def setup_live_deployment(
     python312: Path,
     docker_executable: Path,
     run_id: str,
+    run_mode: str = "discovery",
     download_data: bool,
     research_campaign_path: Path | None = None,
 ) -> Mapping[str, Any]:
     """Build an exact production deployment and return its generated paths."""
 
+    if run_mode not in {"discovery", "submission"}:
+        raise DeploymentError("run_mode must be discovery or submission")
     root = Path(repository_root).resolve(strict=True)
     deployment = _new_directory_inside(root, deployment_directory)
     runtime = _new_external_directory(root, runtime_directory)
@@ -311,6 +314,7 @@ def setup_live_deployment(
         "evaluator_sha256": evaluator_hash,
         "baseline_commit_sha": baseline_commit,
         "max_experiments": campaign_budget,
+        "run_mode": run_mode,
         "wall_time_limit_seconds": 21600,
         "convergence_epsilon": 0.002,
         "convergence_patience": 3,
@@ -464,6 +468,7 @@ def setup_live_deployment(
         "research_campaign": (
             research_campaign.campaign_id if research_campaign is not None else None
         ),
+        "run_mode": run_mode,
     }
 
 
