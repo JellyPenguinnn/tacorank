@@ -169,7 +169,7 @@ class RunConfig(StrictModel):
     target_interface_excerpts: Dict[str, str] = Field(
         default_factory=lambda: dict(DEFAULT_TARGET_INTERFACE_EXCERPTS)
     )
-    coding_step_limit: int = Field(default=DEFAULT_CODING_STEP_LIMIT, gt=0)
+    coding_step_limit: int = Field(default=64, gt=0)
     # ``None`` explicitly disables TacoRank's cumulative coding-trajectory
     # token gate. Provider/model request limits remain independently enforced.
     coding_token_limit: Optional[int] = Field(default=None, gt=0)
