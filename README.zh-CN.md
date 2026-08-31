@@ -11,6 +11,25 @@ TacoRank 是一个面向 KuaiRand-Pure 基准的确定性、事件溯源式自�
 
 TacoRank 是控制平面系统，而不是一个独立的推荐模型。候选模型代码位于 `solution/`，控制平面负责实验生命周期和冻结的竞赛约定。
 
+## 目录
+
+- [项目概览](#项目概览)
+- [TacoRank 的差异](#tacorank-的差异)
+- [研究方法](#研究方法)
+- [当前架构](#当前架构)
+- [运行要求](#运行要求)
+- [配置与安装](#配置与安装)
+- [复现与验证结果](#复现与验证结果)
+- [监控与 Dashboard](#监控与-dashboard)
+- [仓库结构](#仓库结构)
+- [团队成员贡献](#团队成员贡献)
+- [集成约定](#集成约定)
+- [限制与未来改进](#限制与未来改进)
+- [故障排查](#故障排查)
+- [开发与贡献规则](#开发与贡献规则)
+- [文档](#文档)
+- [许可证](#许可证)
+
 ## 项目概览
 
 完整工作流如下：
@@ -31,42 +50,46 @@ TacoRank 是控制平面系统，而不是一个独立的推荐模型。候选�
         -> 干净复现验证集最优候选，或使用受保护 FM fallback
         -> 无标签最终推理、最终 Gate B 与官方提交检查
 
-### 单次实验的生命周期
-
-```mermaid
-flowchart LR
-    A["从账本派生的<br/>规划上下文"]
-    B["选择合法方法与<br/>研究方向"]
-    C["DeepSeek<br/>研究方案"]
-    D["由控制器绑定的<br/>ExperimentSpec"]
-    E["Trae 编辑与有界<br/>实现审核"]
-    F{"Gate A"}
-    G["Smoke、proxy 与 full<br/>沙箱执行"]
-    H{"Gate B"}
-    I["受保护评测与<br/>可信度评估"]
-    J{"实验决策"}
-    K["记录经验并构建<br/>下一轮上下文"]
-    R["有界恢复"]
-
-    A --> B --> C --> D --> E --> F
-    F -- 通过 --> G --> H
-    H -- 通过 --> I --> J
-    J -- 提升 fidelity --> G
-    J -- 接受、拒绝或剪枝 --> K --> A
-
-    E -. 错误 .-> R
-    F -. 失败 .-> R
-    G -. 失败 .-> R
-    H -. 失败 .-> R
-    I -. 无变化或错误 .-> R
-    R -- 重试或修复 --> E
-    R -- 运行时重试 --> G
-    R -- 放弃或回滚 --> K
-```
-
 控制器是确定性的，也是唯一可以修改工作流状态或追加事件账本的组件。外部智能体只返回类型化记录；它们不能选择最终检查点、修改预算、绕过 gate、访问隐藏标签或改写评测器。
 
-当前研究组合包含一个受资格条件约束的因果滚动反馈残差融合方向，它结合了因果历史、多样化紧凑排序器和残差修正。已审核的方法卡组合覆盖 pairwise 与 listwise 目标、紧凑排序器、因果历史、辅助互动信号、时长偏差、时间漂移和集成方法。前置条件、禁止条件和既有负面结果共同决定哪些方法卡可以被合法选择。
+### 已观察结果与证据边界
+
+已完成的参考运行使用生产工作流一直执行到官方提交检查：
+
+| 项目 | 已观察结果 |
+| --- | ---: |
+| 提出的实验数 | 6 |
+| 最强研究候选 | `exp_006`，primary 为 0.6022983341 |
+| 受保护 FM 基线 | primary 为 0.6014687564 |
+| 最终合格选择 | `baseline` |
+| 停止原因 | `no_legal_proposal` |
+| 提交检查 | accepted |
+
+虽然 `exp_006` 的点估计更高，但其增益被判定为处于噪声范围内，因此控制器保留了受保护 FM 基线。这证明完整工作流和 fail-closed 选择约定成功运行，但不能证明自动化研究改善了基准成绩。下文介绍的因果滚动反馈方向是在该参考运行之后加入研究组合的，并未在此次运行中得到评测。
+
+## TacoRank 的差异
+
+- **将智能能力与决策权限分离。** DeepSeek 和 Trae 可以提出研究与代码，但确定性控制器掌握预算、路由、晋级、恢复、停止、最终选择和账本写入权限。
+- **每个候选都必须通过两个独立 gate。** Gate A 验证补丁是否合法且可以执行；Gate B 验证预测制品是否具备受保护评测或提交资格。
+- **实验历史是证据，而不是可随意修改的应用状态。** 方案、补丁、gate 回执、执行结果、指标、恢复决策和资源使用会追加到哈希链账本，再重放为便于阅读的视图。
+- **失败也是有效结果。** 控制器可以重试、放弃、回滚或选择受保护 FM fallback，但智能体不能削弱检查，也不能在缺少可信证据时晋级一个看似亮眼的分数。
+
+## 研究方法
+
+官方 FM 基线是一个强大的静态二阶模型，但它无法直接表示不断变化的用户意图、严格的过去行为历史、候选列表上下文，或不同排序目标之间的互补误差。因此，TacoRank 会在已审核组合中搜索 pairwise 与 listwise 目标、紧凑排序器、因果历史、辅助互动信号、时长偏差修正、时间漂移特征和 ensemble 方法。
+
+最新的集成候选方向是一个受资格条件约束的因果滚动反馈残差融合：
+
+1. **构建无泄漏历史。** 用户、用户-视频、用户-作者、session、item、时间间隔和获准互动特征只能使用严格早于当前评分行的数据，并采用确定性的同时间戳策略。
+2. **训练多样化紧凑排序器。** 小型 LambdaRank、`rank_xendcg` 和 CatBoost YetiRank 成员使用不同归纳偏置优化用户内排序，同时保持在 CPU 预算内。
+3. **修正互补残差误差。** Frozen-history LightGBM、第二个排序器和紧凑的序列/时间上下文成员通过以下冻结稀疏配方贡献按用户归一化的修正向量：
+
+       Z(lab_base) - 0.40*Z(frozen_lgb) - 0.10*Z(rank2) + 0.15*Z(DIN50)
+
+4. **保留可信 fallback。** Setup 验证的 FM 分数继续用于未见情况和最终 fallback；系数、seed、归一化、cutoff 规则和成员 identity 都会在受保护评测前冻结，而不会针对每个验证 slice 调参。
+5. **拒绝薄弱或不安全证据。** 未来/自身结果泄漏、顺序不明确、后期时间段回退、增益过度集中，或没有超过 `epsilon` 的可信 full-fidelity 改进，都会证伪该方法。
+
+只有当 serving 约定明确允许在评分时使用更早行的反馈，该方向才具备选择资格；否则控制器必须选择仅使用训练窗口的因果历史方法。其精确前置条件、允许数据、实现边界和证伪规则详见 [`ensemble_causal_rolling_residual_blend` 方法卡](research/methods/ensemble_causal_rolling_residual_blend.md)，更完整的方法组合位于 [`research/methods/`](research/methods/)。
 
 ## 当前架构
 
@@ -82,7 +105,7 @@ flowchart LR
 | 安全护栏 | 强制执行受保护路径、数据边界、命令策略、Gate A 和 Gate B。 | `src/tacorank/safety`、`PROTECTED_PATHS.md` |
 | 执行与 SRE | 在 Docker 中运行已审核的符号化命令，监控健康状态与资源，并记录制品。 | `src/tacorank/execution`、`src/tacorank/sre` |
 | 恢复 | 对故障分类，并选择有界修复、重试、回滚或放弃操作。 | `src/tacorank/recovery` |
-| 评测与报告 | 计算受保护指标、可信度诊断、决策、经验、资源报告和最终选择。 | `src/tacorank/evaluation`、`src/tacorank/reflection`、`src/tacorank/reporting` |
+| 评测与报告 | 计算受保护指标、可信度诊断、经验、资源报告和最终选择证据；最终选择由控制器执行。 | `src/tacorank/evaluation`、`src/tacorank/reflection`、`src/tacorank/reporting` |
 | 基准适配器 | 将控制器连接到官方 KuaiRand-Pure 评测器和提交检查器。 | `benchmarks/kuairand_pure`、`kuairand-starter-kit` |
 | 候选方案 | 正常情况下唯一允许编码智能体修改的模型区域。 | `solution` |
 | Dashboard | 读取仓库中的账本，展示运行、实验、gate、指标、恢复和 token 使用情况。 | `ui` |
@@ -195,6 +218,8 @@ Gate B 判断生成的预测制品是否有效，并具备评测或提交资格�
 
     runs/run_20260830094907711_3c78fb3c/
 
+该归档必须与仓库分开发布，例如作为附带公开 SHA-256 的不可变 release asset。在团队发布该制品前，外部读者可以复现官方基线或启动新运行，但无法独立验证这份精确的历史账本。不要将该归档提交到 Git。
+
 然后在仓库根目录运行：
 
     REPO_ROOT="$(pwd -P)"
@@ -296,6 +321,8 @@ Preflight 必须成功退出并报告：
 
 ## 监控与 Dashboard
 
+![TacoRank Run Monitor——实时观察自动化研究](ui/public/og.png)
+
 可选 UI 是一个读取本地仓库的 dashboard。它读取运行和事件，而不会成为第二个事实来源；它展示实验方案、父子谱系、Gate A、执行、Gate B、评测、恢复、资源统计和 provider token 使用情况。
 
 启动方式：
@@ -350,12 +377,11 @@ Preflight 必须成功退出并报告：
 
 职责：
 
-- 定义实验节点、假设、父节点、子节点、目标文件和 fidelity。
-- 维护实验谱系，并允许从有前景的历史节点继续分支。
+- 定义假设、研究类别、方法卡策略和父子搜索行为。目标文件和执行 fidelity 仍由控制器绑定。
+- 基于控制器记录的谱系设计搜索，并允许策略批准后从有前景的历史节点继续分支。
 - 实现 UCB 风格的探索/利用决策。
 - 生成特征、模型、loss、训练策略、超参数和 ensemble 实验方案。
-- 仅在策略允许时将 proxy 候选晋级至 full 评测。
-- 剪枝较弱分支，并使用官方规则检测收敛。
+- 定义由控制器评估和执行的 proxy 晋级、剪枝和收敛条件。
 - 解释并记录选择每个节点的原因。
 - 为 dashboard 提供实验树视图。
 
@@ -369,9 +395,9 @@ Preflight 必须成功退出并报告：
 - `research/CURRENT_RUN_IMPROVEMENT_PLAN.md`
 - `docs/research/planning-and-search.md`
 
-主要输出：根据实验历史、方法卡、预算和收敛状态生成并通过验证的 `ExperimentSpec`。
+主要输出：根据实验历史、方法卡、预算和收敛状态生成确定性策略选择，以及通过验证且不读取代码的 `ResearchProposal`。控制器随后将其绑定为 `ExperimentSpec`。
 
-### Person 2——Jing Min：智能体框架与 Trae 集成
+### Person 2——Jing Ming：智能体框架与 Trae 集成
 
 研究参考：ReAct、Karpathy 的 autoresearch 循环、autoresearch program 设计和 Trae Agent。
 
@@ -437,9 +463,9 @@ Preflight 必须成功退出并报告：
 - 创建隔离 worktree，并在 Docker 中执行已审核命令。
 - 监控进程心跳、运行时间、CPU/GPU 内存、磁盘、NaN loss 和缺失输出。
 - 对语法/import、数据、OOM、数值、timeout、hang、约定和基础设施故障分类。
-- 应用有界 self-debugging 和定向重试。
+- 为控制器提供有界 self-debugging 和定向重试决策。
 - 策略允许时，在 OOM 后降低获准的运行参数。
-- 回滚失败补丁，并在支持的检查点恢复运行。
+- 实现供控制器授权恢复使用的回滚和检查点机制。
 - 持久保存原始运行事件、制品、遥测、恢复决策和资源使用量。
 - 将即时恢复与长期研究记忆分离。
 
@@ -497,8 +523,9 @@ Preflight 必须成功退出并报告：
 
 | 负责人 | 输入 | 输出 |
 | --- | --- | --- |
-| Person 1 | 实验历史、方法卡、预算 | `ExperimentSpec` |
-| Person 2 | `ExperimentSpec` 与有界上下文 | `PatchCandidate` |
+| Person 1 | 实验历史、方法卡、预算 | 策略选择与 `ResearchProposal` |
+| 确定性控制器 | 策略选择与 `ResearchProposal` | 控制器绑定的 `ExperimentSpec` 与账本状态转换 |
+| Person 2 | 控制器绑定的 `ExperimentSpec` 与有界上下文 | `PatchCandidate` |
 | Person 3 | `PatchCandidate` 或 `RunResult` | 验证结果 |
 | Person 4 | 已验证补丁与执行请求 | `RunResult` |
 | Person 5 | `RunResult` 与受保护评测器输出 | `EvaluationReport`、`ReflectionRecord`、`SearchFeedback` |
@@ -510,7 +537,7 @@ Preflight 必须成功退出并报告：
 3. Person 3 验证补丁。
 4. Person 4 执行官方 FM 或有界候选命令。
 5. Person 5 评测输出并返回指标。
-6. Person 1 记录新的实验树节点。
+6. 控制器记录新的实验树节点，并将其提供给下一轮规划上下文。
 
 只有在该循环、事件账本及其故障边界均可复现后，才应加入高级研究机制。
 
