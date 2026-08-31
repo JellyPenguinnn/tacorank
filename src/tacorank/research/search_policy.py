@@ -637,7 +637,12 @@ def _no_op_choices(
     if not history:
         return None
     latest = history[-1]
-    if _normalized(get_value(latest, "status", None)) != "no_op":
+    status = _normalized(get_value(latest, "status", None))
+    # Older ledgers marked an exhausted no-op repair ``invalid`` without an
+    # experiment.decided event. Treat that immutable evidence as terminal for
+    # independent branching, while reserving same-mechanism reimplementation
+    # for the explicit ``no_op`` state used by the corrected controller.
+    if status not in {"no_op", "invalid", "rejected"}:
         return None
     verdict = _normalized(get_value(latest, "trust_verdict", None))
     contract = get_value(context, "contract_summary", None)
@@ -699,7 +704,8 @@ def _no_op_choices(
     # Permit one planner-selected reimplementation after the first no-op. A
     # second no-op for the same parent/family/method retires that mechanism.
     if (
-        parent is not None
+        status == "no_op"
+        and parent is not None
         and family in allowed
         and len(latest_methods) == 1
         and same_mechanism_no_ops == 1

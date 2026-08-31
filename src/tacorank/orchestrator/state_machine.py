@@ -586,7 +586,30 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             _require(node.status == ExperimentStatus.OUTPUT_VERIFIED, "smoke decision requires Gate B")
             _require(decision.evaluation_event_id is None, "smoke decision cannot cite evaluation")
         else:
-            _require(node.status == ExperimentStatus.EVALUATED, "decision requires evaluation")
+            latest_recovery = _last_for_experiment(
+                events, EventType.RECOVERY_DECIDED, decision.experiment_id
+            )
+            recovery_terminated_evaluation = bool(
+                node.status == ExperimentStatus.INVALID
+                and latest_recovery is not None
+                and latest_recovery.payload.decision.action
+                in {RecoveryAction.ABANDON, RecoveryAction.ROLLBACK}
+            )
+            if recovery_terminated_evaluation:
+                _require(
+                    decision.decision
+                    in {
+                        ExperimentDecisionKind.REJECT,
+                        ExperimentDecisionKind.INVALID,
+                        ExperimentDecisionKind.PRUNE,
+                    },
+                    "terminal recovery cannot accept or promote an experiment",
+                )
+            _require(
+                node.status == ExperimentStatus.EVALUATED
+                or recovery_terminated_evaluation,
+                "decision requires evaluation",
+            )
             evaluation = _last_for_experiment(events, EventType.EVALUATION_COMPLETED, decision.experiment_id)
             _require(
                 evaluation is not None and evaluation.event_id == decision.evaluation_event_id,

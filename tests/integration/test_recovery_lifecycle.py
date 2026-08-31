@@ -17,6 +17,7 @@ from tacorank.schemas import (
     CheckResult,
     CheckStatus,
     EventType,
+    ExperimentDecisionKind,
     PatchCheckResult,
     PlannerAction,
     PlannerOutput,
@@ -44,6 +45,20 @@ class RepairingCodingWorker(FakeCodingWorker):
                 "context_id": context.context_id,
                 "base_commit_sha": self.initial_patch.patch_commit_sha,
                 "patch_commit_sha": "c" * 40,
+            }
+        )
+        return self.initial_patch.__class__.model_validate(values)
+
+
+class SequencedRepairingCodingWorker(RepairingCodingWorker):
+    async def repair_patch(self, context, decision):
+        self.repair_calls.append((context, decision))
+        values = self.initial_patch.model_dump(mode="json")
+        values.update(
+            {
+                "context_id": context.context_id,
+                "base_commit_sha": context.current_patch_commit_sha,
+                "patch_commit_sha": chr(ord("b") + len(self.repair_calls)) * 40,
             }
         )
         return self.initial_patch.__class__.model_validate(values)
@@ -103,6 +118,73 @@ class IntegrityRejectOncePatchGate(FakePatchGate):
                 ],
             )
         return await super().check(candidate)
+
+
+class RejectRepairPatchGate(FakePatchGate):
+    def __init__(self, artifacts):
+        super().__init__(artifacts)
+        self.calls = 0
+
+    async def check(self, candidate):
+        self.calls += 1
+        if self.calls == 1:
+            return await super().check(candidate)
+        return PatchCheckResult(
+            run_id=candidate.run_id,
+            experiment_id=candidate.experiment_id,
+            attempt=candidate.attempt,
+            patch_commit_sha=candidate.patch_commit_sha,
+            diff_sha256=candidate.diff_sha256,
+            accepted=False,
+            checks=[
+                CheckResult(
+                    name="changed_file_match",
+                    status=CheckStatus.FAIL,
+                    summary="candidate changed an unauthorized target",
+                )
+            ],
+            violations=[
+                Violation(
+                    code="UNAPPROVED_TARGET_FILE",
+                    message="candidate changed an unauthorized target",
+                    path="solution/experiment_config.py",
+                )
+            ],
+        )
+
+
+class NoOpEvaluator:
+    def __init__(self, delegate):
+        self.delegate = delegate
+
+    async def evaluate(self, request):
+        result = await self.delegate.evaluate(request)
+        zero_deltas = {name: 0.0 for name in result.metric_set.metrics}
+        return result.__class__.model_validate(
+            {
+                **result.model_dump(mode="json"),
+                "baseline_delta": 0.0,
+                "parent_delta": 0.0,
+                "previous_best_delta": 0.0,
+                "baseline_metric_deltas": zero_deltas,
+                "parent_metric_deltas": zero_deltas,
+                "previous_best_metric_deltas": zero_deltas,
+                "prediction_change": {
+                    "spearman_vs_parent": 1.0,
+                    "changed_row_fraction": 0.0,
+                },
+                "trust": {
+                    "verdict": "no_op",
+                    "stability": "not_applicable",
+                    "integrity": "clean",
+                    "flags": ["NO_PREDICTION_CHANGE"],
+                    "seed_count": 1,
+                },
+            }
+        )
+
+    async def decide(self, result, context):
+        return await self.delegate.decide(result, context)
 
 
 class TransientInitialCodingWorker(FakeCodingWorker):
@@ -567,6 +649,44 @@ def test_outer_loop_replans_after_abandoned_candidate(
         for event in harness.events()
         if event.event_type == EventType.RUN_STOPPED
     ] == ["no_legal_proposal"]
+
+
+def test_noop_repair_restarts_from_accepted_patch_and_terminates_before_replan(
+    harness, baseline_evaluation
+) -> None:
+    planner = ProposeThenBlockPlanner(harness.planner)
+    worker = SequencedRepairingCodingWorker(
+        harness.event_store.artifact_store
+    )
+    harness.planner = planner
+    harness.coding_worker = worker
+    harness.patch_gate = RejectRepairPatchGate(
+        harness.event_store.artifact_store
+    )
+    harness.evaluator = NoOpEvaluator(harness.evaluator)
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_until_stopped())
+
+    assert planner.calls == 2
+    assert len(worker.repair_calls) == 2
+    initial_commit = worker.initial_patch.patch_commit_sha
+    assert worker.repair_calls[0][0].current_patch_commit_sha == initial_commit
+    assert worker.repair_calls[1][0].current_patch_commit_sha == initial_commit
+    assert worker.repair_calls[1][0].accepted_patch_receipt_id == (
+        "receipt_exp_001_1"
+    )
+    terminal = [
+        event.payload.decision
+        for event in harness.events()
+        if event.event_type == EventType.EXPERIMENT_DECIDED
+        and event.payload.decision.decision != ExperimentDecisionKind.PROMOTE
+    ]
+    assert len(terminal) == 1
+    assert terminal[0].decision == ExperimentDecisionKind.REJECT
+    assert terminal[0].reason_code.startswith("recovery_abandon_")
+    assert state.stop_reason_code == "no_legal_proposal"
 
 
 def test_real_recovery_allows_only_one_same_commit_retry_across_fingerprints(

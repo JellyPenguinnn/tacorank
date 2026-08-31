@@ -1487,13 +1487,16 @@ class ContextBuilder:
             ),
             None,
         )
-        if failure_event.event_type == EventType.PATCH_CHECKED or getattr(
-            failed_value, "failure_stage", None
-        ) == "patch_gate":
-            # A Gate-A rejection has no accepted receipt for the rejected
-            # commit.  Supplying an older receipt would authorize the wrong
-            # bytes and the real repair prompt correctly rejects it.
-            accepted_patch = None
+        # A rejected repair must never become the base of the next repair.
+        # When Gate A has accepted an earlier candidate, its receipt and commit
+        # are the last executable lineage boundary.  If no candidate has ever
+        # passed Gate A, retain the latest rejected candidate so the first
+        # bounded repair can correct that implementation rather than recode it.
+        accepted_commit = (
+            accepted_patch.patch_commit_sha
+            if accepted_patch is not None
+            else node.latest_commit_sha or node.base_commit_sha
+        )
         prior_fingerprints = [
             fingerprint_result(event.payload.result)
             for event in chain[:-1]
@@ -1507,7 +1510,7 @@ class ContextBuilder:
                     {
                         "experiment_id": experiment_id,
                         "original_hypothesis": node.hypothesis,
-                        "accepted_patch_commit": node.latest_commit_sha or node.base_commit_sha,
+                        "accepted_patch_commit": accepted_commit,
                         "remaining_repair_budget": remaining_repair_budget,
                         "hypothesis_drift": "forbidden",
                         "allowed_output": "RecoveryDecision or repaired PatchCandidate",
@@ -1549,7 +1552,7 @@ class ContextBuilder:
             context_fields={
                 "repair_attempt": repair_attempt,
                 "original_experiment_spec": spec_event.payload.spec,
-                "current_patch_commit_sha": node.latest_commit_sha or node.base_commit_sha,
+                "current_patch_commit_sha": accepted_commit,
                 "accepted_patch_receipt_id": (
                     accepted_patch.receipt_id if accepted_patch is not None else None
                 ),

@@ -658,7 +658,7 @@ class Harness:
                 run_id=self.config.run_id,
                 experiment_id=experiment_id,
                 original_experiment_spec=self._experiment_spec(experiment_id),
-                current_patch_commit_sha=node.latest_commit_sha or node.base_commit_sha,
+                current_patch_commit_sha=context.current_patch_commit_sha,
                 failure_event_id=failure_event.event_id,
                 failure_stage=getattr(
                     getattr(failed_value, "failure_stage", None), "value", None
@@ -691,6 +691,60 @@ class Harness:
             causation_event_id=context_event.event_id,
             resource_delta=decision.resource_delta,
         )
+        if decision.action in {
+            RecoveryAction.ABANDON,
+            RecoveryAction.ROLLBACK,
+        }:
+            # Recovery is operational evidence, but a proxy/full evaluation
+            # still needs a terminal scientific decision.  Without one, the
+            # next planner correctly sees an unresolved fidelity result and
+            # blocks forever on FIDELITY_PROMOTION_REQUIRED.
+            evaluation_event = next(
+                (
+                    event
+                    for event in reversed(self.events())
+                    if event.event_type == EventType.EVALUATION_COMPLETED
+                    and event.payload.result.experiment_id == experiment_id
+                ),
+                None,
+            )
+            terminal_decision_exists = any(
+                event.event_type == EventType.EXPERIMENT_DECIDED
+                and event.payload.decision.experiment_id == experiment_id
+                and event.payload.decision.decision
+                != ExperimentDecisionKind.PROMOTE
+                for event in self.events()
+            )
+            if evaluation_event is not None and not terminal_decision_exists:
+                evaluation = evaluation_event.payload.result
+                self._append(
+                    ExperimentDecidedPayload(
+                        decision=ExperimentDecision(
+                            run_id=self.config.run_id,
+                            experiment_id=experiment_id,
+                            evaluation_event_id=evaluation_event.event_id,
+                            decision=ExperimentDecisionKind.REJECT,
+                            reason_code="recovery_%s_%s"
+                            % (decision.action.value, decision.reason_code.lower()),
+                            fidelity_completed=evaluation.fidelity,
+                            parent_eligible=False,
+                            best_eligible=False,
+                            supporting_event_ids=list(
+                                dict.fromkeys(
+                                    [
+                                        evaluation_event.event_id,
+                                        failure_event.event_id,
+                                        decision_event.event_id,
+                                    ]
+                                )
+                            ),
+                        )
+                    ),
+                    stage="recovery_terminal_decision",
+                    experiment_id=experiment_id,
+                    attempt=decision.repair_attempt,
+                    causation_event_id=decision_event.event_id,
+                )
         if decision.lesson_candidate is not None:
             lesson_number = 1 + sum(
                 event.payload.type == "lesson.recorded" for event in self.events()

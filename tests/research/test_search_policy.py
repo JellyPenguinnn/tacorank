@@ -402,6 +402,31 @@ def context_with_latest(planner_context, latest, *, allowed_families=None):
     )
 
 
+def test_legacy_invalid_noop_branches_instead_of_requiring_promotion(
+    planner_context,
+):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        decision=None,
+        parent_eligible=False,
+        trust_verdict="no_op",
+        fidelity="proxy",
+        population="internal_proxy",
+        prediction_change=0.0,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    latest.status = "invalid"
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
+    assert choice.family != "objective"
+    assert choice.phase != "no_op_reimplementation"
+
+
 def test_policy_returns_to_trusted_frontier_with_family_diversity(planner_context):
     root = make_summary("exp_0000", score=0.5946)
     best = make_summary(

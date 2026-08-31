@@ -461,7 +461,14 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
 function withObservedRuntime(summary: RunSummary, launch: LaunchRecord | undefined, lockedPid: number | null): RunSummary {
   if (!summary.is_live) return summary;
   if (launch) {
-    const alive = launchIsAlive(launch);
+    // Once a ledger exists, the controller-owned lock is the authoritative
+    // liveness signal. A detached launcher PID can remain observable briefly
+    // after exit (or be reused), which otherwise leaves the dashboard clock
+    // running forever against a dead controller.
+    const alive = launchIsAlive(launch)
+      && launch.pid !== null
+      && lockedPid !== null
+      && launch.pid === lockedPid;
     if (launch.stop_requested_at !== null) {
       return {
         ...summary,

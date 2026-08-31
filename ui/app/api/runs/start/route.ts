@@ -85,6 +85,7 @@ export async function POST(request: Request) {
         DEEPSEEK_API_KEY: apiKey,
         PYTHONDONTWRITEBYTECODE: '1',
         TACORANK_RUN_ID: runId,
+        TACORANK_RESEARCH_CAMPAIGN: campaignPath ?? undefined,
       };
       if (windows) {
         // A detached Windows child cannot reliably inherit Node's file handle:
@@ -118,11 +119,7 @@ export async function POST(request: Request) {
           detached: true,
           windowsHide: true,
           env: {
-            ...process.env,
-            DEEPSEEK_API_KEY: apiKey,
-            PYTHONDONTWRITEBYTECODE: '1',
-            TACORANK_RUN_ID: runId,
-            ...(campaignPath ? { TACORANK_RESEARCH_CAMPAIGN: campaignPath } : {}),
+            ...childEnvironment,
           },
           shell: false,
           stdio: 'ignore',

@@ -32,7 +32,13 @@ from tacorank.git.patches import (
     validate_relative_path,
     write_artifact,
 )
-from tacorank.git.refs import GitOperationError, require_ancestor, resolve_commit
+from tacorank.git.refs import (
+    GitOperationError,
+    branch_tip,
+    experiment_branch,
+    require_ancestor,
+    resolve_commit,
+)
 from tacorank.docker_host import normalize_local_docker_host
 from tacorank.git.worktrees import WorktreeManager, WorktreeRecord
 from tacorank.run_layout import experiment_artifact_prefix
@@ -468,9 +474,41 @@ class TraeCodingWorker:
         target = self.worktrees.path_for(run_id, experiment_id)
         try:
             if target.exists():
-                record = self.worktrees.attach(
-                    run_id, experiment_id, current_commit, require_clean=True
+                tip = branch_tip(
+                    self.worktrees.repository,
+                    experiment_branch(run_id, experiment_id),
                 )
+                if tip is None:
+                    raise GitOperationError(
+                        "EXPERIMENT_BRANCH_MISSING",
+                        "repair worktree branch does not exist",
+                    )
+                if tip == current_commit:
+                    record = self.worktrees.attach(
+                        run_id, experiment_id, current_commit, require_clean=True
+                    )
+                else:
+                    # The ledger may contain a Gate-A-rejected repair above the
+                    # last accepted candidate.  Preserve its immutable commit
+                    # and evidence, but rewind only the disposable experiment
+                    # branch before asking Trae for the next bounded repair.
+                    require_ancestor(
+                        self.worktrees.repository, current_commit, tip
+                    )
+                    rejected = self.worktrees.attach(
+                        run_id, experiment_id, tip, require_clean=True
+                    )
+                    with self.worktrees.acquire_lease(
+                        rejected,
+                        timeout_seconds=(
+                            self.config.worktree_lease_timeout_seconds
+                        ),
+                    ):
+                        record = self.worktrees.restore_trusted_parent(
+                            rejected,
+                            rejected_commit_sha=tip,
+                            trusted_parent_commit_sha=current_commit,
+                        )
             else:
                 record = self.worktrees.create(
                     run_id,
