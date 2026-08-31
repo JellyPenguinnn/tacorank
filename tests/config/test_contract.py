@@ -9,7 +9,7 @@ from tacorank.config import ContractError, RunConfig, verify_contract
 from tacorank.schemas import ResearchCampaign
 
 
-def test_objective_temporal_campaign_has_exact_fifty_slot_budget():
+def test_legacy_objective_temporal_campaign_remains_parseable_when_opted_in():
     path = Path(__file__).parents[2] / "research/campaigns/objective_temporal_50.json"
     campaign = ResearchCampaign.model_validate(
         json.loads(path.read_text(encoding="utf-8"))
@@ -30,7 +30,7 @@ def test_objective_temporal_campaign_has_exact_fifty_slot_budget():
     ]
 
 
-def test_run_config_requires_budget_but_campaign_owns_its_convergence(config):
+def test_run_config_accepts_explicit_legacy_campaign_without_changing_patience(config):
     payload = config.model_dump(mode="python")
     payload.update(
         max_experiments=4,

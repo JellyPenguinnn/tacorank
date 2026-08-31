@@ -18,6 +18,7 @@ import zlib
 FEATURES = ("user_id", "video_id", "author_id", "tab", "duration_ms")
 FORMULATIONS = {
     "passthrough",
+    "official_fm",
     "pointwise",
     "bpr",
     "listwise",
@@ -27,6 +28,7 @@ FORMULATIONS = {
 HASH_DIMENSION = 1 << 16
 IMPLEMENTATION_IDS = {
     "passthrough": "baseline_passthrough_v1",
+    "official_fm": "official_fm_editable_v1",
     "pointwise": "objective_pointwise_v1",
     "bpr": "objective_bpr_v2",
     "listwise": "objective_listwise_full_v2",
@@ -35,6 +37,10 @@ IMPLEMENTATION_IDS = {
 }
 ACTIVE_PARAMETERS = {
     "passthrough": ("formulation",),
+    "official_fm": (
+        "formulation", "embedding_dim", "learning_rate", "epochs", "l2",
+        "max_train_rows",
+    ),
     "pointwise": (
         "formulation", "embedding_dim", "learning_rate", "epochs", "l2",
         "residual_scale", "max_train_rows",
@@ -94,12 +100,53 @@ def run_experiment(invocation: Any, raw_config: Mapping[str, Any]) -> None:
     config = validate_config(raw_config)
     score_path, parent_path = _validated_inputs(invocation.input_root)
     formulation = str(config["formulation"])
-    if formulation == "passthrough":
+    # Setup invokes the entrypoint without an experiment fidelity to prove the
+    # editable root exactly reproduces the frozen official FM bytes. Real
+    # experiment invocations always carry fidelity+seed and therefore execute
+    # trainable candidate code below.
+    if formulation == "passthrough" or not getattr(invocation, "fidelity", None):
         _validate_alignment(score_path, parent_path)
         _exclusive_copy(parent_path, invocation.output_path)
         diagnostics = _empty_diagnostics(
             formulation, getattr(invocation, "seed", 0)
         )
+        _attach_execution_receipt(diagnostics, config)
+        _write_diagnostics(invocation.output_path, diagnostics)
+        return
+
+    if formulation == "official_fm":
+        from solution.features import read_scoring_rows
+        from solution.inference import write_predictions_exclusive
+        from solution.train import TrainingConfig, fit_pointwise
+
+        training = fit_pointwise(
+            _regular_file(invocation.input_root / "train.csv"),
+            fidelity=str(invocation.fidelity),
+            seed=int(invocation.seed or 0),
+            config=TrainingConfig(
+                rank=int(config["embedding_dim"]),
+                learning_rate=float(config["learning_rate"]),
+                l2=float(config["l2"]),
+                maximum_rows=int(config["max_train_rows"]),
+                epochs=int(config["epochs"]),
+            ),
+        )
+        scoring_rows = read_scoring_rows(score_path)
+        scores = training.model.predict(
+            training.encoder.transform(scoring_rows)
+        )
+        write_predictions_exclusive(invocation.output_path, scoring_rows, scores)
+        diagnostics = {
+            "formulation": formulation,
+            "seed": int(invocation.seed or 0),
+            "train_rows": training.training_rows,
+            "available_train_rows": training.available_rows,
+            "training_coverage_fraction": training.coverage_fraction,
+            "epochs_completed": training.epochs,
+            "score_min": float(scores.min()),
+            "score_max": float(scores.max()),
+            "score_mean": float(scores.mean()),
+        }
         _attach_execution_receipt(diagnostics, config)
         _write_diagnostics(invocation.output_path, diagnostics)
         return
@@ -154,11 +201,11 @@ def validate_config(raw: Mapping[str, Any]) -> Dict[str, Any]:
     bounds = {
         "embedding_dim": (2, 32, int),
         "learning_rate": (1e-5, 0.2, float),
-        "epochs": (1, 8, int),
+        "epochs": (1, 40, int),
         "negative_count": (1, 16, int),
         "l2": (0.0, 0.1, float),
         "residual_scale": (0.0, 0.5, float),
-        "max_train_rows": (1000, 250_000, int),
+        "max_train_rows": (1000, 1_141_112, int),
         "history_decay_days": (1.0, 180.0, float),
         "history_shrinkage": (0.0, 1000.0, float),
     }
@@ -184,10 +231,10 @@ def validate_config(raw: Mapping[str, Any]) -> Dict[str, Any]:
             raise ValueError("history_affinity requires shrinkage >= 5")
         if float(config["l2"]) < 1e-6:
             raise ValueError("history_affinity requires positive regularization")
-        if int(config["epochs"]) > 5:
-            raise ValueError("history_affinity is limited to 5 epochs")
         if float(config["residual_scale"]) > 0.2:
             raise ValueError("history_affinity residual_scale must be <= 0.2")
+        if int(config["epochs"]) > 5:
+            raise ValueError("history_affinity is limited to 5 epochs")
     return config
 
 

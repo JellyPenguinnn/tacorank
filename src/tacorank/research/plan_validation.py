@@ -20,8 +20,10 @@ from .graph_view import (
     has_value,
 )
 from .method_eligibility import evaluate_method_card, method_card_map
+from .plans import plan_for_method
 from .search_eligibility import classify_search_eligibility
 from .variant_configuration import (
+    METHOD_ACTIVE_PARAMETERS,
     METHOD_FORMULATIONS,
     reference_variant_parameters,
     treatment_partition,
@@ -112,11 +114,11 @@ COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?$")
 _VARIANT_BOUNDS = {
     "embedding_dim": (2.0, 32.0, True),
     "learning_rate": (1e-5, 0.2, False),
-    "epochs": (1.0, 8.0, True),
+    "epochs": (1.0, 40.0, True),
     "negative_count": (1.0, 16.0, True),
     "l2": (0.0, 0.1, False),
     "residual_scale": (0.0, 0.5, False),
-    "max_train_rows": (1000.0, 250_000.0, True),
+    "max_train_rows": (1000.0, 1_141_112.0, True),
     "history_decay_days": (1.0, 180.0, False),
     "history_shrinkage": (0.0, 1000.0, False),
 }
@@ -322,6 +324,21 @@ class PlanValidator:
                 errors.append("IMPLEMENTATION_PARENT_POLICY_MISMATCH")
             if get_value(choice, "family", None) and family != get_value(choice, "family"):
                 errors.append("FAMILY_POLICY_MISMATCH")
+            choice_plan_id = get_value(choice, "plan_id", None)
+            declared_plan_id = get_value(spec, "plan_id", None)
+            inferred_plan_ids = {
+                plan.plan_id
+                for method_id in map(
+                    str, as_list(get_value(spec, "method_card_ids", None))
+                )
+                for plan in [plan_for_method(method_id)]
+                if plan is not None
+            }
+            effective_plan_id = declared_plan_id
+            if effective_plan_id is None and len(inferred_plan_ids) == 1:
+                effective_plan_id = next(iter(inferred_plan_ids))
+            if choice_plan_id is not None and effective_plan_id != choice_plan_id:
+                errors.append("RESEARCH_PLAN_POLICY_MISMATCH")
             for field, code in (
                 ("campaign_id", "CAMPAIGN_POLICY_MISMATCH"),
                 ("variant_id", "VARIANT_POLICY_MISMATCH"),
@@ -506,6 +523,19 @@ class PlanValidator:
             map(str, as_list(get_value(spec, "method_card_ids", None)))
         )
         method_ids = set(raw_method_ids)
+        declared_plan_id = get_value(spec, "plan_id", None)
+        method_plan_ids = {
+            plan.plan_id
+            for method_id in method_ids
+            for plan in [plan_for_method(method_id)]
+            if plan is not None
+        }
+        if len(method_plan_ids) > 1 or (
+            declared_plan_id is not None
+            and method_plan_ids
+            and declared_plan_id not in method_plan_ids
+        ):
+            errors.append("RESEARCH_PLAN_METHOD_MISMATCH")
         if not raw_method_ids:
             errors.append("METHOD_CARD_REQUIRED")
         if len(raw_method_ids) != len(method_ids):
@@ -536,10 +566,19 @@ class PlanValidator:
                 continue
             eligibility = evaluate_method_card(card, context, family=family)
             errors.extend(eligibility.reasons)
-            active_parameters = {
-                str(item)
-                for item in as_list(get_value(card, "active_parameters", None))
-            }
+            active_parameters = set(
+                METHOD_ACTIVE_PARAMETERS.get(
+                    method_id,
+                    tuple(
+                        str(item)
+                        for item in as_list(
+                            get_value(card, "active_parameters", None)
+                        )
+                    ),
+                )
+                if campaign is not None
+                else ()
+            )
             campaign_active_parameters.update(active_parameters)
             if campaign is not None and active_parameters:
                 supplied_parameters = set(
@@ -648,6 +687,11 @@ class PlanValidator:
                     context,
                     str(implementation_parent_id or ""),
                     campaign_active_parameters,
+                    formulation=str(
+                        (get_value(spec, "variant_parameters", None) or {}).get(
+                            "formulation", ""
+                        )
+                    ),
                 )
                 actual_changed, actual_held = treatment_partition(
                     get_value(spec, "variant_parameters", None) or {},

@@ -21,12 +21,13 @@ from ..research.code_blind import redact_implementation_references
 from ..research.duplicate_detection import compute_duplicate_key
 from ..research.graph_view import as_list, get_value
 from ..research.variant_configuration import (
+    METHOD_ACTIVE_PARAMETERS,
     METHOD_FORMULATIONS,
-    VARIANT_PARAMETER_DEFAULTS,
     enforce_controlled_treatment,
     reference_variant_parameters,
     resolve_variant_parameters,
     treatment_partition,
+    variant_parameter_defaults,
 )
 from ..schemas import ResourceDelta, TokenMeasurement
 from .research_provider import (
@@ -260,6 +261,7 @@ def _research_summary(value: Any) -> Dict[str, Any]:
         "parent_experiment_id",
         "implementation_parent_experiment_id",
         "family",
+        "plan_id",
         "hypothesis_summary",
         "trust_verdict",
         "stability",
@@ -348,7 +350,7 @@ def _research_lesson(value: Any) -> Dict[str, Any]:
     )
 
 
-def _research_method(value: Any) -> Dict[str, Any]:
+def _research_method(value: Any, *, legacy_campaign: bool = False) -> Dict[str, Any]:
     """Expose scientific method-card content, never implementation targets."""
 
     fields = (
@@ -368,11 +370,13 @@ def _research_method(value: Any) -> Dict[str, Any]:
         "active_parameters",
     )
     result = {field: _jsonable(get_value(value, field, None)) for field in fields}
-    result["parameter_defaults"] = {
-        name: VARIANT_PARAMETER_DEFAULTS[name]
-        for name in as_list(get_value(value, "active_parameters", None))
-        if name in VARIANT_PARAMETER_DEFAULTS
-    }
+    method_id = str(get_value(value, "method_id", ""))
+    if legacy_campaign and method_id in METHOD_ACTIVE_PARAMETERS:
+        result["active_parameters"] = list(METHOD_ACTIVE_PARAMETERS[method_id])
+    result["parameter_defaults"] = variant_parameter_defaults(
+        as_list(result.get("active_parameters")),
+        formulation=METHOD_FORMULATIONS.get(method_id),
+    )
     return _code_blind(result)
 
 
@@ -632,9 +636,16 @@ class DeepSeekResearchProvider:
                 for item in as_list(get_value(context, "active_lessons", []))
             ],
             "method_cards": [
-                _research_method(item)
+                _research_method(
+                    item,
+                    legacy_campaign=get_value(context, "research_campaign", None)
+                    is not None,
+                )
                 for item in as_list(get_value(context, "method_cards", []))
             ],
+            "research_plans": _jsonable(
+                get_value(context, "research_plans", [])
+            ),
             "data_profile": _jsonable(get_value(context, "data_profile", None)),
             "remaining_budget": _jsonable(get_value(context, "remaining_budget", None)),
             "convergence": _jsonable(get_value(context, "convergence", None)),
@@ -658,6 +669,11 @@ class DeepSeekResearchProvider:
                 implementation_parent, "experiment_id", None
             ),
             "family": get_value(choice, "family", None),
+            "plan_id": get_value(choice, "plan_id", None),
+            "research_question": get_value(choice, "research_question", None),
+            "plan_maximum_experiments": get_value(
+                choice, "plan_maximum_experiments", None
+            ),
             "cost_tier": get_value(choice, "cost_tier", None),
             "required_method_card_id": get_value(choice, "method_card_id", None),
             "allowed_method_card_ids": _jsonable(
@@ -835,8 +851,9 @@ class DeepSeekResearchProvider:
         if campaign_id and len(method_ids) == 1:
             method_id = method_ids[0]
             card = cards_by_id.get(method_id)
-            active_parameters = tuple(
-                map(str, as_list(get_value(card, "active_parameters", None)))
+            active_parameters = METHOD_ACTIVE_PARAMETERS.get(
+                method_id,
+                tuple(map(str, as_list(get_value(card, "active_parameters", None)))),
             )
             formulation = METHOD_FORMULATIONS.get(method_id)
             if active_parameters and formulation is not None:
@@ -844,6 +861,7 @@ class DeepSeekResearchProvider:
                     context,
                     str(get_value(implementation_parent, "experiment_id", "")),
                     active_parameters,
+                    formulation=formulation,
                 )
                 variant_parameters = resolve_variant_parameters(
                     raw_parameters,
@@ -937,6 +955,7 @@ class DeepSeekResearchProvider:
             "context_id": str(get_value(context, "context_id", "")),
             "hypothesis": _text(raw.get("hypothesis")),
             "family": str(get_value(choice, "family", "")),
+            "plan_id": get_value(choice, "plan_id", None),
             "change_summary": _text(raw.get("change_summary")),
             "expected_mechanism": _text(raw.get("expected_mechanism")),
             "success_criteria": _text(raw.get("success_criteria")),

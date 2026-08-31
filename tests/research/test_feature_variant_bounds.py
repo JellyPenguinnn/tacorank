@@ -1,11 +1,12 @@
 from tacorank.research.plan_validation import _variant_parameter_errors
-from tacorank.research.variant_configuration import VARIANT_PARAMETER_DEFAULTS
+from tacorank.research.variant_configuration import (
+    variant_parameter_defaults,
+)
 
 
 def _feature_parameters(**overrides):
-    values = {
-        key: VARIANT_PARAMETER_DEFAULTS[key]
-        for key in (
+    values = variant_parameter_defaults(
+        (
             "formulation",
             "learning_rate",
             "epochs",
@@ -13,8 +14,9 @@ def _feature_parameters(**overrides):
             "residual_scale",
             "max_train_rows",
             "history_shrinkage",
-        )
-    }
+        ),
+        formulation="history_affinity",
+    )
     values["formulation"] = "history_affinity"
     values.update(overrides)
     return values

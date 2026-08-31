@@ -44,6 +44,14 @@ def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_e
     assert first.playbook.method_order["objective"][0] == "objective_pairwise_bpr"
     assert first.refinement_frontier_ids == []
     assert first.ensemble_candidate_ids == []
+    assert [plan.plan_id for plan in first.research_plans] == [
+        "objective_alignment",
+        "behavioral_history",
+        "auxiliary_learning",
+        "temporal_robustness",
+        "model_and_ensemble",
+    ]
+    assert all(plan.status == "unstarted" for plan in first.research_plans)
     pairwise = next(
         card for card in first.method_cards if card.method_id == "objective_pairwise_bpr"
     )
@@ -275,7 +283,12 @@ def test_controller_binds_codeblind_proposal_to_coder_contract(
     spec = harness.context_builder.bind_implementation(ResearchProposal(**values))
 
     assert spec.target_stage == "objective"
-    assert spec.target_files == ["solution/research_scaffold.py"]
+    assert spec.target_files == [
+        "solution/candidate.py",
+        "solution/losses.py",
+        "solution/official_fm.py",
+        "solution/train.py",
+    ]
     assert spec.trial_type.value == "implementation"
     assert [fidelity.value for fidelity in spec.fidelity_plan] == [
         "smoke",

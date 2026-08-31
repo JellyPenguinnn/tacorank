@@ -184,7 +184,10 @@ def stop_decision(
             "Every campaign family reached its frozen minimum depth and "
             "non-improvement patience.",
         )
-    if config.research_campaign is None and pressure >= config.convergence_patience:
+    # The official convergence contract applies to every run mode. Research
+    # plans and legacy explicit campaigns may bound legal search, but cannot
+    # turn the 50-iteration cap into a quota or bypass three-result patience.
+    if pressure >= config.convergence_patience:
         return StopDecision(
             True,
             "converged",

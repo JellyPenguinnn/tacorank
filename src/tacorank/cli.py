@@ -199,7 +199,10 @@ def build_parser() -> argparse.ArgumentParser:
     setup_live.add_argument(
         "--research-campaign",
         type=Path,
-        help="frozen ordered depth-campaign JSON inside the repository",
+        help=(
+            "legacy opt-in ordered campaign JSON; omit for adaptive "
+            "multi-experiment research plans"
+        ),
     )
 
     setup_trae = commands.add_parser(

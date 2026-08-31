@@ -304,13 +304,13 @@ def test_deepseek_provider_binds_campaign_variant(planner_context):
     )
     assert result["variant_parameters"] == {
         "formulation": "bpr",
-        "embedding_dim": 8,
-        "learning_rate": 0.01,
-        "epochs": 2,
+            "embedding_dim": 16,
+            "learning_rate": 0.001,
+            "epochs": 40,
         "negative_count": 4,
-        "l2": 0.0001,
+            "l2": 0.000001,
         "residual_scale": 0.05,
-        "max_train_rows": 100000,
+            "max_train_rows": 1141112,
     }
     assert result["hypothesis_evidence"] is None
     prompt = json.loads(calls[0]["messages"][1]["content"])
@@ -541,7 +541,7 @@ def test_deepseek_provider_enforces_control_when_all_treatment_values_change(
         provider.generate(ProviderRequest(planner_context, choice))
     )
 
-    assert result["variant_parameters"]["max_train_rows"] == 100000
+    assert result["variant_parameters"]["max_train_rows"] == 1141112
     assert "matched control(s)" in result["variant_instruction"]
     assert result["hypothesis_evidence"]["source_evaluation_event_ids"] == [
         "evt_000010"

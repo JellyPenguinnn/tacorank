@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,7 @@ from solution.inference import (
     write_predictions_exclusive,
 )
 from solution.model import FactorizationMachine
+from solution.official_fm import OfficialFactorizationMachine
 from solution.train import fit_pointwise
 
 
@@ -53,6 +55,60 @@ def test_candidate_scaffold_is_deterministic_and_keeps_unknown_slots(
 
     assert np.array_equal(first.predict(score_features), second.predict(score_features))
     assert score_features[1, 0] == encoder.unknown_ids[0] + encoder.offsets[0]
+
+
+def test_editable_official_fm_matches_frozen_baseline_math(
+    monkeypatch,
+) -> None:
+    baseline_path = (
+        Path(__file__).parents[2] / "kuairand-starter-kit" / "baseline.py"
+    )
+    monkeypatch.syspath_prepend(str(baseline_path.parent))
+    specification = importlib.util.spec_from_file_location(
+        "frozen_kuairand_baseline", baseline_path
+    )
+    assert specification is not None and specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+
+    frozen = module.FM(19, k=4, lr=0.003, l2=2e-5, seed=31)
+    editable = OfficialFactorizationMachine(
+        19, rank=4, learning_rate=0.003, l2=2e-5, seed=31
+    )
+    features = np.asarray(
+        [[0, 4, 8, 12, 16], [1, 5, 9, 13, 17], [2, 6, 10, 14, 18]],
+        dtype=np.int32,
+    )
+    labels = np.asarray([1.0, 0.0, 1.0], dtype=np.float32)
+
+    assert np.array_equal(frozen.V, editable.factors)
+    assert np.array_equal(frozen.W, editable.weights)
+    assert np.array_equal(frozen.logits(features)[0], editable.logits(features))
+    assert frozen.step(features, labels) == editable.pointwise_step(features, labels)
+    assert np.array_equal(frozen.V, editable.factors)
+    assert np.array_equal(frozen.W, editable.weights)
+    assert frozen.b == editable.bias
+    assert np.array_equal(frozen.predict(features), editable.predict(features))
+
+
+def test_training_view_accepts_legal_auxiliary_labels(tmp_path: Path) -> None:
+    train = tmp_path / "train.csv"
+    train.write_text(
+        "date,time_ms,hourmin,user_id,video_id,author_id,tab,duration_ms,"
+        "long_view,is_click,play_time_ms,is_like,is_follow,is_comment,"
+        "is_forward,is_hate,is_profile_enter\n"
+        "20220408,1649400000000,1234,u1,v1,a1,t1,1000,1,1,900,0,1,0,0,0,1\n",
+        encoding="utf-8",
+    )
+
+    row = read_training_rows(train)[0]
+
+    assert row.time_ms == 1649400000000
+    assert row.hourmin == 1234
+    assert row.is_click == 1
+    assert row.play_time_ms == 900.0
+    assert row.is_follow == 1
+    assert row.is_profile_enter == 1
 
 
 def test_training_orchestrator_respects_fidelity_and_seed(tmp_path: Path) -> None:

@@ -46,7 +46,9 @@ def _write_feature_raw_data(
             writer.writerow((row[2], row[3], "2022-01-01", "1,2"))
     header = (
         "user_id", "video_id", "date", "hourmin", "time_ms", "long_view",
-        "duration_ms", "tab",
+        "duration_ms", "tab", "is_click", "play_time_ms", "is_like",
+        "is_follow", "is_comment", "is_forward", "is_hate",
+        "is_profile_enter",
     )
     for name, rows in (
         ("log_standard_4_08_to_4_21_pure.csv", train),
@@ -61,7 +63,8 @@ def _write_feature_raw_data(
                     (
                         row[1], row[2], row[0], 1200,
                         1_650_000_000_000 + time_offset + index,
-                        row[6], row[5], row[4],
+                        row[6], row[5], row[4], 1, row[5] * row[6], 0, 0, 0,
+                        0, 0, 0,
                     )
                 )
 
@@ -152,7 +155,12 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
         ),
         encoding="utf-8",
     )
-    for name in ("experiment_config.py", "research_scaffold.py"):
+    for name in (
+        "experiment_config.py",
+        "research_scaffold.py",
+        "official_fm.py",
+        "losses.py",
+    ):
         (root / "solution" / name).write_text(
             (Path(__file__).parents[2] / "solution" / name).read_text(
                 encoding="utf-8"

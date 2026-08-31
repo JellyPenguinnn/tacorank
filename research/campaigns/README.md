@@ -1,6 +1,10 @@
-# Adaptive research campaigns
+# Legacy opt-in research campaigns
 
-Campaign files freeze the search boundary, not every experiment design.
+Campaign files remain available for controlled compatibility studies. They are
+not the production default and must be supplied explicitly with
+`setup-live --research-campaign`. A normal run uses first-class adaptive
+research plans and proposes several conditional experiments per scientific
+question.
 
 `objective_temporal_50.json` reserves 25 experiments for `objective`, followed
 by 25 for `temporal_history`. For each slot, the research planner receives the
@@ -9,10 +13,10 @@ a distinct formulation, and its hyperparameters. The exact choice is stored as
 `variant_instruction` plus a canonical `variant_parameters` signature in the
 experiment specification and shown in generated reports.
 
-This is an exploratory depth campaign: its per-family minimum and patience are
-both equal to the 25-slot family budget, so the generic three-result convergence
-signal does not end the campaign. Standard non-campaign runs retain the frozen
-epsilon/patience stop and six-hour wall-clock ceiling.
+This historical campaign still declares 25+25 slots as a maximum search
+boundary. The global three-result non-improvement rule and six-hour wall-clock
+ceiling apply to it as they do to every run, so those slots are not a quota and
+the controller may stop much earlier.
 
 The deterministic controller still owns family order, budgets, parent
 eligibility, recovery, execution, evaluation, duplicate rejection, and final

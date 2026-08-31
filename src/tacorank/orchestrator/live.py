@@ -1658,6 +1658,8 @@ def _verify_executable_baseline_parity(
         for relative in (
             "solution/experiment_config.py",
             "solution/research_scaffold.py",
+            "solution/official_fm.py",
+            "solution/losses.py",
         )
     }
     if support != expected_support:

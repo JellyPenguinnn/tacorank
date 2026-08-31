@@ -5,8 +5,9 @@
 **Primary task:** within-user ranking of `long_view`
 **Primary score:** contract-defined mean of GAUC and nDCG@5
 **Core rule:** one experiment changes one research mechanism.
-**Traversal:** score-guided depth-first search; deepen the best trusted branch
-before backtracking, rather than probing every research family from baseline.
+**Traversal:** adaptive research plans above atomic experiments; deepen a
+supported mechanism, run its confirmation or ablation, and close a plan when
+evidence falsifies it or its small experiment ceiling is exhausted.
 
 ```json
 {
@@ -63,6 +64,30 @@ This file tells the Planner how to turn verified evaluation feedback into the
 next research direction. It is seed knowledge, not dynamic memory. During a
 run it is read-only: outcomes belong in `events.jsonl`, reusable conclusions
 belong in `lesson.recorded`, and exact code belongs in Git.
+
+## Research-plan execution model
+
+The planner does not treat one proposal as an entire research direction. The
+controller exposes five ledger-derived plans: objective alignment, behavioral
+history, auxiliary learning, temporal robustness, and model/ensemble work.
+Each plan states one research question, a small ceiling of three to five atomic
+experiments, and conditional follow-ups such as confirmation, ablation,
+implementation diagnosis, or closure. One positive result therefore normally
+creates another controlled experiment; it does not immediately end the plan.
+
+Two distinct clean full-fidelity regressions with no confirmed improvement
+falsify a plan. Reaching its ceiling exhausts it. A global run still stops after
+three consecutive trusted full-fidelity iterations fail to improve the
+incumbent by contract epsilon, at 50 total proposals, or after six hours.
+The old `research/campaigns/objective_temporal_50.json` is retained only as an
+explicit compatibility mode; production setup does not load it by default.
+
+The frozen organizer baseline remains at
+`kuairand-starter-kit/baseline.py`. Setup proves the checked-in candidate can
+reproduce its prediction bytes, while experiments edit candidate-owned copies
+under `solution/`, including `official_fm.py`, then retrain on the authorized
+training view. The protected evaluator alone reads validation labels and
+returns metrics. Candidate code never edits or imports evaluation policy.
 
 After the deterministic search policy selects one legal method card, the live
 planner performs one bounded keyless OpenAlex lookup for that method. It sends

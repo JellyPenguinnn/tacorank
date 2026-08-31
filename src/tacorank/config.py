@@ -27,12 +27,39 @@ class ContractError(RuntimeError):
 
 
 DEFAULT_TARGET_INTERFACE_EXCERPTS = {
+    "solution/official_fm.py": (
+        "Editable adaptation of the frozen official five-field NumPy FM. "
+        "Preserve controller-owned split selection, evaluation, and submission "
+        "boundaries. Research trials may change model mathematics only when the "
+        "ExperimentSpec authorizes this file."
+    ),
+    "solution/losses.py": (
+        "Candidate-owned objective functions. Losses may consume training labels "
+        "only and must not select checkpoints or read validation/test labels."
+    ),
+    "solution/features.py": (
+        "Candidate-owned feature boundary. Fit on training data only; scoring "
+        "rows never contain long_view and past-only features must not leak future "
+        "interactions."
+    ),
+    "solution/model.py": (
+        "Candidate-owned model components. Preserve deterministic seeds, finite "
+        "unconstrained ranking scores, and non-zero trainable gradients."
+    ),
+    "solution/train.py": (
+        "Candidate-owned training orchestration. Read train.csv only, respect "
+        "fidelity and seed, and never select using validation or test labels."
+    ),
+    "solution/inference.py": (
+        "Candidate-owned scoring helpers. Preserve row order and write exactly "
+        "one finite output CSV exclusively."
+    ),
     "solution/experiment_config.py": (
         "Edit only the scalar values in CONFIG. The stable scaffold supports "
-        "formulation=pointwise|bpr|listwise|temporal_history and validates: "
-        "embedding_dim integer 2..32, learning_rate 1e-5..0.2, epochs 1..8, "
+        "formulation=official_fm|pointwise|bpr|listwise|temporal_history and validates: "
+        "embedding_dim integer 2..32, learning_rate 1e-5..0.2, epochs 1..40, "
         "negative_count integer 1..16, l2 0..0.1, residual_scale 0..0.5, "
-        "max_train_rows integer 1000..250000, history_decay_days 1..180, "
+        "max_train_rows integer 1000..1141112, history_decay_days 1..180, "
         "history_shrinkage 0..1000, and listwise_strategy=full_observed. Set "
         "CONFIG family to the ExperimentSpec "
         "family and copy every approved variant_parameters value into its "
@@ -76,6 +103,10 @@ PRODUCTION_TARGET_INTERFACE_EXCERPTS = {
         "Candidate-owned model components. Preserve deterministic seeds, finite "
         "unconstrained ranking scores, and non-zero trainable gradients."
     ),
+    "solution/official_fm.py": DEFAULT_TARGET_INTERFACE_EXCERPTS[
+        "solution/official_fm.py"
+    ],
+    "solution/losses.py": DEFAULT_TARGET_INTERFACE_EXCERPTS["solution/losses.py"],
     "solution/train.py": (
         "Candidate-owned training orchestration. Read train.csv only, respect "
         "fidelity and seed, and never early-stop or select using public-validation "

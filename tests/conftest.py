@@ -71,6 +71,18 @@ def repository(tmp_path: Path) -> Path:
         Path(__file__).parents[1] / "solution/research_scaffold.py",
         tmp_path / "solution/research_scaffold.py",
     )
+    for candidate_module in (
+        "official_fm.py",
+        "losses.py",
+        "features.py",
+        "model.py",
+        "train.py",
+        "inference.py",
+    ):
+        shutil.copy2(
+            Path(__file__).parents[1] / "solution" / candidate_module,
+            tmp_path / "solution" / candidate_module,
+        )
     (tmp_path / "artifacts").mkdir()
     (tmp_path / "runs").mkdir()
     return tmp_path

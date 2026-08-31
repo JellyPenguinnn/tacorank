@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"objective_pairwise_bpr","family":"objective","status":"candidate","tags":["pairwise","within_user","ranking"],"cost_tier":"medium","prerequisites":["baseline_parity","within_user_positive_negative_pairs"],"allowed_data":["train_interactions","user_id","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"capability_status":"verified","implementation_id":"objective_bpr_v2","implementation_targets":["solution/research_scaffold.py"],"configuration_target":"solution/experiment_config.py","active_parameters":["formulation","embedding_dim","learning_rate","epochs","negative_count","l2","residual_scale","max_train_rows"],"sources":[]}
+{"schema_version":"1.0","method_id":"objective_pairwise_bpr","family":"objective","status":"candidate","tags":["pairwise","within_user","ranking"],"cost_tier":"medium","prerequisites":["baseline_parity","within_user_positive_negative_pairs"],"allowed_data":["train_interactions","user_id","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"capability_status":"unverified","implementation_targets":["solution/official_fm.py","solution/losses.py","solution/train.py","solution/candidate.py"],"sources":[]}
 ```
 
 ## Mechanism

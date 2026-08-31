@@ -403,7 +403,7 @@ def test_negative_full_results_consume_convergence_patience(
     assert state.consecutive_non_improving_full_evaluations == 3
 
 
-def test_depth_campaign_uses_its_own_minimum_and_patience(
+def test_global_patience_still_bounds_explicit_depth_campaign(
     harness, baseline_evaluation
 ):
     planner = SequentialPlanner(harness.config.baseline_commit_sha)
@@ -426,9 +426,9 @@ def test_depth_campaign_uses_its_own_minimum_and_patience(
 
     state = asyncio.run(harness.run_until_stopped())
 
-    assert state.stop_reason_code == "campaign_converged"
-    assert state.experiments_proposed == 4
-    assert len(planner.contexts) == 4
+    assert state.stop_reason_code == "converged"
+    assert state.experiments_proposed == 3
+    assert len(planner.contexts) == 3
 
 
 def test_blocked_planner_stops_without_spinning(harness, baseline_evaluation):

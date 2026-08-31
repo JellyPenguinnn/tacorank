@@ -20,6 +20,11 @@ from ..recovery.fingerprints import fingerprint_result
 from ..research.code_blind import redact_implementation_references
 from ..research.eda import PlannerEdaToolbox
 from ..research.playbook import load_improvement_playbook
+from ..research.plans import RESEARCH_PLANS, plan_progress
+from ..research.variant_configuration import (
+    METHOD_ACTIVE_PARAMETERS,
+    METHOD_IMPLEMENTATION_IDS,
+)
 from ..research.portfolio import MethodCard, load_method_cards
 from ..research.search_eligibility import classify_search_eligibility
 from ..run_layout import run_relative_directory
@@ -44,6 +49,7 @@ from ..schemas import (
     PlannerLessonSummary,
     PlannerMethodCardSummary,
     PlannerPlaybookSummary,
+    PlannerResearchPlanSummary,
     RecoveryContext,
     ResearchProposal,
 )
@@ -464,41 +470,21 @@ class ContextBuilder:
                 )
             selected_cards.append(card)
 
-        verified = proposal.campaign_id is not None and bool(selected_cards) and all(
-            card.capability_status == "verified" for card in selected_cards
+        legacy_campaign_method = (
+            proposal.method_card_ids[0]
+            if proposal.campaign_id is not None
+            and len(proposal.method_card_ids) == 1
+            and proposal.method_card_ids[0] in METHOD_ACTIVE_PARAMETERS
+            else None
         )
+        verified = legacy_campaign_method is not None
         if verified:
-            configuration_targets = {
-                card.configuration_target for card in selected_cards
-            }
-            implementation_ids = {card.implementation_id for card in selected_cards}
-            implementation_targets = {
-                target
-                for card in selected_cards
-                for target in card.implementation_targets
-            }
-            if None in configuration_targets or len(configuration_targets) != 1:
-                raise ContextBuildError(
-                    "verified methods require one shared configuration target"
-                )
-            if None in implementation_ids or len(implementation_ids) != 1:
-                raise ContextBuildError(
-                    "configuration trials require one verified implementation"
-                )
-            if len(implementation_targets) != 1:
-                raise ContextBuildError(
-                    "verified methods require one hash-bound implementation target"
-                )
-            targets = [str(next(iter(configuration_targets)))]
-            implementation_target = root / next(iter(implementation_targets))
+            targets = ["solution/experiment_config.py"]
+            implementation_target = root / "solution/research_scaffold.py"
             implementation_sha256 = _sha256_file(implementation_target)
-            implementation_id = str(next(iter(implementation_ids)))
+            implementation_id = METHOD_IMPLEMENTATION_IDS[legacy_campaign_method]
             active_parameters = sorted(
-                {
-                    parameter
-                    for card in selected_cards
-                    for parameter in card.active_parameters
-                }
+                METHOD_ACTIVE_PARAMETERS[legacy_campaign_method]
             )
             if set(proposal.variant_parameters) != set(active_parameters):
                 raise ContextBuildError(
@@ -517,7 +503,7 @@ class ContextBuilder:
                 # Legacy/custom implementation proposals without method cards
                 # retain the controller's narrow default target. Reviewed
                 # research methods must declare their implementation surface.
-                targets = [next(iter(interfaces))]
+                targets = ["solution/experiment_config.py"]
             elif not targets:
                 raise ContextBuildError(
                     "unverified method has no implementation target"
@@ -767,6 +753,7 @@ class ContextBuilder:
                     ),
                     commit_sha=node.latest_commit_sha or spec.parent_commit_sha,
                     family=spec.family,
+                    plan_id=spec.plan_id,
                     hypothesis_summary=spec.hypothesis,
                     evaluation_event_id=(
                         evaluation_event.event_id if evaluation_event else None
@@ -966,6 +953,16 @@ class ContextBuilder:
                 for event in active_lesson_events
             ],
             "method_cards": method_cards,
+            "research_plans": [
+                plan_progress(
+                    {
+                        "contract_summary": contract_summary,
+                        "family_history": family_history,
+                    },
+                    plan,
+                )
+                for plan in RESEARCH_PLANS
+            ],
             "playbook": PlannerPlaybookSummary(
                 schema_version=playbook.schema_version,
                 source_path=playbook.source_path,

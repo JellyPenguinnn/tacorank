@@ -46,6 +46,7 @@ The harness reads the following path-only bullets as the enforced minimum manife
 - `src/tacorank/orchestrator/`
 - `src/tacorank/safety/`
 - `kuairand-starter-kit/data.py`
+- `kuairand-starter-kit/baseline.py`
 - `kuairand-starter-kit/evaluate.py`
 - `kuairand-starter-kit/submit.py`
 - `kuairand-starter-kit/baseline_scores.json`

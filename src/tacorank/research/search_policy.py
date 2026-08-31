@@ -16,6 +16,7 @@ from .graph_view import (
 from .linucb import LinUCBLegalChoiceRanker
 from .method_eligibility import eligible_method_cards, method_card_map
 from .playbook import REQUIRED_RULE_ORDER
+from .plans import method_is_plan_eligible, plan_for_method
 from .portfolio import HIGH_VALUE_FAMILIES
 from .search_eligibility import classify_search_eligibility
 
@@ -66,6 +67,9 @@ class PolicyChoice:
     variant_id: str | None = None
     campaign_directive: str | None = None
     component_experiment_ids: tuple[str, ...] = ()
+    plan_id: str | None = None
+    research_question: str | None = None
+    plan_maximum_experiments: int | None = None
 
 
 LegalChoiceRanker = Callable[[Sequence[PolicyChoice], Any], PolicyChoice]
@@ -201,6 +205,9 @@ def _method_for_family(
     eligible = {
         str(get_value(card, "method_id", "")): card
         for card in eligible_method_cards(context, family)
+        if method_is_plan_eligible(
+            context, str(get_value(card, "method_id", ""))
+        )
     }
     if preferred is None:
         # This card requires an explicit secondary component chosen by the
@@ -242,6 +249,9 @@ def _ordered_eligible_method_cards(context: Any, family: str) -> tuple[Any, ...]
     by_id = {
         str(get_value(card, "method_id", "")): card
         for card in eligible_method_cards(context, family)
+        if method_is_plan_eligible(
+            context, str(get_value(card, "method_id", ""))
+        )
     }
     ordered = [
         by_id.pop(method_id)
@@ -268,6 +278,8 @@ def _proposal(
     reason: str,
     component_experiment_ids: tuple[str, ...] = (),
 ) -> PolicyChoice:
+    method_id = str(get_value(card, "method_id", ""))
+    plan = plan_for_method(method_id)
     return PolicyChoice(
         action="propose",
         parent=parent,
@@ -277,8 +289,15 @@ def _proposal(
         phase=phase,
         reason_code=reason_code,
         reason=reason,
-        method_card_id=str(get_value(card, "method_id", "")),
+        method_card_id=method_id,
         component_experiment_ids=component_experiment_ids,
+        plan_id=plan.plan_id if plan is not None else None,
+        research_question=(
+            plan.research_question if plan is not None else None
+        ),
+        plan_maximum_experiments=(
+            plan.maximum_experiments if plan is not None else None
+        ),
     )
 
 

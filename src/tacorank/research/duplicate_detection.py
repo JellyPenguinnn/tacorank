@@ -48,6 +48,7 @@ def duplicate_payload(spec: Any) -> dict[str, Any]:
             ],
         }
     return {
+        "plan_id": get_value(spec, "plan_id", "") or "",
         "parent_commit_sha": get_value(spec, "parent_commit_sha", ""),
         "parent_experiment_id": get_value(spec, "parent_experiment_id", ""),
         "family": get_value(spec, "family", ""),

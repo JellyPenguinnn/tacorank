@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Mapping, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 from .graph_view import as_list, get_value
 
 
 VARIANT_PARAMETER_DEFAULTS: Dict[str, Any] = {
-    "formulation": "passthrough",
-    "embedding_dim": 8,
-    "learning_rate": 0.01,
-    "epochs": 2,
+    "formulation": "official_fm",
+    "embedding_dim": 16,
+    "learning_rate": 0.001,
+    "epochs": 40,
     "negative_count": 2,
-    "l2": 0.0001,
+    "l2": 0.000001,
     "residual_scale": 0.05,
-    "max_train_rows": 100000,
+    "max_train_rows": 1141112,
     "history_decay_days": 14.0,
     "history_shrinkage": 20.0,
     "listwise_strategy": "full_observed",
@@ -27,6 +27,58 @@ METHOD_FORMULATIONS = {
     "temporal_history_compact": "temporal_history",
     "features_history_affinity": "history_affinity",
 }
+
+METHOD_ACTIVE_PARAMETERS = {
+    "objective_pairwise_bpr": (
+        "formulation",
+        "embedding_dim",
+        "learning_rate",
+        "epochs",
+        "negative_count",
+        "l2",
+        "residual_scale",
+        "max_train_rows",
+    ),
+    "objective_listwise_user_softmax": (
+        "formulation",
+        "embedding_dim",
+        "learning_rate",
+        "epochs",
+        "l2",
+        "residual_scale",
+        "max_train_rows",
+        "listwise_strategy",
+    ),
+    "temporal_history_compact": (
+        "formulation",
+        "residual_scale",
+        "max_train_rows",
+        "history_decay_days",
+        "history_shrinkage",
+    ),
+}
+
+METHOD_IMPLEMENTATION_IDS = {
+    "objective_pairwise_bpr": "objective_bpr_v2",
+    "objective_listwise_user_softmax": "objective_listwise_full_v2",
+    "temporal_history_compact": "temporal_history_compact_v1",
+}
+
+FORMULATION_PARAMETER_OVERRIDES = {
+    "history_affinity": {"epochs": 5},
+}
+
+
+def variant_parameter_defaults(
+    active_parameters: Iterable[str], *, formulation: Optional[str] = None
+) -> Dict[str, Any]:
+    defaults = dict(VARIANT_PARAMETER_DEFAULTS)
+    defaults.update(FORMULATION_PARAMETER_OVERRIDES.get(formulation or "", {}))
+    return {
+        name: defaults[name]
+        for name in dict.fromkeys(map(str, active_parameters))
+        if name in defaults
+    }
 
 CONTROL_PARAMETER_PRIORITY = (
     "max_train_rows",
@@ -43,17 +95,15 @@ CONTROL_PARAMETER_PRIORITY = (
 
 def reference_variant_parameters(
     context: Any,
-    implementation_parent_id: str | None,
+    implementation_parent_id: Optional[str],
     active_parameters: Iterable[str],
+    *,
+    formulation: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return the inherited/default values used to define a treatment delta."""
 
     names = tuple(dict.fromkeys(map(str, active_parameters)))
-    reference = {
-        name: VARIANT_PARAMETER_DEFAULTS[name]
-        for name in names
-        if name in VARIANT_PARAMETER_DEFAULTS
-    }
+    reference = variant_parameter_defaults(names, formulation=formulation)
     if not implementation_parent_id:
         return reference
     for summary in reversed(as_list(get_value(context, "family_history", None))):

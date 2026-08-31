@@ -23,11 +23,16 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
         "verified_predictions",
     }
     assert card.prohibition_conditions == ("evaluator_or_split_change_required",)
-    assert card.implementation_targets == ("solution/research_scaffold.py",)
-    assert card.configuration_target == "solution/experiment_config.py"
-    assert card.capability_status == "verified"
-    assert card.implementation_id == "objective_bpr_v2"
-    assert "negative_count" in card.active_parameters
+    assert card.implementation_targets == (
+        "solution/official_fm.py",
+        "solution/losses.py",
+        "solution/train.py",
+        "solution/candidate.py",
+    )
+    assert card.configuration_target is None
+    assert card.capability_status == "unverified"
+    assert card.implementation_id is None
+    assert card.active_parameters == ()
 
     residual = next(
         card

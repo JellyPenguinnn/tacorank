@@ -640,6 +640,7 @@ class ResearchProposal(StrictModel):
     context_id: NonEmptyStr
     hypothesis: NonEmptyStr
     family: NonEmptyStr
+    plan_id: Optional[NonEmptyStr] = None
     change_summary: NonEmptyStr
     expected_mechanism: NonEmptyStr
     success_criteria: NonEmptyStr
@@ -1628,6 +1629,7 @@ class PlannerExperimentSummary(StrictModel):
     implementation_parent_experiment_id: Optional[str] = None
     commit_sha: NonEmptyStr
     family: Optional[str] = None
+    plan_id: Optional[NonEmptyStr] = None
     hypothesis_summary: str = ""
     evaluation_event_id: Optional[NonEmptyStr] = None
     trust_verdict: Optional[TrustVerdict] = None
@@ -1674,6 +1676,30 @@ class PlannerExperimentSummary(StrictModel):
     method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+
+
+class PlannerResearchPlanSummary(StrictModel):
+    """Ledger-derived status for one conditional multi-experiment plan."""
+
+    plan_id: NonEmptyStr
+    research_question: NonEmptyStr
+    families: List[NonEmptyStr]
+    method_card_ids: List[NonEmptyStr]
+    maximum_experiments: int = Field(gt=0)
+    experiments_attempted: int = Field(ge=0)
+    valid_full_experiments: int = Field(ge=0)
+    confirmed_improvements: int = Field(ge=0)
+    confirmed_regressions: int = Field(ge=0)
+    status: Literal["unstarted", "active", "falsified", "exhausted"]
+    conditional_followups: Dict[NonEmptyStr, NonEmptyStr]
+
+    @model_validator(mode="after")
+    def validate_plan_counts(self) -> "PlannerResearchPlanSummary":
+        if self.experiments_attempted > self.maximum_experiments:
+            raise ValueError("research plan attempts exceed its frozen ceiling")
+        if self.valid_full_experiments > self.experiments_attempted:
+            raise ValueError("valid plan results exceed attempted experiments")
+        return self
 
 
 class PlannerLessonSummary(StrictModel):
@@ -1730,6 +1756,7 @@ class PlannerContext(ContextDocument):
     # Long-term memory contains only active controller-recorded lessons.
     active_lessons: List[PlannerLessonSummary] = Field(default_factory=list)
     method_cards: List[PlannerMethodCardSummary] = Field(default_factory=list)
+    research_plans: List[PlannerResearchPlanSummary] = Field(default_factory=list)
     playbook: PlannerPlaybookSummary
     research_campaign: Optional[ResearchCampaign] = None
     # Retained as an empty, backward-compatible field so historical schema-v1

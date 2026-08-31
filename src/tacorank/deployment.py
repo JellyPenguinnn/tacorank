@@ -113,6 +113,15 @@ def setup_trae_deployment(
             "candidate_full",
         ],
         "target_interface_excerpts": {
+            "solution/official_fm.py": (
+                "Editable adaptation of the frozen official five-field NumPy FM. "
+                "Preserve controller-owned data splits, evaluator, and submission "
+                "logic; implement only the approved model mechanism."
+            ),
+            "solution/losses.py": (
+                "Candidate-owned training objectives. Read training labels only; "
+                "never compute protected metrics or perform validation selection."
+            ),
             "candidate": (
                 "def run(invocation: PipelineInvocation) -> None; read only "
                 "invocation.input_root and write exactly invocation.output_path as "
@@ -273,6 +282,15 @@ def setup_live_deployment(
             "long_view",
             "row_id",
             "time_ms",
+            "hourmin",
+            "is_click",
+            "play_time_ms",
+            "is_like",
+            "is_follow",
+            "is_comment",
+            "is_forward",
+            "is_hate",
+            "is_profile_enter",
             *HISTORY_FEATURE_COLUMNS,
         ],
         "protected_columns": ["label"],
@@ -300,7 +318,7 @@ def setup_live_deployment(
         "evaluator_sha256": evaluator_hash,
         "baseline_commit_sha": baseline_commit,
         "max_experiments": campaign_budget,
-        "wall_time_limit_seconds": 86400 if research_campaign is not None else 21600,
+        "wall_time_limit_seconds": 21600,
         "convergence_epsilon": 0.002,
         "convergence_patience": 3,
         "max_repairs_per_experiment": 2,
@@ -343,6 +361,13 @@ def setup_live_deployment(
             "item_tags",
             "upload_date",
             "point_in_time_history_features",
+            "auxiliary_engagement_labels",
+            "is_click",
+            "play_time_ms",
+            "is_like",
+            "is_follow",
+            "is_comment",
+            "is_forward",
             "verified_predictions",
         ],
         "research_capabilities": [
@@ -351,6 +376,8 @@ def setup_live_deployment(
             "history_affinity_features_legal",
             "strict_temporal_cutoff",
             "verified_best_prediction",
+            "legal_auxiliary_label",
+            "duration_features_legal",
         ],
         "active_research_prohibitions": ["static_feature_expansion"],
         "research_campaign": (
@@ -361,17 +388,36 @@ def setup_live_deployment(
         "prediction_change_no_op_threshold": 0.001,
         "max_single_score_fraction": 0.5,
         "target_interface_excerpts": {
+            "solution/official_fm.py": (
+                "Editable copy of the official five-field NumPy FM model. Preserve "
+                "controller-owned split, evaluation, and submission boundaries."
+            ),
+            "solution/losses.py": (
+                "Candidate-owned objective functions over training rows only."
+            ),
+            "solution/features.py": PRODUCTION_TARGET_INTERFACE_EXCERPTS[
+                "solution/features.py"
+            ],
+            "solution/model.py": PRODUCTION_TARGET_INTERFACE_EXCERPTS[
+                "solution/model.py"
+            ],
+            "solution/train.py": PRODUCTION_TARGET_INTERFACE_EXCERPTS[
+                "solution/train.py"
+            ],
+            "solution/inference.py": PRODUCTION_TARGET_INTERFACE_EXCERPTS[
+                "solution/inference.py"
+            ],
             "solution/experiment_config.py": (
                 "Edit only scalar values in CONFIG, set family to the ExperimentSpec "
                 "family, and copy the approved variant_parameters exactly. "
                 "Supported formulation values are "
-                "pointwise, bpr, listwise, temporal_history, and history_affinity. "
+                "official_fm, pointwise, bpr, listwise, temporal_history, and history_affinity. "
                 "history_affinity consumes only the setup-generated, hash-bound "
                 "point-in-time history feature views; it must not add raw static "
                 "CWM fields or current-row outcomes. Bounds: "
                 "embedding_dim integer 2..32; learning_rate 1e-5..0.2; epochs "
-                "1..8; negative_count integer 1..16; l2 0..0.1; residual_scale "
-                "0..0.5; max_train_rows integer 1000..250000; "
+                "1..40; negative_count integer 1..16; l2 0..0.1; residual_scale "
+                "0..0.5; max_train_rows integer 1000..1141112; "
                 "history_decay_days 1..180; history_shrinkage 0..1000; "
                 "listwise_strategy must be full_observed. The "
                 "history_affinity formulation additionally requires "
@@ -621,7 +667,7 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     common = views / "common"
     common.mkdir(mode=0o700)
     train_path = common / "train.csv"
-    _write_train(train_path, train)
+    _write_train(train_path, data, expected_rows=len(train))
     feature_materialization = materialize_history_features(
         data_directory=data,
         official_train=train,
@@ -821,6 +867,8 @@ def _candidate_baseline_parity_receipt(
             for relative in (
                 "solution/experiment_config.py",
                 "solution/research_scaffold.py",
+                "solution/official_fm.py",
+                "solution/losses.py",
             )
         },
         "routes": routes,
@@ -844,14 +892,58 @@ def _load_official_splits(root: Path, data: Path) -> Mapping[str, Any]:
     return module.load(str(data))
 
 
-def _write_train(path: Path, rows: Sequence[Sequence[Any]]) -> None:
+def _write_train(path: Path, data: Path, *, expected_rows: int) -> None:
+    """Materialize the label-bearing training view with legal auxiliaries only."""
+
+    authors: Dict[str, str] = {}
+    with (data / "video_features_basic_pure.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        for row in csv.DictReader(handle, strict=True):
+            authors[str(row["video_id"])] = str(row["author_id"])
+    source = data / "log_standard_4_08_to_4_21_pure.csv"
+    count = 0
     with _exclusive_csv(path) as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            ("date", "user_id", "video_id", "author_id", "tab", "duration_ms", "long_view")
+        fieldnames = (
+            "date", "time_ms", "hourmin", "user_id", "video_id", "author_id",
+            "tab", "duration_ms", "long_view", "is_click", "play_time_ms",
+            "is_like", "is_follow", "is_comment", "is_forward", "is_hate",
+            "is_profile_enter",
         )
-        for row in rows:
-            writer.writerow(row)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        with source.open(newline="", encoding="utf-8") as source_handle:
+            for row in csv.DictReader(source_handle, strict=True):
+                date = int(row["date"])
+                if not 20220408 <= date <= 20220421:
+                    continue
+                video_id = str(row["video_id"])
+                writer.writerow(
+                    {
+                        "date": row["date"],
+                        "time_ms": row["time_ms"],
+                        "hourmin": row["hourmin"],
+                        "user_id": row["user_id"],
+                        "video_id": video_id,
+                        "author_id": authors.get(video_id, "UNK"),
+                        "tab": row["tab"],
+                        "duration_ms": row["duration_ms"],
+                        "long_view": "1" if row["long_view"] != "0" else "0",
+                        "is_click": row["is_click"],
+                        "play_time_ms": row["play_time_ms"],
+                        "is_like": row["is_like"],
+                        "is_follow": row["is_follow"],
+                        "is_comment": row["is_comment"],
+                        "is_forward": row["is_forward"],
+                        "is_hate": row["is_hate"],
+                        "is_profile_enter": row["is_profile_enter"],
+                    }
+                )
+                count += 1
+    if count != expected_rows:
+        raise DeploymentError(
+            "candidate training view does not match the official train split"
+        )
 
 
 def _write_score(path: Path, rows: Iterable[Sequence[Any]]) -> None:

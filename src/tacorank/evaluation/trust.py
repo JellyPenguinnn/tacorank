@@ -22,7 +22,7 @@ from .types import (
 class TrustConfig:
     # Statistical uncertainty is estimated from paired deltas. This value is a
     # practical-effect threshold, not an uncertainty estimate.
-    eta_floor: float = 0.0
+    eta_floor: float = 0.0016
     minimum_practical_gain: float = 0.0001
     required_seed_count: int = 3
     baseline_seed_std: float = 0.0008
@@ -35,7 +35,7 @@ class TrustConfig:
     validation_arm_gap_threshold: float = 0.006
     # Proxy deltas below this magnitude are not reliable enough to prune or to
     # claim an improvement.  They receive one bounded full-fidelity check.
-    proxy_improvement_threshold: float = 0.0001
+    proxy_improvement_threshold: float = 0.0016
     require_non_decreasing_metrics: bool = False
     no_op: NoOpConfig = field(default_factory=NoOpConfig)
 
