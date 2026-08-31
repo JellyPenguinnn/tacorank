@@ -31,13 +31,13 @@ the outcome policy explicitly requests refinement or deepening.
   ],
   "family_order": [
     "model",
+    "ensemble",
     "objective",
     "temporal_history",
     "multitask",
     "duration_bias",
     "features",
     "sampling",
-    "ensemble",
     "evaluation",
     "other"
   ],
