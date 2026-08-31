@@ -2002,7 +2002,53 @@ class Harness:
                 failure_event.payload.result,
                 spec.experiment_id,
             )
-            if self._pending_parallel_stop is None:
+            if self.config.research_agent_mode == "bounded_react":
+                # A lane may escape here after _run_one_experiment has already
+                # consumed its normal recovery path (for example, Trae can
+                # fail while producing a repair patch).  In a parallel round
+                # that is a candidate-local failure, not evidence that the
+                # other sealed lanes are unsafe.  Consume the one remaining
+                # same-commit retry so the recovery projection reaches a
+                # terminal INVALID/NO_OP state before the round is summarized.
+                if action == RecoveryAction.RETRY_SAME_COMMIT:
+                    retry_failure = self._record_adapter_failure(
+                        experiment_id=spec.experiment_id,
+                        attempt=max(1, node.attempt_count),
+                        stage=stage,
+                        error=error,
+                        causation_event_id=self.events()[-1].event_id,
+                    )
+                    action, _ = await self._recover(
+                        retry_failure,
+                        retry_failure.payload.result,
+                        spec.experiment_id,
+                    )
+                if action in {
+                    RecoveryAction.ABANDON,
+                    RecoveryAction.ROLLBACK,
+                    RecoveryAction.RETURN_TO_PLANNER,
+                }:
+                    logger.warning(
+                        "parallel_lane_quarantined experiment_id=%s stage=%s action=%s",
+                        spec.experiment_id,
+                        stage,
+                        action.value,
+                    )
+                    return self.state()
+
+                # No durable continuation point is known for an unexpected
+                # non-terminal recovery action. Keep the existing fail-closed
+                # behavior for this exceptional case; ordinary lane failures
+                # above are isolated and do not stop their siblings.
+                self._pending_parallel_stop = StopDecision(
+                    True,
+                    "ADAPTER_FAILURE_%s" % action.value.upper(),
+                    "A parallel %s adapter failed; recovery recorded %s and the round stopped safely."
+                    % (stage, action.value),
+                )
+            elif self._pending_parallel_stop is None:
+                # Legacy deployments retain the historical whole-round stop
+                # semantics for compatibility with their frozen configs.
                 self._pending_parallel_stop = StopDecision(
                     True,
                     "ADAPTER_FAILURE_%s" % action.value.upper(),
