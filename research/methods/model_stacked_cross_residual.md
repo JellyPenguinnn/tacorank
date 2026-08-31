@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"model_stacked_cross_residual","family":"model","status":"candidate","tags":["stacked","feature_interaction","cross_network","residual"],"cost_tier":"high","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","duration_ms","date","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"sources":["https://arxiv.org/abs/2008.13535","https://dl.acm.org/doi/10.1145/3442381.3450078"]}
+{"schema_version":"1.0","method_id":"model_stacked_cross_residual","family":"model","status":"known_negative","tags":["stacked","feature_interaction","cross_network","residual"],"cost_tier":"high","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","duration_ms","date","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"sources":["https://arxiv.org/abs/2008.13535","https://dl.acm.org/doi/10.1145/3442381.3450078"]}
 ```
 
 ## Mechanism
@@ -41,6 +41,8 @@ residual improves training fit while within-user ordering is unchanged, which
 indicates it is re-learning the parent's own signal with more parameters.
 
 ## Do not use when
+
+Retired on measured evidence: sibling DCNv2 attempts failed in coding twice under this budget; capacity-class mechanisms measured below small trees on this data.
 
 The budget cannot train it honestly at every fidelity. The fidelity views share
 identical training data and differ only in scored population, so a model that
