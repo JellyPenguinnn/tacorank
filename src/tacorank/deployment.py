@@ -517,6 +517,11 @@ def setup_live_deployment(
         "prediction_change_no_op_threshold": 0.001,
         "max_single_score_fraction": 0.5,
         "target_interface_excerpts": {
+            **{
+                key: value
+                for key, value in PRODUCTION_TARGET_INTERFACE_EXCERPTS.items()
+                if key != "solution/candidate.py"
+            },
             "solution/candidate.py": (
                 "Required candidate entrypoint: def run(invocation: "
                 "PipelineInvocation) -> None; include this file in target_files; read only "

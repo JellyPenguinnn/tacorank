@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"model_lgbm_causal_history","family":"model","status":"candidate","tags":["lightgbm","lambdarank","causal_history","target_encoding","replacement_capable","model"],"cost_tier":"medium","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"sources":["https://papers.nips.cc/paper/6907-lightgbm-a-highly-efficient-gradient-boosting-decision-tree"]}
+{"schema_version":"1.0","method_id":"model_lgbm_causal_history","family":"model","status":"candidate","tags":["lightgbm","lambdarank","causal_history","target_encoding","model"],"cost_tier":"medium","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["evaluator_or_split_change_required"],"sources":["https://papers.nips.cc/paper/6907-lightgbm-a-highly-efficient-gradient-boosting-decision-tree"]}
 ```
 
 ## Mechanism
@@ -52,6 +52,14 @@ leave-one-out aggregates over training rows, never as same-row features —
 a same-row outcome feature cannot exist at serve time and is rejected.
 
 ## Expected effect
+
+Offline compliant replication (2026-08-31, this exact contract and
+evaluator): 0.6011 standalone as a replacement — BELOW the 0.60147 parent —
+but 0.60344 when served as a per-user z-scored residual on the FM parent at
+alpha 0.7 (final = FM + 0.7 * std_user(FM) * z_user(model_score)). Under
+the train-split-only rule this frame does not beat the parent on its own:
+implement it as a blend residual, never a replacement.
+
 
 Sibling lab measurements on the same data and metrics: this frame with a
 small LambdaRank reached 0.6056–0.6122 valid-primary territory versus the
