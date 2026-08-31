@@ -41,6 +41,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONNOUSERSITE=1 \
     PYTHONUNBUFFERED=1
 
+# LightGBM links against the OpenMP runtime, which python:3.12-slim omits.
+# Without it the wheel installs cleanly and then fails at import with
+# "libgomp.so.1: cannot open shared object file", so the candidate would be
+# rejected at Gate A's isolated import rather than at install time.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /opt/tacorank
 COPY pyproject.toml setup.cfg setup.py requirements.txt ./
 COPY src ./src
