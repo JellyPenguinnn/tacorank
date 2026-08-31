@@ -1,12 +1,14 @@
 """Person 1 research-planning primitives."""
 
 from .duplicate_detection import DuplicateDetector, compute_duplicate_key
+from .agent_tools import ResearchToolRegistry
 from .eda import PlannerEdaError, PlannerEdaToolbox
 from .graph_view import ExperimentNodeView, GraphView
 from .linucb import LinUCBLegalChoiceRanker
 from .literature import (
     LiteratureResearchError,
     LiteratureResearchSkill,
+    LiteratureSearchResult,
     OpenAlexLiteratureSkill,
 )
 from .convergence_advisor import ConvergenceAdvice, ConvergenceAdvisor
@@ -21,6 +23,7 @@ from .search_eligibility import (
 
 __all__ = [
     "DuplicateDetector",
+    "ResearchToolRegistry",
     "ConvergenceAdvice",
     "ConvergenceAdvisor",
     "ExperimentNodeView",
@@ -29,6 +32,7 @@ __all__ = [
     "LinUCBLegalChoiceRanker",
     "LiteratureResearchError",
     "LiteratureResearchSkill",
+    "LiteratureSearchResult",
     "MethodCard",
     "PlannerEdaError",
     "PlannerEdaToolbox",

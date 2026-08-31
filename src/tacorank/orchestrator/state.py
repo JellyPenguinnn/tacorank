@@ -89,6 +89,11 @@ class RunState:
     convergence_patience: int = 3
     max_experiments: int = 0
     parallel_directions: int = 1
+    research_agent_mode: str = "legacy"
+    research_tool_step_limit: int = 4
+    research_literature_max_queries: int = 2
+    literature_required: bool = False
+    parallel_schedule: List[int] = field(default_factory=list)
     synthesize_parallel_improvements: bool = True
     wall_time_limit_seconds: int = 0
     token_limit: Optional[int] = None

@@ -173,6 +173,11 @@ class RunConfig(StrictModel):
     research_planning_retry_backoff_seconds: float = Field(
         default=1.0, ge=0.0, le=30.0
     )
+    # Missing in historical configs: those configs intentionally retain the
+    # legacy one-shot planner. setup-live writes bounded_react explicitly.
+    research_agent_mode: Literal["legacy", "bounded_react"] = "legacy"
+    research_tool_step_limit: int = Field(default=4, ge=1, le=4)
+    research_literature_max_queries: int = Field(default=2, ge=0, le=2)
     deepseek_max_output_tokens: int = Field(default=8_192, gt=0)
     deepseek_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     deepseek_thinking_enabled: bool = True
@@ -181,11 +186,16 @@ class RunConfig(StrictModel):
     # offline-only planner behavior. New setup-live deployments explicitly
     # enable the bounded online literature skill.
     literature_research_enabled: bool = False
+    literature_required: bool = False
     literature_provider: Literal["openalex"] = "openalex"
     literature_base_url: NonEmptyStr = "https://api.openalex.org"
     literature_timeout_seconds: int = Field(default=20, gt=0, le=120)
+    literature_total_timeout_seconds: int = Field(default=45, gt=0, le=120)
+    literature_max_attempts: int = Field(default=3, ge=1, le=3)
+    literature_min_interval_seconds: float = Field(default=1.0, ge=0.0, le=15.0)
     literature_max_papers: int = Field(default=3, gt=0, le=5)
     literature_min_citation_count: int = Field(default=5, ge=0)
+    parallel_schedule: List[int] = Field(default_factory=lambda: [4, 4, 2])
 
     @field_validator("run_id")
     @classmethod
@@ -240,6 +250,10 @@ class RunConfig(StrictModel):
             raise ValueError("allowed_research_families must not be empty")
         if not self.allowed_research_data:
             raise ValueError("allowed_research_data must not be empty")
+        if self.literature_required and not self.literature_research_enabled:
+            raise ValueError("literature_required needs literature_research_enabled")
+        if any(width < 1 or width > 7 for width in self.parallel_schedule):
+            raise ValueError("parallel_schedule widths must be between one and seven")
         return self
 
     @field_validator("target_interface_excerpts")

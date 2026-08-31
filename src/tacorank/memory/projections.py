@@ -55,6 +55,11 @@ def project(events: Iterable[Event]) -> RunState:
             state.started_at = event.timestamp
             state.max_experiments = payload.max_experiments
             state.parallel_directions = payload.parallel_directions
+            state.research_agent_mode = payload.research_agent_mode
+            state.research_tool_step_limit = payload.research_tool_step_limit
+            state.research_literature_max_queries = payload.research_literature_max_queries
+            state.literature_required = payload.literature_required
+            state.parallel_schedule = list(payload.parallel_schedule)
             state.synthesize_parallel_improvements = (
                 payload.synthesize_parallel_improvements
             )

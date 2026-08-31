@@ -181,6 +181,28 @@ class PlannerAction(str, Enum):
     BLOCKED = "blocked"
 
 
+class ResearchTurnAction(str, Enum):
+    """Controller-mediated actions available to the bounded research loop."""
+
+    INSPECT_FRONTIER = "inspect_frontier"
+    COMPARE_EXPERIMENTS = "compare_experiments"
+    INSPECT_DIAGNOSTICS = "inspect_diagnostics"
+    INSPECT_FAILURES = "inspect_failures"
+    INSPECT_METHOD_CARDS = "inspect_method_cards"
+    SEARCH_LITERATURE = "search_literature"
+    FINALIZE_PLAN = "finalize_plan"
+
+
+ResearchToolAction = Literal[
+    "inspect_frontier",
+    "compare_experiments",
+    "inspect_diagnostics",
+    "inspect_failures",
+    "inspect_method_cards",
+    "search_literature",
+]
+
+
 class RunOutcome(str, Enum):
     SUCCESS = "success"
     CODE_ERROR = "code_error"
@@ -548,6 +570,194 @@ class LiteratureEvidence(StrictModel):
         return value
 
 
+class ResearchTurn(StrictModel):
+    """One typed, code-blind turn in the bounded planner loop.
+
+    The model may request one read-only aggregate action or finalize a plan.
+    It never carries chain-of-thought, shell commands, paths, labels, or raw
+    dataset content.
+    """
+
+    action: ResearchTurnAction
+    experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
+    method_card_ids: List[NonEmptyStr] = Field(default_factory=list)
+    query: Optional[NonEmptyStr] = None
+    selected_action_id: Optional[NonEmptyStr] = None
+    claim: Optional[NonEmptyStr] = None
+    evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+    hypothesis: Optional[NonEmptyStr] = None
+    expected_mechanism: Optional[NonEmptyStr] = None
+    success_criterion: Optional[NonEmptyStr] = None
+    falsification_condition: Optional[NonEmptyStr] = None
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    conservative_parameter_guidance: Dict[str, Any] = Field(default_factory=dict)
+    spec: Optional[Dict[str, Any]] = None
+
+    @field_validator("experiment_ids", "method_card_ids", "evidence_event_ids")
+    @classmethod
+    def validate_turn_ids(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("research turn identifiers must be unique")
+        for value in values:
+            if value.startswith(("/", "\\")) or ".." in value:
+                raise ValueError("research turn identifiers must be opaque IDs")
+        return values
+
+    @field_validator("evidence_event_ids")
+    @classmethod
+    def validate_turn_evidence_ids(cls, values: List[str]) -> List[str]:
+        if any(not EVENT_ID_RE.fullmatch(value) for value in values):
+            raise ValueError("research turn evidence IDs must be event IDs")
+        return values
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        lowered = value.lower()
+        if (
+            len(value) > 240
+            or any(
+                token in lowered
+                for token in ("run_", "evt_", "user_id", "label", "secret", "/", "\\")
+            )
+            or re.search(
+                r"\b(?:gauc|ndcg|score|metric|parent_delta|primary_score)\b\s*[:=]\s*-?\d",
+                lowered,
+            )
+        ):
+            raise ValueError("literature query is not bounded or code-blind")
+        return value
+
+    @model_validator(mode="after")
+    def validate_action_shape(self) -> "ResearchTurn":
+        if self.action == ResearchTurnAction.FINALIZE_PLAN:
+            required = (
+                self.selected_action_id,
+                self.claim,
+                self.hypothesis,
+                self.expected_mechanism,
+                self.success_criterion,
+                self.falsification_condition,
+                self.confidence,
+            )
+            if any(value is None for value in required):
+                raise ValueError("finalize_plan requires a complete structured decision")
+            if not self.evidence_event_ids:
+                raise ValueError("finalize_plan requires current-run evidence event IDs")
+            if not self.conservative_parameter_guidance:
+                raise ValueError("finalize_plan requires conservative parameter guidance")
+            if self.spec is None:
+                raise ValueError("finalize_plan requires one experiment spec")
+        else:
+            if self.spec is not None:
+                raise ValueError("tool turns cannot carry an experiment spec")
+            if self.action == ResearchTurnAction.COMPARE_EXPERIMENTS and not self.experiment_ids:
+                raise ValueError("compare_experiments requires experiment IDs")
+            if self.action == ResearchTurnAction.SEARCH_LITERATURE and not self.query:
+                raise ValueError("search_literature requires a bounded query")
+        return self
+
+
+class ResearchObservation(StrictModel):
+    """Compact current-run evidence produced by one controller tool call."""
+
+    context_id: NonEmptyStr
+    tool_name: ResearchToolAction
+    request_sha256: str
+    status: Literal["available", "empty", "rate_limited", "unavailable", "invalid"]
+    result: Dict[str, Any] = Field(default_factory=dict)
+    source_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+    literature_evidence: List[LiteratureEvidence] = Field(default_factory=list)
+    resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
+
+    @field_validator("request_sha256")
+    @classmethod
+    def validate_request_hash(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("research observation request hash must be sha256")
+        return value
+
+    @field_validator("source_event_ids")
+    @classmethod
+    def validate_observation_sources(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("research observation source events must be unique")
+        if any(not EVENT_ID_RE.fullmatch(value) for value in values):
+            raise ValueError("research observation source IDs must be event IDs")
+        return values
+
+    @model_validator(mode="after")
+    def bound_result(self) -> "ResearchObservation":
+        encoded = json.dumps(self.result, sort_keys=True, separators=(",", ":"), default=str)
+        if len(encoded) > 12_000:
+            raise ValueError("research observation result exceeds its bounded size")
+        if self.tool_name != ResearchTurnAction.SEARCH_LITERATURE and self.literature_evidence:
+            raise ValueError("only literature observations may carry papers")
+        return self
+
+
+class PlannerFrontierEntry(StrictModel):
+    role: Literal[
+        "validation_best",
+        "best_gauc",
+        "best_ndcg",
+        "most_stable",
+        "most_diverse",
+        "family_best",
+        "negative",
+        "failed",
+    ]
+    experiment_id: NonEmptyStr
+    family: Optional[NonEmptyStr] = None
+    score: Optional[float] = None
+    reason: NonEmptyStr
+    source_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+
+    @field_validator("source_event_ids")
+    @classmethod
+    def validate_frontier_sources(cls, values: List[str]) -> List[str]:
+        if any(not EVENT_ID_RE.fullmatch(value) for value in values):
+            raise ValueError("frontier source IDs must be event IDs")
+        return values
+
+
+class RoundSummaryMember(StrictModel):
+    experiment_id: NonEmptyStr
+    role: Literal["exploration", "sibling_refinement", "complementary", "challenger", "confirmation", "synthesis"]
+    family: Optional[NonEmptyStr] = None
+    primary_score: Optional[float] = None
+    stable_score: Optional[float] = None
+    gauc_delta: Optional[float] = None
+    ndcg_delta: Optional[float] = None
+    seed_stderr: Optional[float] = Field(default=None, ge=0.0)
+    seed_count: Optional[int] = Field(default=None, ge=1)
+    stability: Optional[Stability] = None
+    trust_verdict: Optional[TrustVerdict] = None
+    prediction_similarity: Optional[float] = Field(default=None, ge=-1.0, le=1.0)
+    diagnostic_strengths: List[NonEmptyStr] = Field(default_factory=list)
+    diagnostic_failures: List[NonEmptyStr] = Field(default_factory=list)
+
+
+class RoundSummary(StrictModel):
+    round_id: NonEmptyStr
+    incumbent_experiment_id: Optional[NonEmptyStr] = None
+    incumbent_primary_score: Optional[float] = None
+    stable_aggregate_score: Optional[float] = None
+    members: List[RoundSummaryMember] = Field(default_factory=list)
+    compatible_synthesis_candidates: List[NonEmptyStr] = Field(default_factory=list)
+    mechanisms_to_retire: List[NonEmptyStr] = Field(default_factory=list)
+    source_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+
+    @field_validator("source_event_ids")
+    @classmethod
+    def validate_round_sources(cls, values: List[str]) -> List[str]:
+        if any(not EVENT_ID_RE.fullmatch(value) for value in values):
+            raise ValueError("round source IDs must be event IDs")
+        return values
+
+
 class PairSamplingParameters(StrictModel):
     """Planner-selected pair construction controls for pairwise training."""
 
@@ -610,6 +820,10 @@ class ResearchProposal(StrictModel):
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
     literature_evidence: List[LiteratureEvidence] = Field(default_factory=list)
+    hypothesis_group_id: Optional[NonEmptyStr] = None
+    batch_role: Optional[Literal[
+        "exploration", "sibling_refinement", "complementary", "challenger", "confirmation", "synthesis"
+    ]] = None
     duplicate_key: NonEmptyStr
 
     @field_validator("run_id", "experiment_id", "context_id")
@@ -676,6 +890,8 @@ class PlannerOutput(StrictModel):
     reason_code: NonEmptyStr
     reason: NonEmptyStr
     supporting_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+    selected_action_id: Optional[NonEmptyStr] = None
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     resource_delta: ResourceDelta = Field(default_factory=ResourceDelta)
 
     @model_validator(mode="after")
@@ -1563,6 +1779,9 @@ class PlannerContext(ContextDocument):
     data_profile: Optional[PlannerDataProfile] = None
     remaining_budget: PlannerBudgetSummary
     convergence: PlannerConvergenceSummary
+    research_frontier: List[PlannerFrontierEntry] = Field(default_factory=list)
+    round_summary: Optional[RoundSummary] = None
+    research_observations: List[ResearchObservation] = Field(default_factory=list)
 
     @field_validator("refinement_frontier_ids", "ensemble_candidate_ids")
     @classmethod
@@ -1705,6 +1924,8 @@ class EventType(str, Enum):
     CONTRACT_VERIFIED = "contract.verified"
     BASELINE_VERIFIED = "baseline.verified"
     CONTEXT_CREATED = "context.created"
+    RESEARCH_OBSERVATION_RECORDED = "research.observation.recorded"
+    RESEARCH_ROUND_COMPLETED = "research.round.completed"
     PLANNER_RECOMMENDED = "planner.recommended"
     PLANNING_FAILED = "planning.failed"
     EXPERIMENT_PROPOSED = "experiment.proposed"
@@ -1747,6 +1968,18 @@ class RunStartedPayload(StrictModel):
     seed_schedule: List[int]
     convergence_epsilon: float = Field(default=0.002, ge=0.0)
     convergence_patience: int = Field(default=3, gt=0)
+    research_agent_mode: Literal["legacy", "bounded_react"] = "legacy"
+    research_tool_step_limit: int = Field(default=4, ge=1, le=4)
+    research_literature_max_queries: int = Field(default=2, ge=0, le=2)
+    literature_required: bool = False
+    parallel_schedule: List[int] = Field(default_factory=list)
+
+    @field_validator("parallel_schedule")
+    @classmethod
+    def validate_parallel_schedule(cls, values: List[int]) -> List[int]:
+        if any(value < 1 or value > 7 for value in values):
+            raise ValueError("parallel schedule widths must be between one and seven")
+        return values
 
     @field_validator("config_sha256", "contract_sha256", "protected_paths_sha256")
     @classmethod
@@ -1790,6 +2023,16 @@ class BaselineVerifiedPayload(StrictModel):
 class ContextCreatedPayload(StrictModel):
     type: Literal["context.created"] = "context.created"
     context: ContextValue
+
+
+class ResearchObservationRecordedPayload(StrictModel):
+    type: Literal["research.observation.recorded"] = "research.observation.recorded"
+    observation: ResearchObservation
+
+
+class ResearchRoundCompletedPayload(StrictModel):
+    type: Literal["research.round.completed"] = "research.round.completed"
+    summary: RoundSummary
 
 
 class PlannerRecommendedPayload(StrictModel):
@@ -1918,6 +2161,8 @@ EventPayload = Annotated[
         ContractVerifiedPayload,
         BaselineVerifiedPayload,
         ContextCreatedPayload,
+        ResearchObservationRecordedPayload,
+        ResearchRoundCompletedPayload,
         PlannerRecommendedPayload,
         PlanningFailedPayload,
         ExperimentProposedPayload,
@@ -1946,6 +2191,8 @@ EVENT_PAYLOAD_MODELS: Mapping[EventType, Type[StrictModel]] = {
     EventType.CONTRACT_VERIFIED: ContractVerifiedPayload,
     EventType.BASELINE_VERIFIED: BaselineVerifiedPayload,
     EventType.CONTEXT_CREATED: ContextCreatedPayload,
+    EventType.RESEARCH_OBSERVATION_RECORDED: ResearchObservationRecordedPayload,
+    EventType.RESEARCH_ROUND_COMPLETED: ResearchRoundCompletedPayload,
     EventType.PLANNER_RECOMMENDED: PlannerRecommendedPayload,
     EventType.PLANNING_FAILED: PlanningFailedPayload,
     EventType.EXPERIMENT_PROPOSED: ExperimentProposedPayload,

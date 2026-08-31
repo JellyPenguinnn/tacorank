@@ -179,6 +179,17 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             "only submission checking may follow final selection",
         )
 
+    if event_type in {
+        EventType.RESEARCH_OBSERVATION_RECORDED,
+        EventType.RESEARCH_ROUND_COMPLETED,
+    }:
+        _require(
+            state.status in (RunStatus.READY, RunStatus.RUNNING)
+            and state.phase in {"planner_context", "planning"},
+            "research evidence requires an active planning checkpoint",
+        )
+        return
+
     if event_type == EventType.CONTRACT_VERIFIED:
         _require(
             len(events) == 1 and events[0].event_type == EventType.RUN_STARTED,

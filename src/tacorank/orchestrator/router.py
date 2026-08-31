@@ -60,6 +60,11 @@ from ..schemas import (
     RecoveryDecidedPayload,
     RecoveryPolicyContext,
     ResourceDelta,
+    ResearchObservation,
+    ResearchObservationRecordedPayload,
+    ResearchRoundCompletedPayload,
+    RoundSummary,
+    RoundSummaryMember,
     RunOutcome,
     RunRequest,
     RunStartedPayload,
@@ -151,7 +156,36 @@ class Harness:
         self.final_submission_provider = final_submission_provider
         self._parallel_round_active = False
         self._pending_parallel_stop: Optional[StopDecision] = None
-        self._evaluation_lock = asyncio.Lock()
+        # Python 3.9 binds asyncio primitives to the current loop at
+        # construction time. The harness is also constructed by synchronous
+        # tooling after asyncio.run() may have closed that loop, so bind this
+        # controller lock lazily on first asynchronous evaluation.
+        self._evaluation_lock: Optional[asyncio.Lock] = None
+        set_sink = getattr(self.planner, "set_observation_sink", None)
+        if set_sink is not None:
+            set_sink(self._record_research_observation)
+
+    def _record_research_observation(self, observation: ResearchObservation) -> Event:
+        """Append planner evidence through the sole controller ledger writer."""
+
+        context_event = next(
+            (
+                event for event in reversed(self.events())
+                if event.event_type == EventType.CONTEXT_CREATED
+                and event.payload.context.context_id == observation.context_id
+            ),
+            None,
+        )
+        if context_event is None:
+            raise OrchestrationError(
+                "research observation cites an unknown planner context"
+            )
+        return self._append(
+            ResearchObservationRecordedPayload(observation=observation),
+            stage="research_observation",
+            causation_event_id=context_event.event_id,
+            resource_delta=observation.resource_delta,
+        )
 
     def _key(self, experiment_id: str, stage: str, attempt: int, value: object) -> str:
         return "%s:%s:%s:%d:%s" % (
@@ -161,6 +195,11 @@ class Harness:
             attempt,
             canonical_sha256(value),
         )
+
+    def _evaluation_guard(self) -> asyncio.Lock:
+        if self._evaluation_lock is None:
+            self._evaluation_lock = asyncio.Lock()
+        return self._evaluation_lock
 
     def _append(
         self,
@@ -301,6 +340,11 @@ class Harness:
                 seed_schedule=self.config.seed_schedule,
                 convergence_epsilon=self.config.convergence_epsilon,
                 convergence_patience=self.config.convergence_patience,
+                research_agent_mode=self.config.research_agent_mode,
+                research_tool_step_limit=self.config.research_tool_step_limit,
+                research_literature_max_queries=self.config.research_literature_max_queries,
+                literature_required=self.config.literature_required,
+                parallel_schedule=list(self.config.parallel_schedule),
             ),
             stage="started",
         )
@@ -1396,7 +1440,7 @@ class Harness:
                 # Protected query indices and best-reference selection are
                 # ledger-global. Serialize only this short authority boundary;
                 # coding, Gate A, and candidate execution remain concurrent.
-                async with self._evaluation_lock:
+                async with self._evaluation_guard():
                     state = self.state()
                     best = self._reference_metrics(
                         state.best_experiment_id, fidelity
@@ -1454,7 +1498,7 @@ class Harness:
                     if evaluation_request is None:
                         return self.state()
                     try:
-                        async with self._evaluation_lock:
+                        async with self._evaluation_guard():
                             evaluation = await self.evaluator.evaluate(
                                 evaluation_request
                             )
@@ -1934,8 +1978,10 @@ class Harness:
     async def run_parallel_round(self) -> object:
         state = self.state()
         round_start_best = state.best_primary_score
+        round_start_best_id = state.best_experiment_id
+        count = self._parallel_round_width(state)
         count = min(
-            self.config.parallel_directions,
+            count,
             state.remaining_experiments,
         )
         if count <= 0:
@@ -1969,6 +2015,11 @@ class Harness:
             self.stop(self._pending_parallel_stop)
             self._pending_parallel_stop = None
             return self.state()
+        self._record_parallel_round_summary(
+            [spec for spec, _ in prepared],
+            round_start_best_id,
+            round_start_best,
+        )
         if self.config.synthesize_parallel_improvements:
             improvements = self._round_improvements(
                 [spec.experiment_id for spec, _ in prepared],
@@ -1980,6 +2031,120 @@ class Harness:
         if decision.stop:
             self.stop(decision)
         return self.state()
+
+    def _parallel_round_width(self, state) -> int:
+        """Select exploration/exploitation/narrowing width for new deployments."""
+
+        if self.config.research_agent_mode != "bounded_react":
+            return self.config.parallel_directions
+        schedule = list(self.config.parallel_schedule or [4, 4, 2])
+        while len(schedule) < 3:
+            schedule.append(schedule[-1] if schedule else 1)
+        history = []
+        for node in state.experiments.values():
+            if node.trust is None or node.metric_set is None:
+                continue
+            if (
+                node.trust.verdict == TrustVerdict.ACCEPTED
+                and node.trust.integrity == Integrity.CLEAN
+                and node.trust.stability.value == "confirmed"
+                and node.highest_fidelity == Fidelity.FULL
+            ):
+                history.append(node)
+        if (
+            state.remaining_experiments <= 8
+            or state.consecutive_non_improving_full_evaluations
+            >= max(1, self.config.convergence_patience - 1)
+        ):
+            width = schedule[2]
+        elif history:
+            width = schedule[1]
+        else:
+            width = schedule[0]
+        return max(1, min(7, width, self.config.parallel_directions))
+
+    def _record_parallel_round_summary(
+        self,
+        specs: Sequence[object],
+        incumbent_experiment_id: Optional[str],
+        incumbent_score: Optional[float],
+    ) -> Event:
+        events = self.events()
+        state = self.state()
+        summaries = {
+            summary.experiment_id: summary
+            for summary in self.context_builder._planner_experiments(events)[3]
+        }
+        roles = {
+            str(getattr(spec, "experiment_id", "")): getattr(spec, "batch_role", None)
+            for spec in specs
+        }
+        members = []
+        compatible = []
+        retire = []
+        for spec in specs:
+            experiment_id = str(spec.experiment_id)
+            node = state.experiments.get(experiment_id)
+            summary = summaries.get(experiment_id)
+            role = roles.get(experiment_id) or "exploration"
+            if role not in {"exploration", "sibling_refinement", "complementary", "challenger", "confirmation", "synthesis"}:
+                role = "exploration"
+            metric_deltas = getattr(summary, "metric_deltas", {}) if summary else {}
+            normalized_deltas = {str(key).lower(): float(value) for key, value in metric_deltas.items()}
+            stable_score = stable_primary_score(node) if node and node.metric_set else None
+            members.append(
+                RoundSummaryMember(
+                    experiment_id=experiment_id,
+                    role=role,
+                    family=spec.family,
+                    primary_score=(node.metric_set.primary_score if node and node.metric_set else None),
+                    stable_score=stable_score,
+                    gauc_delta=normalized_deltas.get("gauc"),
+                    ndcg_delta=normalized_deltas.get("ndcg@5", normalized_deltas.get("ndcg")),
+                    seed_stderr=getattr(node.trust, "seed_stderr", None) if node and node.trust else None,
+                    seed_count=getattr(node.trust, "seed_count", None) if node and node.trust else None,
+                    stability=node.trust.stability if node and node.trust else None,
+                    trust_verdict=node.trust.verdict if node and node.trust else None,
+                    prediction_similarity=getattr(summary, "prediction_spearman_vs_parent", None) if summary else None,
+                    diagnostic_strengths=[
+                        name for name, value in (getattr(summary, "diagnostic_metrics", {}) if summary else {}).items()
+                        if float(value) > 0
+                    ][:4],
+                    diagnostic_failures=list(getattr(summary, "failure_hypotheses", ()) if summary else ())[:4],
+                )
+            )
+            if node and node.status.value == "accepted" and node.best_eligible:
+                compatible.append(experiment_id)
+            if node and node.status.value in {"invalid", "rejected", "pruned"}:
+                retire.append(spec.family)
+        round_number = 1 + sum(
+            1 for event in events if event.event_type == EventType.RESEARCH_ROUND_COMPLETED
+        )
+        stable_scores = [
+            member.stable_score
+            for member in members
+            if member.stable_score is not None
+        ]
+        summary = RoundSummary(
+            round_id="round_%03d" % round_number,
+            incumbent_experiment_id=incumbent_experiment_id,
+            incumbent_primary_score=incumbent_score,
+            stable_aggregate_score=(
+                sum(stable_scores) / len(stable_scores) if stable_scores else None
+            ),
+            members=members,
+            compatible_synthesis_candidates=compatible[:4],
+            mechanisms_to_retire=sorted(set(retire)),
+            source_event_ids=[
+                event.event_id for event in events
+                if self._event_experiment_id(event) in {member.experiment_id for member in members}
+            ][-32:],
+        )
+        return self._append(
+            ResearchRoundCompletedPayload(summary=summary),
+            stage="research_round",
+            causation_event_id=events[-1].event_id,
+        )
 
     def _round_improvements(
         self,

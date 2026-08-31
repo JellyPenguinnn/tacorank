@@ -7,10 +7,12 @@ import logging
 from typing import Any, Callable, Mapping
 
 from tacorank.providers.research_provider import ProviderRequest, ResearchProvider
+from tacorank.research.agent_tools import ResearchToolRegistry
 from tacorank.research.convergence_advisor import ConvergenceAdvisor
-from tacorank.research.literature import LiteratureResearchSkill
+from tacorank.research.literature import LiteratureResearchError, LiteratureResearchSkill
 from tacorank.research.plan_validation import PlanValidator, ValidationResult
 from tacorank.research.search_policy import PolicyChoice, SearchPolicy
+from tacorank.schemas import ResearchTurn, ResearchTurnAction
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,10 @@ class ResearchPlanner:
         input_token_limit: int | None = None,
         output_token_limit: int | None = None,
         literature_skill: LiteratureResearchSkill | None = None,
+        research_agent_mode: str = "legacy",
+        research_tool_step_limit: int = 4,
+        research_literature_max_queries: int = 2,
+        literature_required: bool = False,
     ):
         self.provider = provider
         self.policy = policy or SearchPolicy()
@@ -76,6 +82,14 @@ class ResearchPlanner:
         self.input_token_limit = input_token_limit
         self.output_token_limit = output_token_limit
         self.literature_skill = literature_skill
+        self.research_agent_mode = research_agent_mode
+        self.research_tool_step_limit = min(4, max(1, research_tool_step_limit))
+        self.research_literature_max_queries = min(2, max(0, research_literature_max_queries))
+        self.literature_required = literature_required
+        self._observation_sink: Callable[[Any], None] | None = None
+
+    def set_observation_sink(self, sink: Callable[[Any], None] | None) -> None:
+        self._observation_sink = sink
 
     def preflight(self) -> None:
         """Verify both the model provider and optional online research skill."""
@@ -83,16 +97,31 @@ class ResearchPlanner:
         provider_preflight = getattr(self.provider, "preflight", None)
         if provider_preflight is not None:
             provider_preflight()
+        if self.literature_required and self.literature_skill is None:
+            raise LiteratureResearchError(
+                "required OpenAlex literature skill is not configured",
+                status="unavailable",
+                retryable=False,
+            )
         if self.literature_skill is not None:
-            self.literature_skill.preflight()
+            try:
+                self.literature_skill.preflight(required=self.literature_required)
+            except TypeError:
+                self.literature_skill.preflight()
+            except Exception:
+                if self.literature_required:
+                    raise
+                logger.warning("optional literature preflight unavailable", exc_info=True)
 
-    def _attach_provider_usage(self, output: Any) -> Any:
+    def _attach_provider_usage(self, output: Any, *, include_literature: bool = True) -> Any:
         resource_delta = getattr(self.provider, "resource_delta", None)
         literature_delta = (
             getattr(self.literature_skill, "resource_delta", None)
             if self.literature_skill is not None
             else None
         )
+        if not include_literature:
+            literature_delta = None
         if literature_delta is not None:
             if resource_delta is None:
                 resource_delta = literature_delta
@@ -122,7 +151,7 @@ class ResearchPlanner:
         choice = self.policy.choose_parallel_direction(
             context, direction_index, direction_count
         )
-        return await self._propose(context, forced_choice=choice)
+        return await self._propose(context, forced_choice=choice, legal_choices=(choice,))
 
     def parallel_direction_capacity(self, context: Any) -> int:
         """Expose the policy's unique lane count to the deterministic router."""
@@ -135,9 +164,14 @@ class ResearchPlanner:
         choice = self.policy.choose_synthesis(
             context, component_experiment_ids
         )
-        return await self._propose(context, forced_choice=choice)
+        return await self._propose(context, forced_choice=choice, legal_choices=(choice,))
 
-    async def _propose(self, context: Any, forced_choice: PolicyChoice | None = None) -> Any:
+    async def _propose(
+        self,
+        context: Any,
+        forced_choice: PolicyChoice | None = None,
+        legal_choices: tuple[PolicyChoice, ...] | None = None,
+    ) -> Any:
         logger.info(
             "research_planner_started context_id=%s run_id=%s",
             _get(context, "context_id", None),
@@ -171,6 +205,22 @@ class ResearchPlanner:
                 None,
                 choice.reason_code,
                 choice.reason,
+                supporting,
+            )
+
+        if self.research_agent_mode == "bounded_react":
+            if getattr(self.provider, "research_turn", None) is None:
+                return self._output(
+                    "blocked",
+                    None,
+                    "RESEARCH_AGENT_UNAVAILABLE",
+                    "The bounded research mode requires a typed research-turn provider.",
+                    supporting,
+                )
+            return await self._propose_bounded_react(
+                context,
+                choice,
+                legal_choices or self.policy.legal_choices(context),
                 supporting,
             )
 
@@ -265,4 +315,195 @@ class ResearchPlanner:
                 choice.reason,
                 supporting,
             )
+        )
+
+    def _output(
+        self,
+        action: str,
+        spec: Any,
+        reason_code: str,
+        reason: str,
+        supporting: list[str],
+        *,
+        selected_action_id: str | None = None,
+        confidence: float | None = None,
+    ) -> Any:
+        output = self.output_factory(action, spec, reason_code, reason, supporting)
+        updates = {}
+        if selected_action_id is not None:
+            updates["selected_action_id"] = selected_action_id
+        if confidence is not None:
+            updates["confidence"] = confidence
+        if updates and hasattr(output, "model_copy"):
+            output = output.model_copy(update=updates)
+        elif updates and isinstance(output, Mapping):
+            output = {**output, **updates}
+        return output
+
+    async def _propose_bounded_react(
+        self,
+        context: Any,
+        initial_choice: PolicyChoice,
+        legal_choices: tuple[PolicyChoice, ...],
+        supporting: list[str],
+    ) -> Any:
+        """Run a bounded controller-mediated read-only research session."""
+
+        choices_by_id = {choice.choice_id: choice for choice in legal_choices}
+        if initial_choice.choice_id not in choices_by_id:
+            legal_choices = (initial_choice,) + tuple(legal_choices)
+            choices_by_id = {choice.choice_id: choice for choice in legal_choices}
+        observations = []
+        literature = []
+        literature_queries = 0
+        registry = ResearchToolRegistry(context, self.literature_skill)
+        turn_provider = getattr(self.provider, "research_turn")
+        selected_choice = initial_choice
+
+        for turn_index in range(self.research_tool_step_limit + 1):
+            request = ProviderRequest(
+                context=context,
+                policy_choice=selected_choice,
+                input_token_limit=self.input_token_limit,
+                output_token_limit=self.output_token_limit,
+                literature_evidence=tuple(literature),
+                literature_status=(
+                    "available" if literature
+                    else ("unavailable" if self.literature_skill is None else "not_searched")
+                ),
+                observations=tuple(observations),
+                legal_choices=tuple(legal_choices),
+                research_turn_index=turn_index,
+                batch_role=selected_choice.batch_role,
+            )
+            raw_turn = await turn_provider(request)
+            try:
+                turn = ResearchTurn.model_validate(raw_turn)
+            except Exception as error:
+                return self._output(
+                    "blocked",
+                    None,
+                    "MALFORMED_RESEARCH_TURN",
+                    "Bounded research turn was malformed: %s" % str(error)[:300],
+                    supporting,
+                )
+
+            if turn.action == ResearchTurnAction.FINALIZE_PLAN:
+                selected_choice = choices_by_id.get(str(turn.selected_action_id))
+                if selected_choice is None or selected_choice.action != "propose":
+                    return self._output(
+                        "blocked", None, "INVALID_RESEARCH_ACTION",
+                        "The final research decision did not select a controller-approved action.",
+                        supporting,
+                    )
+                if self.literature_required and not literature:
+                    return self._output(
+                        "blocked", None, "LITERATURE_REQUIRED_UNAVAILABLE",
+                        "Required literature evidence was not available for the final plan.",
+                        supporting,
+                    )
+                known_evidence = set(
+                    str(item) for item in (_get(context, "source_event_ids", []) or [])
+                )
+                known_evidence.update(
+                    event_id for observation in observations
+                    for event_id in observation.source_event_ids
+                )
+                if any(event_id not in known_evidence for event_id in turn.evidence_event_ids):
+                    return self._output(
+                        "blocked", None, "INVALID_RESEARCH_EVIDENCE",
+                        "The final research decision cited an event outside the current-run evidence boundary.",
+                        supporting,
+                    )
+                raw_spec = dict(turn.spec or {})
+                if not raw_spec.get("evidence_event_ids"):
+                    raw_spec["evidence_event_ids"] = list(turn.evidence_event_ids)
+                validation_context = context
+                if hasattr(context, "model_copy"):
+                    validation_context = context.model_copy(
+                        update={"source_event_ids": sorted(known_evidence)}
+                    )
+                final_request = request
+                if selected_choice.choice_id != request.policy_choice.choice_id:
+                    final_request = ProviderRequest(
+                        **{**request.__dict__, "policy_choice": selected_choice}
+                    )
+                    normalize = getattr(self.provider, "normalize_candidate", None)
+                    if normalize is not None:
+                        raw_spec = await normalize(raw_spec, final_request)
+                if selected_choice.hypothesis_group_id is not None:
+                    raw_spec.setdefault(
+                        "hypothesis_group_id", selected_choice.hypothesis_group_id
+                    )
+                if selected_choice.batch_role is not None:
+                    raw_spec.setdefault("batch_role", selected_choice.batch_role)
+                result = self.validator.validate(
+                    raw_spec,
+                    validation_context,
+                    choice=selected_choice,
+                    literature_evidence=tuple(literature),
+                )
+                if not result.accepted:
+                    repair = getattr(self.provider, "repair", None)
+                    if repair is not None:
+                        raw_spec = await repair(final_request, result.errors)
+                        result = self.validator.validate(
+                            raw_spec,
+                            validation_context,
+                            choice=selected_choice,
+                            literature_evidence=tuple(literature),
+                        )
+                if not result.accepted:
+                    return self._attach_provider_usage(
+                        self._output(
+                            "blocked", None, "INVALID_PROVIDER_PLAN",
+                            "Bounded research plan failed validation: " + ", ".join(result.errors),
+                            list(dict.fromkeys(supporting + turn.evidence_event_ids)),
+                        ),
+                        include_literature=False,
+                    )
+                spec = raw_spec
+                if hasattr(spec, "model_copy"):
+                    spec = spec.model_copy(update={
+                        "hypothesis_group_id": selected_choice.hypothesis_group_id,
+                        "batch_role": selected_choice.batch_role,
+                    })
+                return self._attach_provider_usage(
+                    self._output(
+                        "propose",
+                        spec,
+                        selected_choice.reason_code,
+                        turn.claim or selected_choice.reason,
+                        list(dict.fromkeys(supporting + turn.evidence_event_ids)),
+                        selected_action_id=selected_choice.choice_id,
+                        confidence=turn.confidence,
+                    ),
+                    include_literature=False,
+                )
+
+            if turn_index >= self.research_tool_step_limit:
+                return self._output(
+                    "blocked", None, "RESEARCH_TOOL_STEP_LIMIT",
+                    "The bounded research loop exhausted its read-only tool budget before finalizing.",
+                    supporting,
+                )
+            if turn.action == ResearchTurnAction.SEARCH_LITERATURE:
+                literature_queries += 1
+                if literature_queries > self.research_literature_max_queries:
+                    return self._output(
+                        "blocked", None, "LITERATURE_QUERY_LIMIT",
+                        "The bounded research loop exceeded its literature-query budget.",
+                        supporting,
+                    )
+            tool_result = await registry.execute(turn)
+            observation = tool_result.observation
+            observations.append(observation)
+            literature.extend(observation.literature_evidence)
+            if self._observation_sink is not None:
+                self._observation_sink(observation)
+
+        return self._output(
+            "blocked", None, "RESEARCH_TOOL_STEP_LIMIT",
+            "The bounded research loop exhausted its read-only tool budget before finalizing.",
+            supporting,
         )

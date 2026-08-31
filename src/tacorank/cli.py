@@ -106,12 +106,19 @@ def _planner_for(config: RunConfig):
             timeout_seconds=config.literature_timeout_seconds,
             max_papers=config.literature_max_papers,
             min_citation_count=config.literature_min_citation_count,
+            total_timeout_seconds=config.literature_total_timeout_seconds,
+            max_attempts=config.literature_max_attempts,
+            min_interval_seconds=config.literature_min_interval_seconds,
         )
     return ResearchPlanner(
         provider,
         input_token_limit=config.context_token_limit,
         output_token_limit=config.deepseek_max_output_tokens,
         literature_skill=literature_skill,
+        research_agent_mode=config.research_agent_mode,
+        research_tool_step_limit=config.research_tool_step_limit,
+        research_literature_max_queries=config.research_literature_max_queries,
+        literature_required=config.literature_required,
     )
 
 

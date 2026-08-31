@@ -13,6 +13,11 @@ class ProviderRequest:
     input_token_limit: int | None = None
     output_token_limit: int | None = None
     literature_evidence: tuple[Any, ...] = ()
+    literature_status: str = "disabled"
+    observations: tuple[Any, ...] = ()
+    legal_choices: tuple[Any, ...] = ()
+    research_turn_index: int = 0
+    batch_role: str | None = None
 
 
 class ResearchProvider(Protocol):
@@ -21,6 +26,9 @@ class ResearchProvider(Protocol):
 
     async def repair(self, request: ProviderRequest, errors: tuple[str, ...]) -> Any:
         """Return one corrected ResearchProposal after a bounded format repair."""
+
+    async def research_turn(self, request: ProviderRequest) -> Any:
+        """Return one typed bounded-research turn, if the mode is enabled."""
 
 
 class ProviderError(RuntimeError):
@@ -50,3 +58,11 @@ class MockResearchProvider:
     async def repair(self, request: ProviderRequest, errors: tuple[str, ...]) -> Any:
         self.repair_requests.append((request, errors))
         return self.response(request) if callable(self.response) else self.response
+
+    async def research_turn(self, request: ProviderRequest) -> Any:
+        self.requests.append(request)
+        response = self.response(request) if callable(self.response) else self.response
+        if isinstance(response, (list, tuple)):
+            index = min(request.research_turn_index, len(response) - 1)
+            return response[index]
+        return response

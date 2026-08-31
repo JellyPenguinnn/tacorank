@@ -58,6 +58,40 @@ def _dot(left: Sequence[float], right: Sequence[float]) -> float:
     return sum(a * b for a, b in zip(left, right))
 
 
+def _experience_reward(summary: Any) -> float | None:
+    """Quality-weighted current-run outcome used for action ranking.
+
+    This is policy improvement from signed observations, not model training or
+    persistent memory. It deliberately learns mechanism/family tendencies and
+    discounts noisy, expensive, fragile wins.
+    """
+
+    delta = _number(get_value(summary, "parent_delta", None))
+    if delta is None:
+        return None
+    reward = delta
+    stderr = _number(get_value(summary, "seed_stderr", None)) or 0.0
+    reward -= min(0.02, stderr)
+    stability = _normalized(get_value(summary, "stability", ""))
+    if stability == "unstable":
+        reward -= 0.004
+    elif stability == "single_seed":
+        reward -= 0.001
+    cost = _normalized(get_value(summary, "actual_cost", "medium"))
+    reward -= {"low": 0.0, "medium": 0.00025, "high": 0.00075}.get(cost, 0.0005)
+    diagnostics = get_value(summary, "diagnostic_metrics", {}) or {}
+    try:
+        fragility = (
+            max(0.0, 0.5 - float(diagnostics.get("user_rankable_fraction", 0.5)))
+            + max(0.0, float(diagnostics.get("gain_concentration_top10pct", 0.0)) - 0.8)
+            + max(0.0, 0.1 - float(diagnostics.get("score_unique_fraction", 0.1)))
+        )
+    except (TypeError, ValueError):
+        fragility = 0.0
+    reward -= min(0.01, fragility * 0.01)
+    return max(-0.1, min(0.1, reward))
+
+
 class LinUCBLegalChoiceRanker:
     """Rank a legal choice set using verified outcomes and uncertainty."""
 
@@ -120,7 +154,7 @@ class LinUCBLegalChoiceRanker:
         )
 
         for summary in history:
-            reward = _number(get_value(summary, "parent_delta", None))
+            reward = _experience_reward(summary)
             if (
                 reward is None
                 or _normalized(get_value(summary, "integrity", None)) != "clean"
@@ -153,8 +187,7 @@ class LinUCBLegalChoiceRanker:
                 quality *= 0.5
             elif stability == "unstable":
                 quality *= 0.25
-            clipped_reward = max(-0.1, min(0.1, reward))
-            weighted_reward = quality * clipped_reward
+            weighted_reward = quality * reward
             for row in range(dimension):
                 reward_vector[row] += weighted_reward * features[row]
                 for column in range(dimension):

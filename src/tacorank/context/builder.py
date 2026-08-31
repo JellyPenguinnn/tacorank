@@ -48,6 +48,9 @@ from ..schemas import (
     PlannerLessonSummary,
     PlannerMethodCardSummary,
     PlannerPlaybookSummary,
+    PlannerFrontierEntry,
+    ResearchObservation,
+    RoundSummary,
     RecoveryContext,
     ResearchProposal,
 )
@@ -135,6 +138,80 @@ def _path_is_within(path: str, root: str) -> bool:
 
 def _code_blind(value: object) -> object:
     return redact_implementation_references(value)
+
+
+def _frontier_entry(role: str, summary: object, reason: str) -> PlannerFrontierEntry:
+    return PlannerFrontierEntry(
+        role=role,
+        experiment_id=str(getattr(summary, "experiment_id", "")),
+        family=getattr(summary, "family", None),
+        score=getattr(summary, "seed_mean", None) or getattr(summary, "primary_score", None),
+        reason=reason,
+        source_event_ids=list(getattr(summary, "supporting_event_ids", ()) or ()),
+    )
+
+
+def _research_frontier(
+    baseline: PlannerExperimentSummary,
+    history: Sequence[PlannerExperimentSummary],
+    epsilon: float,
+) -> List[PlannerFrontierEntry]:
+    """Build advisory winners without changing authoritative best state."""
+
+    measured = [item for item in [baseline, *history] if item.primary_score is not None]
+    if not measured:
+        return []
+    output: List[PlannerFrontierEntry] = []
+    best = max(measured, key=lambda item: float(item.seed_mean if item.seed_mean is not None else item.primary_score))
+    output.append(_frontier_entry("validation_best", best, "highest current-run stable validation score"))
+    for role, names, reason in (
+        ("best_gauc", ("gauc",), "strongest current-run GAUC delta"),
+        ("best_ndcg", ("ndcg@5", "ndcg"), "strongest current-run nDCG delta"),
+    ):
+        candidates = [
+            item for item in history
+            if any(name in {str(key).lower() for key in item.metric_deltas} for name in names)
+        ]
+        if candidates:
+            winner = max(
+                candidates,
+                key=lambda item: max(
+                    float(value)
+                    for key, value in item.metric_deltas.items()
+                    if str(key).lower() in names
+                ),
+            )
+            output.append(_frontier_entry(role, winner, reason))
+    stable = [
+        item for item in history
+        if str(getattr(item.stability, "value", item.stability) or "").lower() == "confirmed"
+        and str(getattr(item.integrity, "value", item.integrity) or "").lower() == "clean"
+    ]
+    if stable:
+        winner = min(stable, key=lambda item: (item.seed_stderr if item.seed_stderr is not None else 1e9, -float(item.seed_mean or item.primary_score or -1e9)))
+        output.append(_frontier_entry("most_stable", winner, "lowest uncertainty among confirmed clean candidates"))
+    diverse = [item for item in history if item.prediction_spearman_vs_parent is not None]
+    if diverse:
+        winner = min(diverse, key=lambda item: abs(float(item.prediction_spearman_vs_parent)))
+        output.append(_frontier_entry("most_diverse", winner, "largest prediction complementarity to its parent"))
+    families = {}
+    for item in history:
+        if item.family:
+            families.setdefault(item.family, []).append(item)
+    for family, candidates in sorted(families.items()):
+        winner = max(candidates, key=lambda item: float(item.seed_mean if item.seed_mean is not None else item.primary_score or -1e9))
+        output.append(_frontier_entry("family_best", winner, "strongest candidate in family %s" % family))
+    for role, predicate, reason in (
+        ("negative", lambda item: (item.parent_delta is not None and item.parent_delta < -epsilon) or str(getattr(item.trust_verdict, "value", item.trust_verdict) or "").lower() == "negative", "negative parent delta or trusted negative verdict"),
+        ("failed", lambda item: str(item.status).lower() in {"invalid", "failed", "rejected"} or bool(item.failure_hypotheses), "failure or invalidity evidence to avoid repeating"),
+    ):
+        candidates = [item for item in history if predicate(item)]
+        if candidates:
+            output.extend(_frontier_entry(role, item, reason) for item in candidates[-3:])
+    unique = {}
+    for item in output:
+        unique.setdefault((item.role, item.experiment_id), item)
+    return list(unique.values())[:24]
 
 
 class ContextBuildError(RuntimeError):
@@ -797,6 +874,9 @@ class ContextBuilder:
         *,
         data_profile: Optional[PlannerDataProfile] = None,
         active_lesson_events: Sequence[Event] = (),
+        research_frontier: Sequence[PlannerFrontierEntry] = (),
+        round_summary: Optional[RoundSummary] = None,
+        research_observations: Sequence[ResearchObservation] = (),
     ) -> Dict[str, object]:
         state = project(events)
         baseline, current_best, eligible_frontier, family_history = (
@@ -928,6 +1008,9 @@ class ContextBuilder:
                 ),
                 full_evaluations_completed=state.full_evaluations_completed,
             ),
+            "research_frontier": list(research_frontier),
+            "round_summary": round_summary,
+            "research_observations": list(research_observations),
         }
 
     def _coder_prior_result_summaries(
@@ -1010,6 +1093,21 @@ class ContextBuilder:
             source_path="research/CURRENT_RUN_IMPROVEMENT_PLAN.md",
         )
         baseline, current_best, _, family_history = self._planner_experiments(visible)
+        research_frontier = _research_frontier(
+            baseline, family_history, self.config.convergence_epsilon
+        )
+        observation_events = [
+            event for event in visible
+            if event.event_type == EventType.RESEARCH_OBSERVATION_RECORDED
+        ]
+        research_observations = [
+            event.payload.observation for event in observation_events[-12:]
+        ]
+        round_events = [
+            event for event in visible
+            if event.event_type == EventType.RESEARCH_ROUND_COMPLETED
+        ]
+        round_summary = round_events[-1].payload.summary if round_events else None
         feedback_by_experiment = {
             summary.experiment_id: summary
             for summary in [baseline, *family_history]
@@ -1055,6 +1153,32 @@ class ContextBuilder:
                 )
             )
         optional: List[Tuple[str, str, str]] = []
+        # These are advisory research memory. Keep them optional in the
+        # rendered artifact so a small historical context budget cannot make
+        # the planner checkpoint impossible; the typed fields remain available
+        # to the bounded provider/tool boundary.
+        optional.append(
+            (
+                "research:frontier",
+                "Current-run research frontier",
+                compact_json([item.model_dump(mode="json") for item in research_frontier]),
+            )
+        )
+        optional.append(
+            (
+                "research:observations",
+                "Current-run research observations",
+                compact_json([item.model_dump(mode="json") for item in research_observations]),
+            )
+        )
+        if round_summary is not None:
+            optional.append(
+                (
+                    "research:round",
+                    "Previous adaptive round summary",
+                    compact_json(round_summary.model_dump(mode="json")),
+                )
+            )
         if current_best is not None:
             optional.append(
                 (
@@ -1140,6 +1264,9 @@ class ContextBuilder:
                     for event in lesson_events
                     if event.event_id in included
                 ],
+                research_frontier=research_frontier,
+                round_summary=round_summary,
+                research_observations=research_observations,
             ),
         )
 
