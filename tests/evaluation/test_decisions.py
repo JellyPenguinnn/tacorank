@@ -26,6 +26,7 @@ def result(
     seed_mean=0.61,
     integrity=Integrity.CLEAN,
     flags=(),
+    parent_delta=0.01,
 ):
     metric_set = MetricSet(
         {"GAUC": current_primary, "nDCG@5": current_primary},
@@ -48,7 +49,10 @@ def result(
         fidelity, 0, 1, "a" * 64, "b" * 64, "c" * 64,
         metric_set,
         MetricDelta(0.01, {"GAUC": 0.01, "nDCG@5": 0.01}),
-        MetricDelta(0.01, {"GAUC": 0.01, "nDCG@5": 0.01}),
+        MetricDelta(
+            parent_delta,
+            {"GAUC": parent_delta, "nDCG@5": parent_delta},
+        ),
         MetricDelta(best_delta, {"GAUC": best_delta, "nDCG@5": best_delta}),
         PredictionChange(0.5, 1.0, 0.0, 1.0),
         trust,
@@ -81,6 +85,25 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(decision.next_fidelity, Fidelity.FULL)
         self.assertFalse(decision.parent_eligible)
         self.assertFalse(decision.best_eligible)
+
+    def test_non_positive_proxy_within_noise_is_pruned(self):
+        decision = decide(
+            result(
+                Verdict.INCONCLUSIVE,
+                Stability.NOT_APPLICABLE,
+                fidelity=Fidelity.PROXY,
+                flags=("WITHIN_NOISE",),
+                parent_delta=-0.0002,
+            ),
+            CTX,
+        )
+
+        self.assertEqual(decision.decision, Decision.PRUNE)
+        self.assertEqual(
+            decision.reason_code,
+            "PROXY_NON_POSITIVE_WITHIN_NOISE",
+        )
+        self.assertIsNone(decision.next_fidelity)
 
     def test_other_inconclusive_proxy_does_not_bypass_integrity_gate(self):
         decision = decide(
@@ -161,6 +184,46 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(decision.decision, Decision.REJECT)
         self.assertEqual(decision.reason_code, "WITHIN_NOISE")
         self.assertFalse(decision.parent_eligible)
+
+    def test_confirmed_no_gain_result_is_not_an_exploratory_parent(self):
+        decision = decide(
+            result(
+                Verdict.INCONCLUSIVE,
+                Stability.CONFIRMED,
+                best_delta=0.0003,
+                current_primary=0.6018,
+                seed_mean=0.6018,
+                flags=("WITHIN_NOISE",),
+                parent_delta=0.0,
+            ),
+            CTX,
+        )
+
+        self.assertEqual(decision.decision, Decision.REJECT)
+        self.assertEqual(decision.reason_code, "WITHIN_NOISE")
+        self.assertFalse(decision.parent_eligible)
+
+    def test_confirmed_tiny_positive_gain_can_be_exploratory_parent(self):
+        decision = decide(
+            result(
+                Verdict.INCONCLUSIVE,
+                Stability.CONFIRMED,
+                best_delta=0.0003,
+                current_primary=0.6018,
+                seed_mean=0.60180001,
+                flags=("WITHIN_NOISE",),
+                parent_delta=0.0,
+            ),
+            CTX,
+        )
+
+        self.assertEqual(decision.decision, Decision.ACCEPT)
+        self.assertEqual(
+            decision.reason_code,
+            "EXPLORATORY_PARENT_WITHIN_TOLERANCE",
+        )
+        self.assertTrue(decision.parent_eligible)
+        self.assertFalse(decision.best_eligible)
 
     def test_confirmed_decision_compares_aggregate_seed_mean_to_best(self):
         confirmed = result(

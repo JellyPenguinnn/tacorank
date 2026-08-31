@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
+from pathlib import Path
 from urllib.error import HTTPError
 
 import pytest
@@ -14,6 +16,7 @@ from tacorank.providers.deepseek import DeepSeekResearchProvider
 from tacorank.providers.research_provider import ProviderError, ProviderRequest
 from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.research.literature import OpenAlexLiteratureSkill
+from tacorank.research.paper_bank import PaperBankLiteratureSkill
 from tacorank.research.search_policy import SearchPolicy
 from tacorank.schemas import LiteratureEvidence, ResearchProposal, TokenMeasurement
 
@@ -273,6 +276,36 @@ def test_deepseek_provider_grounds_plan_in_retrieved_literature(planner_context)
     assert "lit_invented_id" not in json.dumps(result)
 
 
+def test_deepseek_provider_exposes_bank_papers_as_advisory(planner_context):
+    calls = []
+    evidence = literature_evidence().model_copy(
+        update={"provider": "paper_bank", "evidence_id": "bank_reference_001"}
+    )
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, timeout
+        calls.append(payload)
+        return response(candidate(literature_evidence_ids=[]))
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(
+            ProviderRequest(
+                planner_context,
+                choice,
+                literature_evidence=(evidence,),
+                literature_required=False,
+            )
+        )
+    )
+
+    prompt = json.loads(calls[0]["messages"][1]["content"])
+    assert prompt["literature_research"]["required"] is False
+    assert prompt["literature_research"]["advisory"] is True
+    assert result["literature_evidence"] == []
+
+
 def test_deepseek_provider_preserves_policy_owned_ensemble_components(
     planner_context,
 ):
@@ -286,8 +319,8 @@ def test_deepseek_provider_preserves_policy_owned_ensemble_components(
         parent_eligible=False,
         trust_verdict="negative",
         stability="not_applicable",
-        parent_delta=-0.004,
-        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
+        parent_delta=-0.001,
+        metric_deltas={"GAUC": -0.0008, "nDCG@5": -0.0012},
         prediction_change=0.8,
         prediction_spearman_vs_parent=0.6,
         method_card_ids=["temporal_history_compact"],
@@ -509,6 +542,26 @@ def test_cli_enables_keyless_openalex_skill(config, monkeypatch):
     assert isinstance(planner.literature_skill, OpenAlexLiteratureSkill)
     serialized_config = json.dumps(configured.canonical_dict(), sort_keys=True)
     assert "secret-key" not in serialized_config
+
+
+def test_cli_enables_hash_bound_advisory_paper_bank(config, monkeypatch):
+    source = Path(__file__).parents[2] / "research" / "paper_bank.json"
+    target = config.repository_root / "research" / "paper_bank.json"
+    target.write_bytes(source.read_bytes())
+    configured = config.model_copy(
+        update={
+            "research_provider": "deepseek",
+            "literature_research_enabled": True,
+            "literature_provider": "paper_bank",
+            "literature_bank_sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+        }
+    )
+    monkeypatch.setenv(configured.deepseek_api_key_env, "secret-key")
+
+    planner = _planner_for(configured)
+
+    assert isinstance(planner.literature_skill, PaperBankLiteratureSkill)
+    assert planner.literature_skill.requires_citation is False
 
 
 def test_cli_fails_closed_when_deepseek_key_is_missing(config, monkeypatch):

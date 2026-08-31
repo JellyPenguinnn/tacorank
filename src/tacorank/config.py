@@ -178,13 +178,15 @@ class RunConfig(StrictModel):
     deepseek_reasoning_effort: Literal["low", "high", "max"] = "high"
     # Historical run configs omit these fields and therefore keep the old
     # offline-only planner behavior. New setup-live deployments explicitly
-    # enable the bounded online literature skill.
+    # enable the hash-bound advisory paper bank.
     literature_research_enabled: bool = False
-    literature_provider: Literal["openalex"] = "openalex"
+    literature_provider: Literal["openalex", "paper_bank"] = "openalex"
     literature_base_url: NonEmptyStr = "https://api.openalex.org"
     literature_timeout_seconds: int = Field(default=20, gt=0, le=120)
-    literature_max_papers: int = Field(default=3, gt=0, le=5)
+    literature_max_papers: int = Field(default=3, gt=0, le=8)
     literature_min_citation_count: int = Field(default=5, ge=0)
+    literature_bank_path: str = "research/paper_bank.json"
+    literature_bank_sha256: Optional[str] = None
 
     @field_validator("run_id")
     @classmethod
@@ -193,7 +195,9 @@ class RunConfig(StrictModel):
 
         return _validate_id(value, "run_id")
 
-    @field_validator("contract_path", "protected_paths_path")
+    @field_validator(
+        "contract_path", "protected_paths_path", "literature_bank_path"
+    )
     @classmethod
     def validate_relative_config_paths(cls, value: str) -> str:
         return normalize_relative_path(value)
@@ -239,6 +243,14 @@ class RunConfig(StrictModel):
             raise ValueError("allowed_research_families must not be empty")
         if not self.allowed_research_data:
             raise ValueError("allowed_research_data must not be empty")
+        if (
+            self.literature_research_enabled
+            and self.literature_provider == "paper_bank"
+            and self.literature_bank_sha256 is None
+        ):
+            raise ValueError(
+                "enabled paper_bank literature requires literature_bank_sha256"
+            )
         return self
 
     @field_validator("target_interface_excerpts")
@@ -268,6 +280,13 @@ class RunConfig(StrictModel):
     def validate_optional_live_config_hash(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and not SHA256_RE.fullmatch(value):
             raise ValueError("live_adapter_config_sha256 must be lowercase sha256")
+        return value
+
+    @field_validator("literature_bank_sha256")
+    @classmethod
+    def validate_optional_paper_bank_hash(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not SHA256_RE.fullmatch(value):
+            raise ValueError("literature_bank_sha256 must be lowercase sha256")
         return value
 
     @field_validator("deepseek_base_url")

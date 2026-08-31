@@ -20,6 +20,7 @@ def _paper(
     *,
     citations: int = 20,
     abstract: str = "Pairwise ranking optimizes relative preference ordering.",
+    title: str = "A paper-backed recommender method",
 ):
     inverted = {
         token: [index]
@@ -28,7 +29,7 @@ def _paper(
     return {
         "id": "https://openalex.org/" + paper_id,
         "doi": "https://doi.org/10.0000/" + paper_id.lower(),
-        "title": "A paper-backed recommender method",
+        "title": title,
         "abstract_inverted_index": inverted,
         "publication_year": 2024,
         "authorships": [
@@ -66,7 +67,7 @@ def test_openalex_skill_queries_selected_method_and_bounds_evidence(
     evidence = asyncio.run(skill.research(planner_context, choice))
 
     assert [item.paper_id for item in evidence] == ["W200", "W300"]
-    assert all(item.query.startswith("Bayesian personalized ranking") for item in evidence)
+    assert all(item.query.startswith("Bayesian Personalized Ranking") for item in evidence)
     assert all(item.provider == "openalex" for item in evidence)
     assert evidence[0].abstract == (
         "Pairwise ranking optimizes relative preference ordering."
@@ -76,10 +77,9 @@ def test_openalex_skill_queries_selected_method_and_bounds_evidence(
     query = parse_qs(urlparse(url).query)
     assert urlparse(url).path == "/works"
     assert query["search"] == [
-        "Bayesian personalized ranking pairwise learning to rank recommender "
-        "systems implicit feedback"
+        "Bayesian Personalized Ranking BPR pairwise recommender implicit feedback"
     ]
-    assert query["per-page"] == ["10"]
+    assert query["per-page"] == ["20"]
     assert "abstract_inverted_index" in query["select"][0]
     assert "x-api-key" not in headers
     assert timeout == 20
@@ -94,10 +94,36 @@ def test_openalex_skill_fails_closed_without_usable_paper(planner_context):
         },
     )
 
-    with pytest.raises(LiteratureResearchError, match="no usable cited papers"):
+    with pytest.raises(
+        LiteratureResearchError,
+        match="no usable relevant cited papers",
+    ):
         asyncio.run(
             skill.research(planner_context, SearchPolicy().choose(planner_context))
         )
+
+
+def test_openalex_skill_rejects_highly_cited_irrelevant_paper(planner_context):
+    skill = OpenAlexLiteratureSkill(
+        max_papers=1,
+        transport=lambda url, headers, timeout: {
+            "results": [
+                _paper(
+                    "W100",
+                    citations=10_000,
+                    title="A survey of biodiversity metrics",
+                    abstract="Ecological diversity is measured across forest habitats.",
+                ),
+                _paper("W200", citations=20),
+            ]
+        },
+    )
+
+    evidence = asyncio.run(
+        skill.research(planner_context, SearchPolicy().choose(planner_context))
+    )
+
+    assert [item.paper_id for item in evidence] == ["W200"]
 
 
 def test_openalex_preflight_requires_search_collection():

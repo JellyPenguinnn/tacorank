@@ -19,11 +19,11 @@ def test_policy_starts_score_guided_depth_first_from_baseline(planner_context):
 
 
 def test_parallel_direction_is_indexed_and_legal(planner_context):
-    choice = SearchPolicy().choose_parallel_direction(planner_context, 0, 7)
+    choice = SearchPolicy().choose_parallel_direction(planner_context, 0, 2)
 
     assert choice.action == "propose"
-    assert choice.phase == "parallel_round"
-    assert choice.reason_code == "PARALLEL_DIRECTION_1_OF_7"
+    assert choice.phase == "depth"
+    assert choice.reason_code == "SCORE_GUIDED_DEPTH_FIRST"
     assert choice.parent.experiment_id == "exp_0000"
     assert choice.method_card_id == "objective_pairwise_bpr"
 
@@ -51,6 +51,42 @@ def test_parallel_directions_use_distinct_eligible_method_cards(planner_context)
 
     assert capacity >= 7
     assert len(identities) == capacity
+
+
+def test_parallel_round_repeats_only_the_policy_routed_method(planner_context):
+    policy = SearchPolicy()
+    root = planner_context.baseline
+    improved = make_summary(
+        "exp_0001",
+        parent_experiment_id=root.experiment_id,
+        commit_sha="b" * 40,
+        family="objective",
+        score=0.61,
+        parent_eligible=True,
+        parent_delta=0.003,
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    context_values = vars(planner_context).copy()
+    context_values.update(
+        current_best=improved,
+        eligible_frontier=[root, improved],
+        family_history=[improved],
+    )
+    context = SimpleNamespace(**context_values)
+
+    capacity = policy.parallel_direction_capacity(context)
+    choices = [
+        policy.choose_parallel_direction(context, index, capacity)
+        for index in range(capacity)
+    ]
+    methods = [choice.method_card_id for choice in choices]
+
+    assert methods[0] == "objective_pairwise_bpr"
+    assert methods.count("objective_pairwise_bpr") == 1
+    assert all(
+        choice.reason_code == "PARALLEL_GLOBALLY_UNTRIED_METHOD"
+        for choice in choices[1:]
+    )
 
 
 def test_synthesis_uses_strongest_confirmed_member_and_all_others(
@@ -596,8 +632,8 @@ def test_soft_diverse_result_can_enter_bounded_ensemble_test(planner_context):
         parent_eligible=False,
         trust_verdict="negative",
         stability="not_applicable",
-        parent_delta=-0.004,
-        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
+        parent_delta=-0.001,
+        metric_deltas={"GAUC": -0.0008, "nDCG@5": -0.0012},
         prediction_change=0.8,
         prediction_spearman_vs_parent=0.6,
         method_card_ids=["temporal_history_compact"],
@@ -625,8 +661,8 @@ def test_soft_full_result_can_enter_bounded_ensemble_test(planner_context):
         parent_eligible=False,
         trust_verdict="negative",
         stability="single_seed",
-        parent_delta=-0.004,
-        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
+        parent_delta=-0.001,
+        metric_deltas={"GAUC": -0.0008, "nDCG@5": -0.0012},
         prediction_change=0.8,
         prediction_spearman_vs_parent=0.6,
         method_card_ids=["temporal_history_compact"],

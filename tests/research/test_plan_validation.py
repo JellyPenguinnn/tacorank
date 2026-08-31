@@ -110,9 +110,9 @@ def test_validator_accepts_soft_component_for_bounded_ensemble(planner_context):
         highest_completed_fidelity="proxy",
         population="internal_proxy",
         output_accepted=True,
-        primary_score=0.5906,
-        metric_deltas={"GAUC": -0.003, "nDCG@5": -0.005},
-        parent_delta=-0.004,
+        primary_score=0.5936,
+        metric_deltas={"GAUC": -0.0008, "nDCG@5": -0.0012},
+        parent_delta=-0.001,
         prediction_change=0.8,
         prediction_spearman_vs_parent=0.6,
         child_count=0,
@@ -542,6 +542,26 @@ def test_validator_requires_retrieved_literature_in_proposal(planner_context):
 
     assert not result.accepted
     assert "LITERATURE_EVIDENCE_REQUIRED" in result.errors
+
+
+def test_validator_allows_advisory_literature_to_go_uncited(planner_context):
+    evidence = _paper_evidence()
+    result = PlanValidator().validate(
+        make_spec(planner_context),
+        planner_context,
+        literature_evidence=[evidence],
+        literature_required=False,
+    )
+    tampered = evidence.model_copy(update={"title": "Invented stronger result"})
+    tampered_result = PlanValidator().validate(
+        make_spec(planner_context, literature_evidence=[tampered]),
+        planner_context,
+        literature_evidence=[evidence],
+        literature_required=False,
+    )
+
+    assert result.accepted, result.errors
+    assert "LITERATURE_EVIDENCE_TAMPERED" in tampered_result.errors
 
 
 def test_validator_accepts_exact_retrieved_literature_snapshot(planner_context):

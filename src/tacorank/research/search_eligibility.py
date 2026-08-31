@@ -60,10 +60,10 @@ def classify_search_eligibility(summary: Any, context: Any) -> SearchEligibility
     """Classify a verified summary without altering its canonical decision.
 
     A soft-pruned result must be clean, meaningfully different, and either
-    close to its parent or exhibit a component-metric trade-off.  The score
-    floor is deliberately bounded by the larger of five contract epsilons and
-    one absolute primary-score point.  This keeps severe regressions out of
-    both refinement and ensemble search.
+    close to its parent or exhibit a component-metric trade-off. The portfolio
+    score floor is one contract epsilon below the parent. Results beyond that
+    bound are retired even when their prediction residual is diverse, avoiding
+    extra refinement or ensemble work on clearly losing mechanisms.
     """
 
     contract = get_value(context, "contract_summary", None)
@@ -73,7 +73,7 @@ def classify_search_eligibility(summary: Any, context: Any) -> SearchEligibility
         get_value(contract, "prediction_change_no_op_threshold", 0.001)
     )
     no_op_threshold = 0.001 if no_op_threshold is None else no_op_threshold
-    severe_regression = max(5.0 * epsilon, 0.01)
+    portfolio_regression_limit = epsilon
 
     output_accepted = get_value(summary, "output_accepted", None)
     verdict = _normalized(get_value(summary, "trust_verdict", None))
@@ -126,7 +126,10 @@ def classify_search_eligibility(summary: Any, context: Any) -> SearchEligibility
         hard_reasons.append("UNSTABLE")
     if status in {"invalid", "retracted", "suspicious"} or decision == "invalid":
         hard_reasons.append("INVALID_OR_RETRACTED")
-    if parent_delta is not None and parent_delta < -severe_regression:
+    if (
+        parent_delta is not None
+        and parent_delta < -portfolio_regression_limit
+    ):
         hard_reasons.append("SEVERE_PRIMARY_REGRESSION")
     if hard_reasons:
         return SearchEligibility(
@@ -175,7 +178,7 @@ def classify_search_eligibility(summary: Any, context: Any) -> SearchEligibility
         and ndcg is not None
         and ((gauc > epsilon and ndcg < -epsilon) or (ndcg > epsilon and gauc < -epsilon))
     )
-    close_to_parent = parent_delta >= -severe_regression
+    close_to_parent = parent_delta >= -portfolio_regression_limit
     if not (close_to_parent or metric_tradeoff):
         return SearchEligibility(
             False,

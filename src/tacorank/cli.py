@@ -26,6 +26,7 @@ from .providers import DeepSeekResearchProvider, ProviderError
 from .reporting import rebuild_views, runtime_status
 from .research.eda import PlannerEdaToolbox
 from .research.literature import OpenAlexLiteratureSkill
+from .research.paper_bank import PaperBankLiteratureSkill
 from .run_layout import RunLayout
 from .schemas import EvaluationResult
 
@@ -100,12 +101,21 @@ def _planner_for(config: RunConfig):
     )
     literature_skill = None
     if config.literature_research_enabled:
-        literature_skill = OpenAlexLiteratureSkill(
-            base_url=config.literature_base_url,
-            timeout_seconds=config.literature_timeout_seconds,
-            max_papers=config.literature_max_papers,
-            min_citation_count=config.literature_min_citation_count,
-        )
+        if config.literature_provider == "paper_bank":
+            if config.literature_bank_sha256 is None:
+                raise ProviderError("paper bank literature hash is missing")
+            literature_skill = PaperBankLiteratureSkill(
+                bank_path=config.repository_root / config.literature_bank_path,
+                expected_sha256=config.literature_bank_sha256,
+                max_papers=config.literature_max_papers,
+            )
+        else:
+            literature_skill = OpenAlexLiteratureSkill(
+                base_url=config.literature_base_url,
+                timeout_seconds=config.literature_timeout_seconds,
+                max_papers=config.literature_max_papers,
+                min_citation_count=config.literature_min_citation_count,
+            )
     return ResearchPlanner(
         provider,
         input_token_limit=config.context_token_limit,

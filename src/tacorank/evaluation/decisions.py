@@ -67,6 +67,16 @@ def decide(
             and trust.integrity == Integrity.CLEAN
             and "WITHIN_NOISE" in trust.flags
         ):
+            if result.parent_delta.primary <= 0.0:
+                return _decision(
+                    result,
+                    context,
+                    Decision.PRUNE,
+                    "PROXY_NON_POSITIVE_WITHIN_NOISE",
+                    False,
+                    False,
+                    None,
+                )
             return _decision(
                 result,
                 context,
@@ -152,8 +162,15 @@ def decide(
         current_best = (
             result.metric_set.primary_score - result.previous_best_delta.primary
         )
+        parent_primary = (
+            result.metric_set.primary_score - result.parent_delta.primary
+        )
+        aggregate_parent_delta = trust.seed_mean - parent_primary
         eta = trust.eta_applied or 0.0
-        if trust.seed_mean >= current_best - eta:
+        if (
+            aggregate_parent_delta > 0.0
+            and trust.seed_mean >= current_best - eta
+        ):
             return _decision(
                 result,
                 context,
