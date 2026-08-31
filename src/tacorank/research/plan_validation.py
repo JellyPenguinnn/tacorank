@@ -153,6 +153,7 @@ class PlanValidator:
         choice: Any | None = None,
         duplicate_detector: DuplicateDetector | None = None,
         literature_evidence: Sequence[Any] = (),
+        literature_required: bool | None = None,
     ) -> ValidationResult:
         errors: list[str] = []
         warnings: list[str] = []
@@ -402,7 +403,12 @@ class PlanValidator:
         proposed_literature = as_list(
             get_value(spec, "literature_evidence", None)
         )
-        if available_literature and not proposed_literature:
+        require_literature = (
+            bool(available_literature)
+            if literature_required is None
+            else literature_required
+        )
+        if require_literature and available_literature and not proposed_literature:
             errors.append("LITERATURE_EVIDENCE_REQUIRED")
         proposed_literature_ids = [
             str(get_value(item, "evidence_id", ""))

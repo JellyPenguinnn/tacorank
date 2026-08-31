@@ -80,6 +80,27 @@ def setup_trae_deployment(
     docker_host = _discover_docker_host(docker, root)
     _require_python312(python)
     _require_clean_tracked_checkout(root)
+    paper_bank_path = root / "research" / "paper_bank.json"
+    if paper_bank_path.is_symlink() or not paper_bank_path.is_file():
+        raise DeploymentError(
+            "research/paper_bank.json must be a regular non-symlinked file"
+        )
+    try:
+        _run_output(
+            (
+                "git",
+                "ls-files",
+                "--error-unmatch",
+                "research/paper_bank.json",
+            ),
+            cwd=root,
+            label="Paper bank tracking verification",
+        )
+    except DeploymentError as exc:
+        raise DeploymentError(
+            "research/paper_bank.json must be tracked by the source commit"
+        ) from exc
+    paper_bank_sha256 = _sha256_file(paper_bank_path)
     _run(
         ("git", "submodule", "update", "--init", "--recursive"),
         cwd=root,
@@ -323,11 +344,13 @@ def setup_live_deployment(
         "deepseek_thinking_enabled": True,
         "deepseek_reasoning_effort": "high",
         "literature_research_enabled": True,
-        "literature_provider": "openalex",
+        "literature_provider": "paper_bank",
         "literature_base_url": "https://api.openalex.org",
         "literature_timeout_seconds": 20,
-        "literature_max_papers": 3,
+        "literature_max_papers": 6,
         "literature_min_citation_count": 5,
+        "literature_bank_path": "research/paper_bank.json",
+        "literature_bank_sha256": paper_bank_sha256,
     }
     _write_json_exclusive(run_path, run_payload)
     return {

@@ -9,6 +9,7 @@ from .literature import (
     LiteratureResearchSkill,
     OpenAlexLiteratureSkill,
 )
+from .paper_bank import PaperBankLiteratureSkill
 from .convergence_advisor import ConvergenceAdvice, ConvergenceAdvisor
 from .plan_validation import PlanValidator, ValidationResult
 from .portfolio import ExperimentPortfolio, MethodCard, default_portfolio
@@ -38,6 +39,7 @@ __all__ = [
     "SearchEligibility",
     "SearchPolicy",
     "OpenAlexLiteratureSkill",
+    "PaperBankLiteratureSkill",
     "ValidationResult",
     "compute_duplicate_key",
     "classify_search_eligibility",

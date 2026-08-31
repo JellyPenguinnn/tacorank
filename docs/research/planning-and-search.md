@@ -15,12 +15,15 @@ remain with the outer harness and evaluation owners.
 2. `ConvergenceAdvisor` checks only advisory budget/patience conditions.
 3. `SearchPolicy` creates a transient `GraphView`, applies the authoritative
    branch/refinement/ensemble portfolios, and chooses one legal search action.
-4. `ResearchProvider` receives one bounded structured request and may make one
+4. The hash-bound local paper bank selects a small method-relevant set of
+   advisory references. The planner may cite zero or more of them; any cited
+   record must match the supplied immutable snapshot exactly.
+5. `ResearchProvider` receives one bounded structured request and may make one
    format-repair call.
-5. `PlanValidator` checks research identity and policy, evidence citations,
+6. `PlanValidator` checks research identity and policy, any evidence citations,
    duplicate identity, hidden-data references, cost budgets, and the absence of
    code-specific instructions.
-6. The planner returns exactly one `ResearchProposal`, an advisory stop, or a
+7. The planner returns exactly one `ResearchProposal`, an advisory stop, or a
    blocked result. The controller then binds the authorized code target and
    execution ladder into an `ExperimentSpec` for the coder. The harness owns
    event logging and all subsequent gates.
@@ -128,6 +131,7 @@ distinct identity.
 - `research.portfolio` and `research.method_cards`: documented method cards;
 - `research.duplicate_detection`: stable duplicate identity;
 - `research.plan_validation`: pure proposal validator;
+- `research.paper_bank`: deterministic retrieval from the frozen 70-paper bank;
 - `agents.research_planner`: bounded provider adapter;
 - `providers.research_provider`: provider protocol and test double.
 

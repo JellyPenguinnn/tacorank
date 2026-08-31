@@ -159,6 +159,10 @@ class LiteratureResearchError(RuntimeError):
 
 class LiteratureResearchSkill(Protocol):
     @property
+    def requires_citation(self) -> bool:
+        """Return whether a proposal must cite at least one returned paper."""
+
+    @property
     def resource_delta(self) -> ResourceDelta:
         """Return resources consumed by the most recent research call."""
 
@@ -279,8 +283,8 @@ class OpenAlexLiteratureSkill:
     ):
         if timeout_seconds <= 0:
             raise ValueError("literature timeout must be positive")
-        if not 1 <= max_papers <= 5:
-            raise ValueError("literature max_papers must be between one and five")
+        if not 1 <= max_papers <= 8:
+            raise ValueError("literature max_papers must be between one and eight")
         if min_citation_count < 0:
             raise ValueError("literature min_citation_count must be non-negative")
         self.base_url = base_url.rstrip("/")
@@ -293,6 +297,10 @@ class OpenAlexLiteratureSkill:
     @property
     def resource_delta(self) -> ResourceDelta:
         return ResourceDelta(wall_time_ms=self._wall_time_ms)
+
+    @property
+    def requires_citation(self) -> bool:
+        return True
 
     def _headers(self) -> dict[str, str]:
         return {"Accept": "application/json", "User-Agent": "TacoRank/1.0"}
