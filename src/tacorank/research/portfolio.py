@@ -19,6 +19,7 @@ HIGH_VALUE_FAMILIES: tuple[str, ...] = (
 )
 
 ALL_FAMILIES: tuple[str, ...] = HIGH_VALUE_FAMILIES + (
+    "composition",
     "sampling",
     "ensemble",
     "evaluation",
@@ -26,6 +27,86 @@ ALL_FAMILIES: tuple[str, ...] = HIGH_VALUE_FAMILIES + (
 )
 METHOD_STATUSES = {"candidate", "blocked", "known_negative", "forbidden"}
 METHOD_COST_TIERS = {"low", "medium", "high"}
+
+# Composition is deliberately expressed as compatibility slots instead of a
+# Cartesian product.  Methods in one alternative slot replace one another;
+# methods in different additive slots may be carried into one candidate when
+# their prerequisites are satisfied.  The planner and validator both consume
+# this catalog so the policy cannot silently turn an incompatible collection of
+# cards into one edit.
+COMPOSITION_METHOD_GROUPS: dict[str, tuple[str, ...]] = {
+    "primary_objective": (
+        "objective_pairwise_bpr",
+        "objective_weighted_cross_entropy",
+        "objective_listwise_user_softmax",
+    ),
+    "distillation_objective": ("objective_distill_softmax",),
+    "loss_aligned_feature_refinement": ("objective_loss_aligned_features",),
+    "feature_residual": (
+        "features_general_bounded_engineering",
+        "features_tab_context_residual",
+        "features_author_affinity_past_only",
+        "temporal_drift_past_only",
+    ),
+    "interest_encoder": (
+        "temporal_search_interest_model",
+        "temporal_deep_interest_network",
+        "temporal_time_series_interest",
+        "temporal_history_compact",
+    ),
+    "single_task_backbone": (
+        "model_deep_cross_network",
+        "model_compact_ranker",
+        "model_field_aware_fm",
+    ),
+    "hidden_unit_adapter": ("model_lhuc",),
+    "multitask_backbone": (
+        "multitask_ple",
+        "multitask_mmoe",
+        "multitask_esu",
+        "multitask_gsu",
+        "multitask_shared_bottom",
+        "multitask_single_auxiliary",
+    ),
+    "duration_residual": ("duration_bias_censored_watch_time",),
+    "training_sampler": ("sampling_deterministic_coverage",),
+    "posthoc_ensemble": (
+        "ensemble_parallel_round_synthesis",
+        "ensemble_diverse_residual_candidate",
+        "ensemble_confirmed_members",
+    ),
+    "diagnostic_only": ("evaluation_random_exposure_robustness",),
+}
+
+COMPOSITION_PRIMARY_OBJECTIVES = frozenset(
+    COMPOSITION_METHOD_GROUPS["primary_objective"]
+)
+COMPOSITION_DISTILLATION_OBJECTIVES = frozenset(
+    COMPOSITION_METHOD_GROUPS["distillation_objective"]
+)
+COMPOSITION_LOSS_ALIGNED_REFINEMENTS = frozenset(
+    COMPOSITION_METHOD_GROUPS["loss_aligned_feature_refinement"]
+)
+COMPOSITION_FEATURE_METHODS = frozenset(
+    COMPOSITION_METHOD_GROUPS["feature_residual"]
+)
+COMPOSITION_INTEREST_METHODS = frozenset(
+    COMPOSITION_METHOD_GROUPS["interest_encoder"]
+)
+COMPOSITION_SINGLE_TASK_BACKBONES = frozenset(
+    COMPOSITION_METHOD_GROUPS["single_task_backbone"]
+)
+COMPOSITION_HIDDEN_UNIT_ADAPTERS = frozenset(
+    COMPOSITION_METHOD_GROUPS["hidden_unit_adapter"]
+)
+COMPOSITION_MULTITASK_BACKBONES = frozenset(
+    COMPOSITION_METHOD_GROUPS["multitask_backbone"]
+)
+COMPOSITION_OPTIONAL_ADDONS = frozenset(
+    COMPOSITION_METHOD_GROUPS["duration_residual"]
+    + COMPOSITION_METHOD_GROUPS["training_sampler"]
+)
+COMPOSITION_MAX_METHODS = 12
 
 
 @dataclass(frozen=True)

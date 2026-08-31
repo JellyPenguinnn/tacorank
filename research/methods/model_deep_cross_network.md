@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"model_deep_cross_network","family":"model","status":"candidate","tags":["dcn","cross_network","deep_ranker"],"cost_tier":"high","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view"],"prohibition_conditions":["baseline_or_objective_unresolved"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"model_deep_cross_network","family":"model","status":"candidate","tags":["dcn","cross_network","deep_ranker"],"cost_tier":"high","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view"],"prohibition_conditions":["baseline_or_objective_unresolved"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":["https://arxiv.org/abs/1708.05123"]}
 ```
 
 ## Mechanism
@@ -33,4 +33,5 @@ deterministic training and exact parent fallback.
 
 ## Sources
 
-No external source required for the bounded trial.
+[Deep & Cross Network](https://arxiv.org/abs/1708.05123) is the primary
+directional source for bounded explicit feature crosses.

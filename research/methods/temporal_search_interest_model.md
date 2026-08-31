@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"temporal_search_interest_model","family":"temporal_history","status":"candidate","tags":["sim","long_term_interest","temporal"],"cost_tier":"high","prerequisites":["baseline_parity","strict_temporal_cutoff"],"allowed_data":["train_interactions","date","user_id","video_id","author_id","long_view"],"prohibition_conditions":["unreliable_event_ordering","future_aggregate_required"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/inference.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"temporal_search_interest_model","family":"temporal_history","status":"candidate","tags":["sim","long_term_interest","temporal"],"cost_tier":"high","prerequisites":["baseline_parity","strict_temporal_cutoff"],"allowed_data":["train_interactions","date","user_id","video_id","author_id","long_view"],"prohibition_conditions":["unreliable_event_ordering","future_aggregate_required"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/inference.py"],"sources":["https://arxiv.org/abs/2006.05639"]}
 ```
 
 ## Mechanism
@@ -35,4 +35,5 @@ for unsupported histories.
 
 ## Sources
 
-No external source required for the bounded trial.
+[Search-based Interest Model](https://arxiv.org/abs/2006.05639) is the
+primary directional source for general-search and exact-search interest units.

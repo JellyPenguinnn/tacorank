@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"model_compact_ranker","family":"model","status":"candidate","tags":["deepfm","dcn","model"],"cost_tier":"high","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["baseline_or_objective_unresolved"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"model_compact_ranker","family":"model","status":"candidate","tags":["deepfm","dcn","model"],"cost_tier":"high","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view","verified_predictions"],"prohibition_conditions":["baseline_or_objective_unresolved"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":["https://arxiv.org/abs/1703.04247"]}
 ```
 
 ## Mechanism
@@ -38,4 +38,5 @@ combined score.
 
 ## Sources
 
-No external source required for the bounded trial.
+[DeepFM](https://arxiv.org/abs/1703.04247) is the primary directional source
+for the compact interaction-learning alternative.

@@ -1568,6 +1568,8 @@ class PlannerContractSummary(StrictModel):
     evaluator_sha256: str
     epsilon: float = Field(default=0.0, ge=0.0)
     prediction_change_no_op_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+    aggressive_composition_enabled: bool = False
+    max_composed_methods: int = Field(default=12, ge=2, le=12)
 
     @field_validator("data_manifest_sha256", "evaluator_sha256")
     @classmethod
@@ -1955,6 +1957,8 @@ class RunStartedPayload(StrictModel):
     max_experiments: int = Field(gt=0)
     parallel_directions: int = Field(default=1, gt=0, le=7)
     synthesize_parallel_improvements: bool = True
+    aggressive_composition_enabled: bool = False
+    max_composed_methods: int = Field(default=12, ge=2, le=12)
     deepseek_timeout_seconds: int = Field(default=120, gt=0, le=600)
     research_planning_max_attempts: int = Field(default=1, gt=0, le=3)
     research_planning_retry_backoff_seconds: float = Field(

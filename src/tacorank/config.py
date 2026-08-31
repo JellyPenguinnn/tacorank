@@ -107,6 +107,10 @@ class RunConfig(StrictModel):
     max_experiments: int = Field(default=50, gt=0)
     parallel_directions: int = Field(default=1, gt=0, le=7)
     synthesize_parallel_improvements: bool = True
+    # New deployments may opt into one bounded multi-family proposal at cold
+    # start. Historical configs retain the conservative single-card policy.
+    aggressive_composition_enabled: bool = False
+    max_composed_methods: int = Field(default=12, ge=2, le=12)
     wall_time_limit_seconds: int = Field(default=21_600, gt=0)
     token_limit: Optional[int] = Field(default=None, gt=0)
     gpu_seconds_limit: Optional[int] = Field(default=None, gt=0)
@@ -127,6 +131,7 @@ class RunConfig(StrictModel):
     allowed_research_families: List[NonEmptyStr] = Field(
         default_factory=lambda: [
             "objective",
+            "composition",
             "temporal_history",
             "multitask",
             "duration_bias",

@@ -4,7 +4,10 @@
 **Status:** predefined, human-reviewed direction for the current run
 **Primary task:** within-user ranking of `long_view`
 **Primary score:** contract-defined mean of GAUC and nDCG@5
-**Core rule:** one experiment changes one research mechanism.
+**Core rule:** ordinary experiments change one research mechanism; a new run may
+opt into one bounded, compatibility-aware composition at cold start. Composition
+uses every legal additive layer up to the frozen method-count limit, while
+same-slot alternatives remain mutually exclusive.
 **Traversal:** an adaptive, evidence-ranked portfolio; explore distinct legal
 families first, then compare bounded sibling implementations around the
 strongest stable frontier before backtracking.
@@ -28,6 +31,7 @@ strongest stable frontier before backtracking.
   ],
   "family_order": [
     "objective",
+    "composition",
     "temporal_history",
     "multitask",
     "duration_bias",
@@ -66,8 +70,9 @@ next research direction. It is seed knowledge, not dynamic memory. During a
 run it is read-only: outcomes belong in `events.jsonl`, reusable conclusions
 belong in `lesson.recorded`, and exact code belongs in Git.
 
-After the deterministic search policy selects one legal method card, the live
-planner performs one bounded keyless OpenAlex lookup for that method. It sends
+After the deterministic search policy selects one legal method card—or one
+explicitly enabled compatible stack of up to twelve cards—the live planner
+performs one bounded keyless OpenAlex lookup for that direction. It sends
 no dataset rows, metrics, run identifiers, or user identifiers. The proposal
 must cite at least one exact evidence ID from the returned paper snapshot and
 must explain how the published mechanism becomes a falsifiable intervention
@@ -77,10 +82,49 @@ allowed data, protected paths, or execution ladder. The immutable evidence
 snapshot is stored with the proposal so the coder, ledger, and UI can show why
 the implementation was chosen. Candidate coding and execution remain offline.
 
-The context builder should include the applicable section and referenced
+The context builder should include the applicable section and all referenced
 method cards in `PlannerContext`. The Planner must still return one validated
 `ExperimentSpec`; it must not write events, edit this file, or use hidden-final
 feedback.
+
+## Aggressive composition policy
+
+The opt-in cold-start stack is assembled from the method cards below. The
+controller includes as many legal cards as the current contract permits, but
+does not create a blind Cartesian product:
+
+| Slot | Compatible rule | Candidate cards represented |
+| --- | --- | --- |
+| Primary objective | Choose exactly one primary loss, preferring the ranking-aligned option. | BPR, weighted cross-entropy, listwise user softmax |
+| Teacher objective | Add distillation only when verified parent predictions are legal; do not combine it with the loss-aligned refinement. | Distill softmax |
+| Feature residuals | Add every eligible bounded, train-only feature residual; overlapping signals must be merged once. | General feature engineering, tab context, past-only author affinity, temporal drift |
+| Interest encoder | Choose exactly one because each replaces the user-history representation. | SIM, DIN, time-series interest, compact history |
+| Single-task backbone | Choose exactly one. | DCN, compact ranker, FFM |
+| Hidden-unit adapter | Add only on a neural backbone that exposes hidden units. | LHUC |
+| Multi-task backbone | Alternative to the single-task backbone; choose exactly one and require an explicitly legal auxiliary label. | PLE, MMoE, ESU, GSU, shared-bottom, single auxiliary |
+| Training add-ons | Add when their data prerequisites are legal. | Duration-bias residual, deterministic coverage sampling |
+
+Post-hoc ensemble cards and random-exposure evaluation remain later-stage
+routes because they depend on independently confirmed artifacts rather than the
+same training edit. `objective_loss_aligned_features` remains a later refinement
+after pairwise evidence exists. Every alternative still stays in the portfolio
+and can be selected as its own lane or researched as a comparison; the stack is
+only the first interaction test.
+
+The live planner receives the complete selected card list and a compatibility
+catalog. It should use the bounded literature action to investigate the stack's
+main mechanisms and compare same-slot alternatives, then cite the exact
+OpenAlex evidence IDs returned for the current run. Useful primary references
+include [BPR](https://arxiv.org/abs/1205.2618), [DIN](https://arxiv.org/abs/1706.06978),
+[SIM](https://arxiv.org/abs/2006.05639), [DCN](https://arxiv.org/abs/1708.05123),
+[MMoE](https://research.google/pubs/modeling-task-relationships-in-multi-task-learning-with-multi-gate-mixture-of-experts/),
+and [PLE](https://doi.org/10.1145/3383313.3412236). LHUC is an adaptation
+mechanism originally demonstrated for neural hidden units, so its use here is
+an explicit transfer hypothesis rather than recommender-specific proof. The GSU
+card is anchored to a primary gated-sharing paper from a different task domain,
+so that transfer is also exploratory. No sufficiently direct primary ESU source
+was established in this pass; the live OpenAlex lookup must investigate it
+before treating ESU as more than a bounded alternative.
 
 ## 1. Inputs from the memory and evaluation schema
 

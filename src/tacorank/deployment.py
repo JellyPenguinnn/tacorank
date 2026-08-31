@@ -264,6 +264,8 @@ def setup_live_deployment(
         "parallel_directions": 4,
         "parallel_schedule": [4, 4, 2],
         "synthesize_parallel_improvements": True,
+        "aggressive_composition_enabled": True,
+        "max_composed_methods": 12,
         "wall_time_limit_seconds": 21600,
         "convergence_epsilon": 0.002,
         "convergence_patience": 3,
@@ -279,6 +281,7 @@ def setup_live_deployment(
         "editable_roots": ["solution"],
         "allowed_research_families": [
             "objective",
+            "composition",
             "temporal_history",
             "multitask",
             "duration_bias",
@@ -335,7 +338,7 @@ def setup_live_deployment(
         "literature_total_timeout_seconds": 45,
         "literature_max_attempts": 3,
         "literature_min_interval_seconds": 1.0,
-        "literature_max_papers": 3,
+        "literature_max_papers": 5,
         "literature_min_citation_count": 5,
     }
     _write_json_exclusive(run_path, run_payload)

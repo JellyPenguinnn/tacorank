@@ -86,6 +86,22 @@ def test_openalex_skill_queries_selected_method_and_bounds_evidence(
     assert skill.resource_delta.wall_time_ms >= 0
 
 
+def test_openalex_query_covers_each_selected_composition_slot(
+    composition_context,
+):
+    choice = SearchPolicy().choose(composition_context)
+
+    query = OpenAlexLiteratureSkill._query(choice)
+
+    assert "learning to rank" in query
+    assert "feature engineering" in query
+    assert "sequential user interest" in query
+    assert "feature interaction model" in query
+    assert "duration bias" in query
+    assert "implicit feedback sampling" in query
+    assert len(query) <= 200
+
+
 def test_openalex_skill_fails_closed_without_usable_paper(planner_context):
     skill = OpenAlexLiteratureSkill(
         min_citation_count=5,

@@ -259,6 +259,37 @@ def test_deepseek_provider_constrains_policy_fields_and_records_usage(planner_co
     assert provider.resource_delta.token_measurement == TokenMeasurement.PROVIDER
 
 
+def test_deepseek_provider_requires_full_composition_and_deep_dive_protocol(
+    composition_context,
+):
+    calls = []
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, timeout
+        calls.append(payload)
+        return response(candidate(method_card_ids=["objective_pairwise_bpr"]))
+
+    choice = SearchPolicy().choose(composition_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(
+            ProviderRequest(
+                context=composition_context,
+                policy_choice=choice,
+            )
+        )
+    )
+
+    assert result["family"] == "composition"
+    assert result["method_card_ids"] == list(choice.selected_method_card_ids)
+    prompt = json.loads(calls[0]["messages"][1]["content"])
+    assert prompt["policy"]["required_method_card_ids"] == list(
+        choice.selected_method_card_ids
+    )
+    assert prompt["policy"]["composition_protocol"]["deep_dive_required"] is True
+    assert "same_slot_alternatives" in prompt["policy"]["composition_protocol"]
+
+
 def test_research_turn_retry_is_compact_and_disables_thinking(planner_context):
     choice = SearchPolicy().choose(planner_context)
     provider = DeepSeekResearchProvider(api_key="secret-key")

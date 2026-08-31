@@ -280,9 +280,9 @@ class ResearchPlanner:
         literature_evidence = ()
         if self.literature_skill is not None:
             logger.info(
-                "literature_research_started context_id=%s method_card_id=%s",
+                "literature_research_started context_id=%s method_card_ids=%s",
                 _get(context, "context_id", None),
-                choice.method_card_id,
+                ",".join(choice.selected_method_card_ids),
             )
             literature_evidence = tuple(
                 await self.literature_skill.research(context, choice)
@@ -302,11 +302,11 @@ class ResearchPlanner:
         )
         logger.info(
             "research_provider_selected context_id=%s parent_id=%s family=%s "
-            "method_card_id=%s phase=%s reason_code=%s",
+            "method_card_ids=%s phase=%s reason_code=%s",
             _get(context, "context_id", None),
             _get(choice.parent, "experiment_id", None),
             choice.family,
-            choice.method_card_id,
+            ",".join(choice.selected_method_card_ids),
             choice.phase,
             choice.reason_code,
         )

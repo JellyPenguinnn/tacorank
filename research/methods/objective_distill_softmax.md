@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"objective_distill_softmax","family":"objective","status":"candidate","tags":["distillation","softmax","teacher_student"],"cost_tier":"medium","prerequisites":["baseline_parity","verified_best_prediction"],"allowed_data":["train_interactions","user_id","video_id","long_view","verified_predictions"],"prohibition_conditions":["teacher_prediction_unverified"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"objective_distill_softmax","family":"objective","status":"candidate","tags":["distillation","softmax","teacher_student"],"cost_tier":"medium","prerequisites":["baseline_parity","verified_best_prediction"],"allowed_data":["train_interactions","user_id","video_id","long_view","verified_predictions"],"prohibition_conditions":["teacher_prediction_unverified"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":["https://arxiv.org/abs/1809.07428"]}
 ```
 
 ## Mechanism
@@ -34,4 +34,6 @@ only a bounded residual to the unchanged parent score.
 
 ## Sources
 
-No external source required for the bounded trial.
+[Ranking Distillation](https://arxiv.org/abs/1809.07428) is used as a
+directional source; the parent-score residual adaptation remains a new
+experiment.

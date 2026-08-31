@@ -16,7 +16,12 @@ from .graph_view import (
 from .linucb import LinUCBLegalChoiceRanker
 from .method_eligibility import eligible_method_cards, method_card_map
 from .playbook import REQUIRED_RULE_ORDER
-from .portfolio import HIGH_VALUE_FAMILIES
+from .portfolio import (
+    COMPOSITION_DISTILLATION_OBJECTIVES,
+    COMPOSITION_LOSS_ALIGNED_REFINEMENTS,
+    COMPOSITION_MAX_METHODS,
+    HIGH_VALUE_FAMILIES,
+)
 from .search_eligibility import classify_search_eligibility
 
 
@@ -68,6 +73,42 @@ DEFAULT_METHOD_ORDER = {
     "evaluation": ("evaluation_random_exposure_robustness",),
 }
 
+# These are ordered preferences inside each compatibility slot.  The provider
+# still receives every method card, including alternatives that are not chosen
+# for this stack, so it can research and explain the trade-offs rather than
+# treating the first card as universally optimal.
+AGGRESSIVE_PRIMARY_OBJECTIVES = (
+    "objective_pairwise_bpr",
+    "objective_weighted_cross_entropy",
+    "objective_listwise_user_softmax",
+)
+AGGRESSIVE_DISTILLATION_OBJECTIVES = ("objective_distill_softmax",)
+AGGRESSIVE_FEATURE_METHODS = (
+    "features_general_bounded_engineering",
+    "features_tab_context_residual",
+    "features_author_affinity_past_only",
+    "temporal_drift_past_only",
+)
+AGGRESSIVE_INTEREST_METHODS = (
+    "temporal_search_interest_model",
+    "temporal_deep_interest_network",
+    "temporal_time_series_interest",
+    "temporal_history_compact",
+)
+AGGRESSIVE_SINGLE_TASK_BACKBONES = (
+    "model_deep_cross_network",
+    "model_compact_ranker",
+    "model_field_aware_fm",
+)
+AGGRESSIVE_MULTITASK_BACKBONES = (
+    "multitask_ple",
+    "multitask_mmoe",
+    "multitask_esu",
+    "multitask_gsu",
+    "multitask_shared_bottom",
+    "multitask_single_auxiliary",
+)
+
 
 @dataclass(frozen=True)
 class PolicyChoice:
@@ -79,6 +120,7 @@ class PolicyChoice:
     reason_code: str
     reason: str
     method_card_id: str | None = None
+    method_card_ids: tuple[str, ...] = ()
     component_experiment_ids: tuple[str, ...] = ()
     batch_role: str | None = None
     hypothesis_group_id: str | None = None
@@ -89,10 +131,19 @@ class PolicyChoice:
 
         parent = getattr(self.parent, "experiment_id", "baseline")
         components = ",".join(self.component_experiment_ids)
+        methods = ",".join(self.selected_method_card_ids)
         return "choice_%s" % "_".join(
             str(item or "none")
-            for item in (parent, self.family, self.method_card_id, self.phase, components)
+            for item in (parent, self.family, methods, self.phase, components)
         ).replace("-", "_")
+
+    @property
+    def selected_method_card_ids(self) -> tuple[str, ...]:
+        """Return the complete method identity, including compatible stacks."""
+
+        if self.method_card_ids:
+            return self.method_card_ids
+        return (self.method_card_id,) if self.method_card_id else ()
 
 
 LegalChoiceRanker = Callable[[Sequence[PolicyChoice], Any], PolicyChoice]
@@ -285,6 +336,142 @@ def _cost_tier(value: Any) -> str:
     return normalized if normalized in {"low", "medium", "high"} else "medium"
 
 
+def _highest_cost_tier(cards: Sequence[Any]) -> str:
+    order = {"low": 0, "medium": 1, "high": 2}
+    tiers = [_cost_tier(get_value(card, "cost_tier", None)) for card in cards]
+    return max(tiers, key=lambda tier: order[tier], default="medium")
+
+
+def _aggressive_composition_enabled(context: Any) -> bool:
+    value = get_value(
+        get_value(context, "contract_summary", None),
+        "aggressive_composition_enabled",
+        False,
+    )
+    return value is True or str(value).strip().lower() == "true"
+
+
+def _max_composed_methods(context: Any) -> int:
+    value = get_value(
+        get_value(context, "contract_summary", None),
+        "max_composed_methods",
+        COMPOSITION_MAX_METHODS,
+    )
+    try:
+        return max(2, min(COMPOSITION_MAX_METHODS, int(value)))
+    except (TypeError, ValueError):
+        return COMPOSITION_MAX_METHODS
+
+
+def _aggressive_composition_choice(
+    context: Any,
+    parent: ExperimentNodeView,
+    allowed: tuple[str, ...],
+) -> PolicyChoice | None:
+    """Build the opt-in stack from compatible slots and legal cards."""
+
+    if not _aggressive_composition_enabled(context) or "composition" not in allowed:
+        return None
+    if "objective" not in allowed or "features" not in allowed:
+        return None
+
+    def ordered_cards(family: str, method_ids: Sequence[str]) -> tuple[Any, ...]:
+        candidates = {
+            str(get_value(card, "method_id", "")): card
+            for card in eligible_method_cards(context, family)
+        }
+        return tuple(
+            candidates[method_id]
+            for method_id in method_ids
+            if method_id in candidates
+        )
+
+    primary = ordered_cards("objective", AGGRESSIVE_PRIMARY_OBJECTIVES)
+    features = ordered_cards("features", AGGRESSIVE_FEATURE_METHODS)
+    if not primary or not features:
+        return None
+
+    multitask = ordered_cards("multitask", AGGRESSIVE_MULTITASK_BACKBONES)
+    single_task = ordered_cards("model", AGGRESSIVE_SINGLE_TASK_BACKBONES)
+    if multitask:
+        backbone = multitask[0]
+    elif single_task:
+        backbone = single_task[0]
+    else:
+        return None
+
+    # Reserve the three essential roles first so a deliberately smaller
+    # operator limit cannot produce a loss-only or feature-only stack.
+    cards: list[Any] = [primary[0], features[0], backbone]
+
+    def append_card(card: Any | None) -> None:
+        if card is None:
+            return
+        method_id = str(get_value(card, "method_id", ""))
+        if method_id and method_id not in {
+            str(get_value(item, "method_id", "")) for item in cards
+        }:
+            cards.append(card)
+
+    # Distillation is an additive teacher constraint; the other objective
+    # cards remain alternatives because their losses replace one another.
+    distillation = ordered_cards("objective", AGGRESSIVE_DISTILLATION_OBJECTIVES)
+    append_card(distillation[0] if distillation else None)
+
+    for card in features[1:]:
+        append_card(card)
+
+    if "temporal_history" in allowed:
+        interest = ordered_cards("temporal_history", AGGRESSIVE_INTEREST_METHODS)
+        append_card(interest[0] if interest else None)
+
+    if not multitask and str(get_value(backbone, "method_id", "")) in {
+        "model_deep_cross_network",
+        "model_compact_ranker",
+    }:
+        adapter = ordered_cards("model", ("model_lhuc",))
+        append_card(adapter[0] if adapter else None)
+
+    if "duration_bias" in allowed:
+        duration = ordered_cards(
+            "duration_bias", ("duration_bias_censored_watch_time",)
+        )
+        append_card(duration[0] if duration else None)
+    if "sampling" in allowed:
+        sampler = ordered_cards("sampling", ("sampling_deterministic_coverage",))
+        append_card(sampler[0] if sampler else None)
+
+    # This is a later-stage additive refinement. It is only selected when the
+    # pairwise-tested card is eligible and no second loss is being added.
+    if not any(
+        str(get_value(item, "method_id", ""))
+        in COMPOSITION_DISTILLATION_OBJECTIVES
+        for item in cards
+    ):
+        refinement = ordered_cards("objective", COMPOSITION_LOSS_ALIGNED_REFINEMENTS)
+        append_card(refinement[0] if refinement else None)
+
+    cards = cards[: _max_composed_methods(context)]
+    if len(cards) < 3:
+        return None
+    method_ids = tuple(str(get_value(card, "method_id", "")) for card in cards)
+    return _proposal(
+        parent=parent,
+        family="composition",
+        card=cards[0],
+        method_cards=cards,
+        phase="composition",
+        reason_code="AGGRESSIVE_COMPATIBLE_COMPOSITION",
+        reason=(
+            "Deep-dive one bounded compatible stack across the selected ranking "
+            "objective, leakage-safe feature residuals, interest/model layers, "
+            "and legal training add-ons. Treat same-slot cards as alternatives "
+            "and resolve overlapping edits explicitly: %s."
+            % ", ".join(method_ids)
+        ),
+    )
+
+
 def _proposal(
     *,
     parent: ExperimentNodeView,
@@ -296,16 +483,22 @@ def _proposal(
     component_experiment_ids: tuple[str, ...] = (),
     batch_role: str | None = None,
     hypothesis_group_id: str | None = None,
+    method_cards: Sequence[Any] = (),
 ) -> PolicyChoice:
+    selected_cards = tuple(method_cards) or (card,)
+    method_ids = tuple(
+        str(get_value(item, "method_id", "")) for item in selected_cards
+    )
     return PolicyChoice(
         action="propose",
         parent=parent,
         family=family,
-        cost_tier=_cost_tier(get_value(card, "cost_tier", None)),
+        cost_tier=_highest_cost_tier(selected_cards),
         phase=phase,
         reason_code=reason_code,
         reason=reason,
-        method_card_id=str(get_value(card, "method_id", "")),
+        method_card_id=method_ids[0],
+        method_card_ids=method_ids,
         component_experiment_ids=component_experiment_ids,
         batch_role=batch_role,
         hypothesis_group_id=hypothesis_group_id,
@@ -1099,6 +1292,17 @@ class SearchPolicy:
                 phase="none",
             )
 
+        # A fresh opt-in deployment gets one deliberately bounded interaction
+        # test before the ordinary atomic playbook route.  Historical configs
+        # have this flag unset, so their policy and action identities do not
+        # change.
+        if not history:
+            composition = _aggressive_composition_choice(
+                context, _best_experimental_parent(eligible), allowed
+            )
+            if composition is not None:
+                return composition
+
         no_op_candidates = _no_op_choices(context, eligible, allowed)
         if no_op_candidates is not None:
             if no_op_candidates:
@@ -1375,6 +1579,12 @@ class SearchPolicy:
                 )
             )
         choices: list[PolicyChoice] = []
+        if not _family_history(context):
+            composition = _aggressive_composition_choice(
+                context, _best_experimental_parent(eligible), allowed
+            )
+            if composition is not None:
+                choices.append(composition)
         for parent in parents:
             attempted = _attempted_methods_for_parent(
                 context, parent.experiment_id

@@ -947,6 +947,8 @@ class ContextBuilder:
             prediction_change_no_op_threshold=(
                 self.config.prediction_change_no_op_threshold
             ),
+            aggressive_composition_enabled=self.config.aggressive_composition_enabled,
+            max_composed_methods=self.config.max_composed_methods,
         )
         eligibility_context = {"contract_summary": contract_summary}
         refinement_frontier_ids = [

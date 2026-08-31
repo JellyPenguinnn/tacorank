@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"model_lhuc","family":"model","status":"candidate","tags":["lhuc","adaptive_units","personalization"],"cost_tier":"high","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view"],"prohibition_conditions":["baseline_or_objective_unresolved"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"model_lhuc","family":"model","status":"candidate","tags":["lhuc","adaptive_units","personalization"],"cost_tier":"high","prerequisites":["baseline_parity","objective_data_frame_verified"],"allowed_data":["train_interactions","user_id","video_id","author_id","tab","date","duration_ms","long_view"],"prohibition_conditions":["baseline_or_objective_unresolved"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":["https://arxiv.org/abs/1601.02828"]}
 ```
 
 ## Mechanism
@@ -33,4 +33,5 @@ parent scores when user history is unsupported.
 
 ## Sources
 
-No external source required for the bounded trial.
+[Learning Hidden Unit Contributions](https://arxiv.org/abs/1601.02828) is a
+transfer source from neural adaptation; recommender lift remains unproven.

@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"multitask_gsu","family":"multitask","status":"candidate","tags":["gsu","gated_sharing","multi_task"],"cost_tier":"high","prerequisites":["legal_auxiliary_label"],"allowed_data":["train_interactions","long_view","auxiliary_engagement_labels"],"prohibition_conditions":["auxiliary_label_not_permitted"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"multitask_gsu","family":"multitask","status":"candidate","tags":["gsu","gated_sharing","multi_task"],"cost_tier":"high","prerequisites":["legal_auxiliary_label"],"allowed_data":["train_interactions","long_view","auxiliary_engagement_labels"],"prohibition_conditions":["auxiliary_label_not_permitted"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":["https://aclanthology.org/N18-2114/"]}
 ```
 
 ## Mechanism
@@ -34,4 +34,6 @@ the official score on the primary head.
 
 ## Sources
 
-No external source required for the bounded trial.
+[Gated Multi-Task Network](https://aclanthology.org/N18-2114/) is the
+directional source for gated sharing; its original task is text classification,
+so recommender transfer is explicitly exploratory.

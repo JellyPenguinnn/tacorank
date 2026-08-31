@@ -7,6 +7,70 @@ from tacorank.research.search_policy import PolicyChoice, SearchPolicy
 from .conftest import make_summary
 
 
+def test_opt_in_composition_selects_compatible_deep_dive_stack(
+    composition_context,
+):
+    choice = SearchPolicy().choose(composition_context)
+
+    assert choice.action == "propose"
+    assert choice.family == "composition"
+    assert choice.phase == "composition"
+    assert choice.reason_code == "AGGRESSIVE_COMPATIBLE_COMPOSITION"
+    assert choice.selected_method_card_ids == (
+        "objective_pairwise_bpr",
+        "features_general_bounded_engineering",
+        "model_deep_cross_network",
+        "objective_distill_softmax",
+        "features_tab_context_residual",
+        "features_author_affinity_past_only",
+        "temporal_search_interest_model",
+        "model_lhuc",
+        "duration_bias_censored_watch_time",
+        "sampling_deterministic_coverage",
+    )
+    assert choice.method_card_id == choice.selected_method_card_ids[0]
+    assert choice.cost_tier == "high"
+
+
+def test_opt_in_composition_is_in_parallel_portfolio(composition_context):
+    policy = SearchPolicy()
+
+    choices = policy._parallel_choices(composition_context, 12)
+
+    composition_choices = [
+        choice for choice in choices if choice.family == "composition"
+    ]
+    assert len(composition_choices) == 1
+    assert len(composition_choices[0].selected_method_card_ids) >= 3
+
+
+def test_opt_in_composition_prefers_multitask_when_auxiliary_label_is_legal(
+    composition_context,
+):
+    contract = SimpleNamespace(**vars(composition_context.contract_summary))
+    contract.allowed_data = [
+        *contract.allowed_data,
+        "auxiliary_engagement_labels",
+    ]
+    context_values = vars(composition_context).copy()
+    context_values["contract_summary"] = contract
+    context = SimpleNamespace(**context_values)
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.family == "composition"
+    assert "multitask_ple" in choice.selected_method_card_ids
+    assert not any(
+        method_id in choice.selected_method_card_ids
+        for method_id in (
+            "model_deep_cross_network",
+            "model_compact_ranker",
+            "model_field_aware_fm",
+            "model_lhuc",
+        )
+    )
+
+
 def test_policy_starts_score_guided_depth_first_from_baseline(planner_context):
     choice = SearchPolicy().choose(planner_context)
 

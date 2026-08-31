@@ -151,3 +151,19 @@ def planner_context():
         public_validation_queries=0,
         source_event_ids=["evt_000001"],
     )
+
+
+@pytest.fixture
+def composition_context(planner_context):
+    contract = SimpleNamespace(**vars(planner_context.contract_summary))
+    contract.allowed_families = [
+        *contract.allowed_families,
+        "features",
+        "composition",
+        "sampling",
+    ]
+    contract.aggressive_composition_enabled = True
+    contract.max_composed_methods = 12
+    context_values = vars(planner_context).copy()
+    context_values["contract_summary"] = contract
+    return SimpleNamespace(**context_values)

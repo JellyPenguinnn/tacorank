@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"multitask_ple","family":"multitask","status":"candidate","tags":["ple","progressive_layered_extraction","multi_task"],"cost_tier":"high","prerequisites":["legal_auxiliary_label"],"allowed_data":["train_interactions","long_view","auxiliary_engagement_labels"],"prohibition_conditions":["auxiliary_label_not_permitted"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"multitask_ple","family":"multitask","status":"candidate","tags":["ple","progressive_layered_extraction","multi_task"],"cost_tier":"high","prerequisites":["legal_auxiliary_label"],"allowed_data":["train_interactions","long_view","auxiliary_engagement_labels"],"prohibition_conditions":["auxiliary_label_not_permitted"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/model.py","solution/train.py","solution/inference.py"],"sources":["https://doi.org/10.1145/3383313.3412236"]}
 ```
 
 ## Mechanism
@@ -34,4 +34,5 @@ only the primary head for the official output.
 
 ## Sources
 
-No external source required for the bounded trial.
+[Progressive Layered Extraction](https://doi.org/10.1145/3383313.3412236) is the
+primary directional source for separating shared and task-specific experts.

@@ -95,6 +95,8 @@ class RunState:
     literature_required: bool = False
     parallel_schedule: List[int] = field(default_factory=list)
     synthesize_parallel_improvements: bool = True
+    aggressive_composition_enabled: bool = False
+    max_composed_methods: int = 12
     wall_time_limit_seconds: int = 0
     token_limit: Optional[int] = None
     gpu_seconds_limit: Optional[int] = None

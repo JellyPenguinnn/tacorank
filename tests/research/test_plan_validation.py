@@ -59,6 +59,74 @@ def test_validator_accepts_contract_compatible_plan(planner_context):
     assert result.errors == ()
 
 
+def test_validator_accepts_policy_selected_compatible_composition(
+    composition_context,
+):
+    from tacorank.research.search_policy import SearchPolicy
+
+    choice = SearchPolicy().choose(composition_context)
+    spec = make_spec(
+        composition_context,
+        family="composition",
+        method_card_ids=list(choice.selected_method_card_ids),
+        change_summary=(
+            "Combine a bounded ranking objective with leakage-safe feature, "
+            "interest, interaction, and training refinements."
+        ),
+        expected_mechanism=(
+            "The compatible layers should improve personalized within-user "
+            "ordering while retaining a conservative parent score residual."
+        ),
+        estimated_cost=SimpleNamespace(
+            llm_tokens_upper_bound=2_000,
+            wall_time_seconds_upper_bound=300,
+            gpu_seconds_upper_bound=60,
+            cost_tier="high",
+        ),
+    )
+
+    result = PlanValidator().validate(
+        spec,
+        composition_context,
+        choice=choice,
+    )
+
+    assert result.accepted, result.errors
+
+
+def test_validator_rejects_mutually_exclusive_composition_slots(
+    composition_context,
+):
+    from tacorank.research.search_policy import SearchPolicy
+
+    choice = SearchPolicy().choose(composition_context)
+    incompatible_method_ids = (
+        "objective_pairwise_bpr",
+        "objective_weighted_cross_entropy",
+        "features_general_bounded_engineering",
+        "model_deep_cross_network",
+    )
+    choice = replace(
+        choice,
+        method_card_id=incompatible_method_ids[0],
+        method_card_ids=incompatible_method_ids,
+    )
+    spec = make_spec(
+        composition_context,
+        family="composition",
+        method_card_ids=list(incompatible_method_ids),
+    )
+
+    result = PlanValidator().validate(
+        spec,
+        composition_context,
+        choice=choice,
+    )
+
+    assert not result.accepted
+    assert "COMPOSITION_PRIMARY_OBJECTIVE_REQUIRED" in result.errors
+
+
 def test_validator_treats_training_parameters_as_optional_guidance(planner_context):
     suggested = make_spec(
         planner_context,

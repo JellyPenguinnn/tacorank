@@ -19,6 +19,17 @@ from .graph_view import (
     has_value,
 )
 from .method_eligibility import evaluate_method_card, method_card_map
+from .portfolio import (
+    COMPOSITION_DISTILLATION_OBJECTIVES,
+    COMPOSITION_FEATURE_METHODS,
+    COMPOSITION_HIDDEN_UNIT_ADAPTERS,
+    COMPOSITION_INTEREST_METHODS,
+    COMPOSITION_LOSS_ALIGNED_REFINEMENTS,
+    COMPOSITION_MULTITASK_BACKBONES,
+    COMPOSITION_OPTIONAL_ADDONS,
+    COMPOSITION_PRIMARY_OBJECTIVES,
+    COMPOSITION_SINGLE_TASK_BACKBONES,
+)
 from .search_eligibility import classify_search_eligibility
 
 HIDDEN_PATTERNS = (
@@ -366,18 +377,101 @@ class PlanValidator:
             errors.append("METHOD_CARD_REQUIRED")
         if len(raw_method_ids) != len(method_ids):
             errors.append("DUPLICATE_METHOD_CARD")
-        required_method_id = get_value(choice, "method_card_id", None)
-        if required_method_id and method_ids != {str(required_method_id)}:
+        required_method_ids = tuple(
+            str(item)
+            for item in as_list(
+                get_value(choice, "method_card_ids", None)
+                if choice is not None
+                else None
+            )
+            if str(item)
+        )
+        if not required_method_ids:
+            required_method_id = get_value(choice, "method_card_id", None)
+            if required_method_id:
+                required_method_ids = (str(required_method_id),)
+        if required_method_ids and tuple(raw_method_ids) != required_method_ids:
             errors.append("METHOD_POLICY_MISMATCH")
+
+        is_composition = family == "composition"
+        if is_composition:
+            enabled = get_value(contract, "aggressive_composition_enabled", False)
+            if enabled is not True and str(enabled).strip().lower() != "true":
+                errors.append("COMPOSITION_DISABLED")
+            raw_limit = get_value(contract, "max_composed_methods", 12)
+            try:
+                max_methods = max(2, min(12, int(raw_limit)))
+            except (TypeError, ValueError):
+                max_methods = 12
+            if len(raw_method_ids) < 3:
+                errors.append("COMPOSITION_REQUIRES_OBJECTIVE_FEATURE_MODEL")
+            if len(raw_method_ids) > max_methods:
+                errors.append("COMPOSITION_TOO_LARGE")
+        elif len(raw_method_ids) > 1:
+            errors.append("COMPOSITION_FAMILY_REQUIRED")
+
         cards = method_card_map(context)
         if not cards:
             errors.append("CONTEXT_METHOD_CARDS_MISSING")
+        known_composition_ids = {
+            method_id
+            for group in (
+                COMPOSITION_PRIMARY_OBJECTIVES,
+                COMPOSITION_DISTILLATION_OBJECTIVES,
+                COMPOSITION_LOSS_ALIGNED_REFINEMENTS,
+                COMPOSITION_FEATURE_METHODS,
+                COMPOSITION_INTEREST_METHODS,
+                COMPOSITION_SINGLE_TASK_BACKBONES,
+                COMPOSITION_HIDDEN_UNIT_ADAPTERS,
+                COMPOSITION_MULTITASK_BACKBONES,
+                COMPOSITION_OPTIONAL_ADDONS,
+            )
+            for method_id in group
+        }
+        if is_composition:
+            if len(method_ids.intersection(COMPOSITION_PRIMARY_OBJECTIVES)) != 1:
+                errors.append("COMPOSITION_PRIMARY_OBJECTIVE_REQUIRED")
+            if not method_ids.intersection(COMPOSITION_FEATURE_METHODS):
+                errors.append("COMPOSITION_FEATURE_RESIDUAL_REQUIRED")
+            single_backbones = method_ids.intersection(
+                COMPOSITION_SINGLE_TASK_BACKBONES
+            )
+            multitask_backbones = method_ids.intersection(
+                COMPOSITION_MULTITASK_BACKBONES
+            )
+            if len(single_backbones) > 1 or len(multitask_backbones) > 1:
+                errors.append("COMPOSITION_BACKBONE_ALTERNATIVES_CONFLICT")
+            if single_backbones and multitask_backbones:
+                errors.append("COMPOSITION_SINGLE_AND_MULTITASK_CONFLICT")
+            if not single_backbones and not multitask_backbones:
+                errors.append("COMPOSITION_BACKBONE_REQUIRED")
+            if len(method_ids.intersection(COMPOSITION_INTEREST_METHODS)) > 1:
+                errors.append("COMPOSITION_INTEREST_ALTERNATIVES_CONFLICT")
+            if method_ids.intersection(COMPOSITION_HIDDEN_UNIT_ADAPTERS) and (
+                not single_backbones
+                or "model_field_aware_fm" in single_backbones
+            ):
+                errors.append("COMPOSITION_LHUC_REQUIRES_NEURAL_BACKBONE")
+            if (
+                method_ids.intersection(COMPOSITION_LOSS_ALIGNED_REFINEMENTS)
+                and method_ids.intersection(COMPOSITION_DISTILLATION_OBJECTIVES)
+            ):
+                errors.append("COMPOSITION_LOSS_REFINEMENT_CONFLICT")
+            if method_ids - known_composition_ids:
+                errors.append("COMPOSITION_METHOD_UNCLASSIFIED")
         for method_id in sorted(method_ids):
             card = cards.get(method_id)
             if card is None:
                 errors.append("UNKNOWN_METHOD_CARD")
                 continue
-            eligibility = evaluate_method_card(card, context, family=family)
+            card_family = str(get_value(card, "family", ""))
+            if is_composition and card_family not in legal_families:
+                errors.append("COMPOSITION_FAMILY_NOT_ALLOWED")
+            eligibility = evaluate_method_card(
+                card,
+                context,
+                family=card_family if is_composition else family,
+            )
             errors.extend(eligibility.reasons)
         source_events = set(map(str, as_list(get_value(context, "source_event_ids", None))))
         if any(not EVENT_ID_PATTERN.fullmatch(event_id) for event_id in source_events):

@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 import certifi
 
 from ..schemas import LiteratureEvidence, ResourceDelta
-from .graph_view import get_value
+from .graph_view import as_list, get_value
 
 
 _TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
@@ -91,14 +91,13 @@ METHOD_QUERIES = {
         "sequential recommendation temporal user behavior history attention"
     ),
     "temporal_deep_interest_network": (
-        "deep interest network DIN sequential recommendation user interest "
-        "attention"
+        "Deep Interest Network local activation unit sequential recommendation"
     ),
     "temporal_search_interest_model": (
-        "search based interest model SIM long term user interest recommender"
+        "Search-based Interest Model lifelong sequential behavior recommendation"
     ),
     "temporal_time_series_interest": (
-        "time series user interest evolution sequential recommendation"
+        "time series user interest evolution sequential recommendation recency"
     ),
     "multitask_single_auxiliary": (
         "multi task learning recommender systems auxiliary engagement ranking"
@@ -118,26 +117,35 @@ METHOD_QUERIES = {
     "multitask_ple": (
         "progressive layered extraction PLE multi task recommender systems"
     ),
-    "duration_bias_censored_watch_time": (
-        "duration bias censored watch time video recommendation ranking"
+    "model_field_aware_fm": (
+        "field-aware factorization machines feature interactions recommender systems"
+    ),
+    "model_deep_cross_network": (
+        "Deep Cross Network bounded feature interactions recommender systems"
+    ),
+    "model_lhuc": (
+        "learning hidden unit contributions speaker adaptation neural networks"
+    ),
+    "features_general_bounded_engineering": (
+        "feature engineering train-only recommender systems learning to rank"
+    ),
+    "features_tab_context_residual": (
+        "context-aware feature interactions recommender systems ranking"
+    ),
+    "features_author_affinity_past_only": (
+        "user author affinity temporal recommendation ranking"
     ),
     "temporal_drift_past_only": (
         "temporal distribution shift recommender systems recency ranking"
     ),
+    "duration_bias_censored_watch_time": (
+        "duration bias watch time video recommendation ranking"
+    ),
+    "sampling_deterministic_coverage": (
+        "user coverage sampling implicit feedback recommender systems ranking"
+    ),
     "model_compact_ranker": (
         "DeepFM deep cross network recommender ranking feature interaction"
-    ),
-    "features_general_bounded_engineering": (
-        "feature engineering train only recommender systems learning to rank"
-    ),
-    "model_field_aware_fm": (
-        "field aware factorization machine FFM recommender systems ranking"
-    ),
-    "model_deep_cross_network": (
-        "deep cross network DCN recommender systems feature interactions ranking"
-    ),
-    "model_lhuc": (
-        "learning hidden unit contribution LHUC recommendation ranking"
     ),
     "ensemble_diverse_residual_candidate": (
         "rank ensemble diverse recommender systems score fusion"
@@ -528,7 +536,38 @@ class OpenAlexLiteratureSkill:
 
     @staticmethod
     def _query(policy_choice: Any) -> str:
-        method_id = str(get_value(policy_choice, "method_card_id", ""))
+        method_ids = tuple(
+            str(item)
+            for item in as_list(get_value(policy_choice, "method_card_ids", None))
+            if str(item)
+        )
+        if not method_ids:
+            method_id = str(get_value(policy_choice, "method_card_id", ""))
+            method_ids = (method_id,) if method_id else ()
+        if len(method_ids) > 1:
+            topics: list[str] = []
+            for method_id in method_ids:
+                if method_id.startswith("objective_"):
+                    topics.append("learning to rank")
+                elif method_id.startswith("features_"):
+                    topics.append("feature engineering")
+                elif method_id == "temporal_drift_past_only":
+                    topics.append("temporal feature engineering")
+                elif method_id.startswith("temporal_"):
+                    topics.append("sequential user interest")
+                elif method_id.startswith("model_"):
+                    topics.append("feature interaction model")
+                elif method_id.startswith("multitask_"):
+                    topics.append("multi task learning")
+                elif method_id.startswith("duration_"):
+                    topics.append("duration bias")
+                elif method_id.startswith("sampling_"):
+                    topics.append("implicit feedback sampling")
+            return _clean_text(
+                "recommender systems " + " ".join(dict.fromkeys(topics)),
+                limit=200,
+            )
+        method_id = method_ids[0] if method_ids else ""
         query = METHOD_QUERIES.get(method_id)
         if query:
             return query

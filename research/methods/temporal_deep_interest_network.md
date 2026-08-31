@@ -1,5 +1,5 @@
 ```json
-{"schema_version":"1.0","method_id":"temporal_deep_interest_network","family":"temporal_history","status":"candidate","tags":["din","attention","interest_evolution"],"cost_tier":"high","prerequisites":["baseline_parity","strict_temporal_cutoff"],"allowed_data":["train_interactions","date","user_id","video_id","author_id","long_view"],"prohibition_conditions":["unreliable_event_ordering","future_aggregate_required"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/inference.py"],"sources":[]}
+{"schema_version":"1.0","method_id":"temporal_deep_interest_network","family":"temporal_history","status":"candidate","tags":["din","attention","interest_evolution"],"cost_tier":"high","prerequisites":["baseline_parity","strict_temporal_cutoff"],"allowed_data":["train_interactions","date","user_id","video_id","author_id","long_view"],"prohibition_conditions":["unreliable_event_ordering","future_aggregate_required"],"implementation_targets":["solution/candidate.py","solution/features.py","solution/inference.py"],"sources":["https://arxiv.org/abs/1706.06978"]}
 ```
 
 ## Mechanism
@@ -33,4 +33,5 @@ empty or unseen histories.
 
 ## Sources
 
-No external source required for the bounded trial.
+[Deep Interest Network](https://arxiv.org/abs/1706.06978) is the primary
+directional source for candidate-conditioned history activation.

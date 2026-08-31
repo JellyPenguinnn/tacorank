@@ -63,6 +63,10 @@ def project(events: Iterable[Event]) -> RunState:
             state.synthesize_parallel_improvements = (
                 payload.synthesize_parallel_improvements
             )
+            state.aggressive_composition_enabled = (
+                payload.aggressive_composition_enabled
+            )
+            state.max_composed_methods = payload.max_composed_methods
             state.wall_time_limit_seconds = payload.wall_time_limit_seconds
             state.token_limit = payload.token_limit
             state.gpu_seconds_limit = payload.gpu_seconds_limit

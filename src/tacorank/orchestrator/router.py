@@ -325,6 +325,10 @@ class Harness:
                 synthesize_parallel_improvements=(
                     self.config.synthesize_parallel_improvements
                 ),
+                aggressive_composition_enabled=(
+                    self.config.aggressive_composition_enabled
+                ),
+                max_composed_methods=self.config.max_composed_methods,
                 deepseek_timeout_seconds=self.config.deepseek_timeout_seconds,
                 research_planning_max_attempts=(
                     self.config.research_planning_max_attempts
