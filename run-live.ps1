@@ -130,6 +130,26 @@ foreach ($path in @($deploymentDir, $runtimeDir, $runDir)) {
 $config     = Join-Path $deploymentDir "run-config.json"
 $liveConfig = Join-Path $deploymentDir "live-adapters.json"
 
+# The coding worker rejects any .env discoverable from the runtime root
+# upwards, so that Trae cannot pick up unreviewed credentials. Check it now
+# rather than after the Docker build: preflight would otherwise fail with
+# TRAE_DOTENV_FORBIDDEN several minutes in.
+$ancestor = Split-Path $runtimeDir -Parent
+while ($ancestor) {
+    $stray = Join-Path $ancestor ".env"
+    if (Test-Path $stray) {
+        Write-Host "error: '$stray' sits on the Trae runtime search path." -ForegroundColor Red
+        Write-Host "The coding worker refuses to start while an unreviewed .env is reachable" -ForegroundColor Red
+        Write-Host "from the runtime root, so that it cannot read your credentials." -ForegroundColor Red
+        Write-Host "Move or rename that file (a name other than '.env' is enough, since" -ForegroundColor Red
+        Write-Host "python-dotenv only discovers that exact name) and pass -EnvFile to it." -ForegroundColor Red
+        exit 1
+    }
+    $parent = Split-Path $ancestor -Parent
+    if ($parent -eq $ancestor) { break }
+    $ancestor = $parent
+}
+
 Write-Host ""
 Write-Host "run id          : $RunId"
 Write-Host "max experiments : $MaxExperiments"
