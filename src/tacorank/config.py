@@ -120,6 +120,7 @@ class RunConfig(StrictModel):
     max_confirmation_attempts: int = Field(default=2, ge=0)
     seed_schedule: List[int]
     context_token_limit: int = Field(default=24_000, gt=0)
+    synthesis_context_token_limit: int = Field(default=16_000, gt=0)
     adapter_mode: Literal["live"] = "live"
     live_adapter_config_sha256: Optional[str] = None
     editable_roots: List[str] = Field(default_factory=lambda: ["solution"])

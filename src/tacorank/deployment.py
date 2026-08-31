@@ -471,7 +471,7 @@ def setup_live_deployment(
         "convergence_patience": 3,
         "max_repairs_per_experiment": 2,
         "allowed_runtime_adjustments": {},
-        "timeout_profiles": {"standard": 600, "extended": 900},
+        "timeout_profiles": {"standard": 1800, "extended": 2700},
         "max_confirmation_attempts": 2,
         "seed_schedule": [11, 22, 33, 44, 55],
         "context_token_limit": 24000,
