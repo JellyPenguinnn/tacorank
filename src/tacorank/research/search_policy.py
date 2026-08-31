@@ -41,6 +41,7 @@ DEFAULT_METHOD_ORDER = {
         "objective_listwise_user_softmax",
     ),
     "temporal_history": (
+        "temporal_causal_history_features",
         "temporal_history_compact",
         "temporal_deep_interest_network",
         "temporal_search_interest_model",
@@ -90,6 +91,7 @@ AGGRESSIVE_FEATURE_METHODS = (
     "temporal_drift_past_only",
 )
 AGGRESSIVE_INTEREST_METHODS = (
+    "temporal_causal_history_features",
     "temporal_search_interest_model",
     "temporal_deep_interest_network",
     "temporal_time_series_interest",

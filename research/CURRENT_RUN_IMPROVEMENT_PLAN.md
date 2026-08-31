@@ -44,7 +44,7 @@ strongest stable frontier before backtracking.
   ],
   "method_order": {
     "objective": ["objective_pairwise_bpr", "objective_weighted_cross_entropy", "objective_distill_softmax", "objective_loss_aligned_features", "objective_listwise_user_softmax"],
-    "temporal_history": ["temporal_history_compact", "temporal_deep_interest_network", "temporal_search_interest_model", "temporal_time_series_interest"],
+    "temporal_history": ["temporal_causal_history_features", "temporal_history_compact", "temporal_deep_interest_network", "temporal_search_interest_model", "temporal_time_series_interest"],
     "multitask": ["multitask_single_auxiliary", "multitask_shared_bottom", "multitask_gsu", "multitask_esu", "multitask_mmoe", "multitask_ple"],
     "duration_bias": ["duration_bias_censored_watch_time"],
     "features": [

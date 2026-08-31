@@ -23,7 +23,7 @@ def test_opt_in_composition_selects_compatible_deep_dive_stack(
         "objective_distill_softmax",
         "features_tab_context_residual",
         "features_author_affinity_past_only",
-        "temporal_search_interest_model",
+        "temporal_causal_history_features",
         "model_lhuc",
         "duration_bias_censored_watch_time",
         "sampling_deterministic_coverage",
@@ -596,7 +596,7 @@ def test_playbook_quarantines_suspicious_result_and_continues_independently(
     assert choice.reason_code == "SUSPICIOUS_RESULT_QUARANTINED"
     assert choice.parent.experiment_id == "exp_0000"
     assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    assert choice.method_card_id == "temporal_causal_history_features"
 
 
 def test_playbook_continues_after_no_op_with_independent_choice(planner_context):
@@ -617,7 +617,7 @@ def test_playbook_continues_after_no_op_with_independent_choice(planner_context)
     assert choice.action == "propose"
     assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
     assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    assert choice.method_card_id == "temporal_causal_history_features"
 
 
 def test_playbook_stops_after_quarantine_only_when_no_independent_method_remains(
@@ -745,7 +745,7 @@ def test_playbook_branches_after_terminal_proxy_prune(planner_context):
     assert choice.reason_code == "EARLY_FIDELITY_REJECTED"
     assert choice.parent.experiment_id == "exp_0000"
     assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    assert choice.method_card_id == "temporal_causal_history_features"
 
 
 def test_soft_pairwise_tradeoff_gets_one_bounded_listwise_child(planner_context):
@@ -1131,7 +1131,7 @@ def test_meaningful_no_gain_backtracks_to_highest_scoring_experimental_path(
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.parent.experiment_id == "exp_002"
     assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    assert choice.method_card_id == "temporal_causal_history_features"
 
 
 def test_meaningful_no_gain_switches_family_after_best_path_refinement(
@@ -1292,3 +1292,13 @@ def test_policy_blocks_when_no_method_is_eligible(planner_context):
 
     assert choice.action == "blocked"
     assert choice.reason_code == "NO_ELIGIBLE_METHOD"
+
+
+def test_causal_history_direction_is_first_temporal_choice(planner_context):
+    planner_context.contract_summary.allowed_families = ["temporal_history"]
+
+    choice = SearchPolicy().choose(planner_context)
+
+    assert choice.action == "propose"
+    assert choice.family == "temporal_history"
+    assert choice.method_card_id == "temporal_causal_history_features"

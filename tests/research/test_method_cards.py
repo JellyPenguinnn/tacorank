@@ -6,7 +6,7 @@ from tacorank.research.portfolio import load_method_cards
 def test_schema_v1_method_cards_load_with_markdown_sections():
     portfolio = load_method_cards(Path(__file__).parents[2] / "research" / "methods")
 
-    assert len(portfolio.cards) == 15
+    assert len(portfolio.cards) == 30
     card = next(card for card in portfolio.cards if card.method_id == "objective_pairwise_bpr")
     assert card.schema_version == "1.0"
     assert card.family == "objective"
@@ -76,3 +76,35 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
         "solution/features.py",
         "solution/inference.py",
     )
+
+    causal_history = next(
+        card
+        for card in portfolio.cards
+        if card.method_id == "temporal_causal_history_features"
+    )
+    assert causal_history.family == "temporal_history"
+    assert causal_history.cost_tier == "medium"
+    assert causal_history.prerequisites == (
+        "baseline_parity",
+        "strict_temporal_cutoff",
+    )
+    assert "time_ms" not in causal_history.allowed_data
+    assert "play_time_ms" not in causal_history.allowed_data
+    assert causal_history.prohibition_conditions == (
+        "future_aggregate_required",
+        "ambiguous_within_date_order",
+        "unsupported_input_required",
+        "validation_tuned_weights",
+    )
+
+    card_text = Path(causal_history.source_path).read_text(encoding="utf-8")
+    for undisclosed_detail in (
+        "0.6121",
+        "LightGBM",
+        "CatBoost",
+        "play_time_ms",
+        "is_click",
+        "video_features_statistic",
+        "rank3.py",
+    ):
+        assert undisclosed_detail not in card_text

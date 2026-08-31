@@ -49,6 +49,7 @@ COMPOSITION_METHOD_GROUPS: dict[str, tuple[str, ...]] = {
         "temporal_drift_past_only",
     ),
     "interest_encoder": (
+        "temporal_causal_history_features",
         "temporal_search_interest_model",
         "temporal_deep_interest_network",
         "temporal_time_series_interest",
@@ -171,6 +172,51 @@ def default_portfolio() -> ExperimentPortfolio:
                     "solution/features.py",
                     "solution/model.py",
                     "solution/train.py",
+                    "solution/inference.py",
+                ),
+            ),
+            MethodCard(
+                method_id="temporal_causal_history_features",
+                family="temporal_history",
+                summary=(
+                    "Explore date-strict causal history signals over the verified "
+                    "FM parent."
+                ),
+                tags=("temporal", "causal", "history"),
+                cost_tier="medium",
+                mechanism=(
+                    "Test whether information from earlier interactions improves "
+                    "ranking without using the scored row or future interactions."
+                ),
+                prerequisites=("baseline_parity", "strict_temporal_cutoff"),
+                allowed_data=(
+                    "train_interactions",
+                    "date",
+                    "user_id",
+                    "video_id",
+                    "author_id",
+                    "tab",
+                    "duration_ms",
+                    "long_view",
+                    "verified_predictions",
+                ),
+                expected_effect=(
+                    "Improve within-user ordering under chronological drift while "
+                    "preserving the FM score path for unsupported rows."
+                ),
+                falsifier=(
+                    "No trusted full-fidelity gain, a constant within-user residual, "
+                    "or any evidence of current-row or future-label leakage."
+                ),
+                prohibition_conditions=(
+                    "future_aggregate_required",
+                    "ambiguous_within_date_order",
+                    "unsupported_input_required",
+                    "validation_tuned_weights",
+                ),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
                     "solution/inference.py",
                 ),
             ),
