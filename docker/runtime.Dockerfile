@@ -60,7 +60,7 @@ COPY benchmarks ./benchmarks
 # the declared requirements so the numeric stack the starter kit assumes is
 # actually present; the built image id stays pinned per deployment.
 RUN python -m pip install --no-cache-dir --requirement requirements.txt \
-    && python -m pip install --no-cache-dir .
+    && python -m pip install --no-cache-dir --no-deps .
 COPY --from=trae-tools \
     /usr/local/lib/python3.12/site-packages/trae_agent/dist \
     /opt/tacorank-trae-tools

@@ -632,10 +632,14 @@ def test_runtime_import_inventory_is_bound_to_built_image(
         roots = sorted(
             {
                 "benchmarks",
+                "catboost",
                 "certifi",
+                "lightgbm",
                 "numpy",
                 "pandas",
                 "pydantic",
+                "scipy",
+                "sklearn",
                 "tacorank",
                 "yaml",
                 "_sysconfigdata__linux_aarch64-linux-gnu",

@@ -65,10 +65,14 @@ TRAE_ONLY_DATA_BOUNDARY_SHA256 = hashlib.sha256(
 ).hexdigest()
 RUNTIME_REQUIRED_IMPORTS = (
     "benchmarks.kuairand_pure.pipeline",
+    "catboost",
     "certifi",
+    "lightgbm",
     "numpy",
     "pandas",
     "pydantic",
+    "scipy",
+    "sklearn",
     "tacorank",
     "yaml",
 )
