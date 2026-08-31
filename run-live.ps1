@@ -156,7 +156,11 @@ Step "Applying per-run configuration"
 $runConfig = Get-Content $config -Raw | ConvertFrom-Json
 $runConfig.max_experiments = $MaxExperiments
 $runConfig.allowed_research_families = $Families
-$runConfig | ConvertTo-Json -Depth 100 | Set-Content $config -Encoding utf8
+# Write UTF-8 without a BOM. Set-Content -Encoding utf8 and Out-File both emit
+# one under Windows PowerShell 5.1, and the config loader rejects it with
+# "Unexpected UTF-8 BOM (decode using utf-8-sig)" before preflight can run.
+$json = $runConfig | ConvertTo-Json -Depth 100
+[System.IO.File]::WriteAllText($config, $json, (New-Object System.Text.UTF8Encoding $false))
 Write-Host "max_experiments = $($runConfig.max_experiments)"
 Write-Host "allowed_research_families = $($runConfig.allowed_research_families -join ', ')"
 
