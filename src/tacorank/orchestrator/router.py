@@ -1944,14 +1944,14 @@ class Harness:
         if callable(capacity):
             available = capacity(planner_context)
             if available < 1:
-                self.stop(
-                    StopDecision(
-                        True,
-                        "PARALLEL_ROUND_INCOMPLETE",
-                        "No unique legal research method remains for a parallel round.",
-                    )
-                )
-                return []
+                # The scout lane demands a method never tried anywhere in the
+                # run, so a long run legitimately exhausts parallel capacity.
+                # That is not an end-of-search condition: the sequential
+                # depth-first route can still backtrack and re-explore, so
+                # signal the caller to run one sequential experiment instead
+                # of stopping the run.
+                logger.info("parallel_capacity_exhausted; falling back to sequential")
+                return None
             if available < count:
                 logger.info(
                     "parallel_round_width_reduced requested=%d available=%d",
@@ -2140,6 +2140,10 @@ class Harness:
                 self.stop(decision)
             return self.state()
         prepared = await self._prepare_parallel_round(count)
+        if prepared is None:
+            # Parallel capacity exhausted; continue the search sequentially,
+            # which permits backtracking and bounded re-exploration.
+            return await self.run_one_experiment()
         if not prepared:
             return self.state()
         self._parallel_round_active = True
