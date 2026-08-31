@@ -40,6 +40,39 @@ The complete workflow is:
            or protected FM fallback
         -> label-free final inference, final Gate B, and official submission check
 
+### Lifecycle of one experiment
+
+```mermaid
+flowchart LR
+    A["Ledger-derived<br/>planner context"]
+    B["Select a legal method<br/>and research direction"]
+    C["DeepSeek<br/>research proposal"]
+    D["Controller-bound<br/>ExperimentSpec"]
+    E["Trae edit and bounded<br/>implementation review"]
+    F{"Gate A"}
+    G["Smoke, proxy, and full<br/>sandboxed execution"]
+    H{"Gate B"}
+    I["Protected evaluation<br/>and trust assessment"]
+    J{"Experiment decision"}
+    K["Record lessons and<br/>build the next context"]
+    R["Bounded recovery"]
+
+    A --> B --> C --> D --> E --> F
+    F -- pass --> G --> H
+    H -- pass --> I --> J
+    J -- promote --> G
+    J -- accept, reject, or prune --> K --> A
+
+    E -. error .-> R
+    F -. fail .-> R
+    G -. fail .-> R
+    H -. fail .-> R
+    I -. no-op or error .-> R
+    R -- retry or repair --> E
+    R -- runtime retry --> G
+    R -- abandon or rollback --> K
+```
+
 The controller is deterministic and is the only component allowed to mutate
 workflow state or append the event ledger. External agents return typed
 records; they cannot select the final checkpoint, alter budgets, bypass a
@@ -665,4 +698,3 @@ Read AGENTS.md before changing repository code. In particular:
 The repository includes the license and attribution terms of KuaiRand-Pure.
 See KuaiRand-Pure/LICENSE and the repository files for the applicable project
 terms.
-
