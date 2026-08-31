@@ -740,6 +740,25 @@ class Harness:
         )
         return self.state()
 
+    _TERMINAL_DECISIONS = frozenset(
+        {
+            ExperimentDecisionKind.ACCEPT,
+            ExperimentDecisionKind.REJECT,
+            ExperimentDecisionKind.PRUNE,
+            ExperimentDecisionKind.INVALID,
+        }
+    )
+
+    def _has_terminal_decision(self, experiment_id: str) -> bool:
+        """Whether the planner can already branch past this experiment."""
+
+        return any(
+            event.payload.type == "experiment.decided"
+            and event.payload.decision.experiment_id == experiment_id
+            and event.payload.decision.decision in self._TERMINAL_DECISIONS
+            for event in self.events()
+        )
+
     def _abandon_experiment(
         self,
         spec: object,
@@ -757,8 +776,17 @@ class Harness:
         deterministically stops on no_legal_proposal, and every remaining
         iteration is lost. Record the terminal decision so the planner can
         branch past it.
+
+        Idempotent, so it is safe at every early exit from the fidelity loop
+        including the ones that already decided. An earlier revision closed
+        only the evaluation-failure exits, and run_20260831T005157Z then
+        deadlocked identically through the execution path: exp_002 was
+        promoted at proxy, its retry was abandoned on a repeated fingerprint,
+        and the run stopped two experiments in.
         """
 
+        if self._has_terminal_decision(spec.experiment_id):
+            return self.state()
         decision = ExperimentDecision(
             run_id=self.config.run_id,
             experiment_id=spec.experiment_id,
@@ -1228,7 +1256,13 @@ class Harness:
                                 next_execution_cause = patch_check_event.event_id
                                 stage_queue.appendleft(fidelity)
                                 continue
-                        return self.state()
+                        return self._abandon_experiment(
+                            spec,
+                            attempt,
+                            fidelity,
+                            proposal_event.event_id,
+                            "STAGE_ABANDONED",
+                        )
                 elif action in _CODE_RECOVERY_ACTIONS:
                     patch, patch_check, patch_check_event = (
                         await self._execute_code_repair(
@@ -1240,9 +1274,21 @@ class Harness:
                         next_execution_cause = patch_check_event.event_id
                         stage_queue.appendleft(fidelity)
                         continue
-                    return self.state()
+                    return self._abandon_experiment(
+                        spec,
+                        attempt,
+                        fidelity,
+                        proposal_event.event_id,
+                        "STAGE_ABANDONED",
+                    )
                 elif action != RecoveryAction.RETRY_SAME_COMMIT:
-                    return self.state()
+                    return self._abandon_experiment(
+                        spec,
+                        attempt,
+                        fidelity,
+                        proposal_event.event_id,
+                        "STAGE_ABANDONED",
+                    )
             output_event = self._append(
                 OutputCheckedPayload(result=output),
                 stage="output_checked_%s" % fidelity.value,
@@ -1275,7 +1321,13 @@ class Harness:
                     )
                 if repair_accepted:
                     continue
-                return self.state()
+                return self._abandon_experiment(
+                    spec,
+                    attempt,
+                    fidelity,
+                    proposal_event.event_id,
+                    "STAGE_ABANDONED",
+                )
 
             if fidelity == Fidelity.SMOKE:
                 next_fidelity = stage_queue[0] if stage_queue else Fidelity.PROXY
