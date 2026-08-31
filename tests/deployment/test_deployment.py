@@ -17,6 +17,7 @@ from solution.candidate import run as run_candidate
 from benchmarks.kuairand_pure.pipeline import check_submission
 from tacorank import deployment as deployment_module
 from tacorank.config import ContractError
+from tacorank.research.eda import PlannerEdaToolbox
 from tacorank.orchestrator.live import (
     _verify_data_manifest,
     _verify_executable_baseline_parity,
@@ -200,6 +201,17 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
     monkeypatch.setattr(deployment_module, "_run", fake_run)
 
     result = deployment_module._prepare_data(root, deployment, data)
+
+    data_profile = PlannerEdaToolbox(
+        result["input_roots"]["candidate_full"]
+    ).inspect()
+    assert data_profile.train_rows == len(train)
+    assert data_profile.train_columns == [
+        "date", "time_ms", "hourmin", "user_id", "video_id", "author_id",
+        "tab", "duration_ms", "long_view", "is_click", "play_time_ms",
+        "is_like", "is_follow", "is_comment", "is_forward", "is_hate",
+        "is_profile_enter",
+    ]
 
     smoke_header = (result["input_roots"]["candidate_smoke"] / "score.csv").read_text(
         encoding="utf-8"

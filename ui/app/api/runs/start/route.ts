@@ -29,7 +29,7 @@ export async function POST(request: Request) {
     : '';
   const campaignId = body && typeof body === 'object' && 'campaign_id' in body && typeof body.campaign_id === 'string'
     ? body.campaign_id
-    : 'objective_temporal_50';
+    : 'standard';
   if (!apiKey) {
     return NextResponse.json({ error: 'Enter a DeepSeek API key to start the run.' }, { status: 400 });
   }

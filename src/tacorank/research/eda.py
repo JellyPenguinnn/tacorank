@@ -16,6 +16,11 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
+from ..candidate_schema import (
+    APPROVED_CANDIDATE_TRAIN_SCHEMAS,
+    CANDIDATE_SCORE_COLUMNS,
+    CANDIDATE_TRAIN_BASE_COLUMNS,
+)
 from ..schemas import (
     PlannerDataProfile,
     PlannerEdaNumericSummary,
@@ -24,24 +29,8 @@ from ..schemas import (
 )
 
 
-TRAIN_COLUMNS = (
-    "date",
-    "user_id",
-    "video_id",
-    "author_id",
-    "tab",
-    "duration_ms",
-    "long_view",
-)
-SCORE_COLUMNS = (
-    "row_id",
-    "date",
-    "user_id",
-    "video_id",
-    "author_id",
-    "tab",
-    "duration_ms",
-)
+TRAIN_COLUMNS = CANDIDATE_TRAIN_BASE_COLUMNS
+SCORE_COLUMNS = CANDIDATE_SCORE_COLUMNS
 ENTITY_COLUMNS = ("user_id", "video_id", "author_id")
 CARDINALITY_COLUMNS = ENTITY_COLUMNS + ("tab",)
 EDA_TOOL_IDS = (
@@ -193,14 +182,23 @@ def _update_common(
     return date, duration
 
 
-def _read_csv(path: Path, expected_columns: Sequence[str]):
+def _read_csv(
+    path: Path,
+    expected_columns: Sequence[str],
+    *,
+    approved_schemas: Sequence[Sequence[str]] = (),
+):
     handle = path.open("r", newline="", encoding="utf-8")
     reader = csv.DictReader(handle)
-    if tuple(reader.fieldnames or ()) != tuple(expected_columns):
+    actual_columns = tuple(reader.fieldnames or ())
+    accepted = tuple(tuple(schema) for schema in approved_schemas) or (
+        tuple(expected_columns),
+    )
+    if actual_columns not in accepted:
         handle.close()
         raise PlannerEdaError(
-            "%s must have exact columns %s"
-            % (path.name, ",".join(expected_columns))
+            "%s must match an approved schema; received columns %s"
+            % (path.name, ",".join(actual_columns))
         )
     return handle, reader
 
@@ -288,7 +286,12 @@ class PlannerEdaToolbox:
         date_rates = defaultdict(lambda: [0, 0])
         positive_count = 0
 
-        train_handle, train_reader = _read_csv(train_path, TRAIN_COLUMNS)
+        train_handle, train_reader = _read_csv(
+            train_path,
+            TRAIN_COLUMNS,
+            approved_schemas=APPROVED_CANDIDATE_TRAIN_SCHEMAS,
+        )
+        train_columns = tuple(train_reader.fieldnames or ())
         try:
             for row_number, raw in enumerate(train_reader, start=1):
                 row = _prepare_row(
@@ -360,7 +363,7 @@ class PlannerEdaToolbox:
             "tool_ids": list(EDA_TOOL_IDS),
             "train_file_sha256": _sha256_file(train_path),
             "score_file_sha256": _sha256_file(score_path),
-            "train_columns": list(TRAIN_COLUMNS),
+            "train_columns": list(train_columns),
             "score_columns": list(SCORE_COLUMNS),
             "train_rows": train.rows,
             "score_rows": score.rows,

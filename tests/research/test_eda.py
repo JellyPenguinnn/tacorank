@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from tacorank.context.builder import ContextBuilder
+from tacorank.candidate_schema import CANDIDATE_TRAIN_COLUMNS
 from tacorank.research.eda import PlannerEdaError, PlannerEdaToolbox
 from tacorank.schemas import PlannerDataProfile
 
@@ -14,11 +15,13 @@ from tacorank.schemas import PlannerDataProfile
 def _write_views(root: Path) -> Path:
     root.mkdir()
     (root / "train.csv").write_text(
-        "date,user_id,video_id,author_id,tab,duration_ms,long_view\n"
-        "20220408,user_secret_a,video_a,author_a,home,100,1\n"
-        "20220408,user_secret_a,video_b,author_b,home,200,0\n"
-        "20220409,user_b,video_a,author_a,discover,300,1\n"
-        "20220409,user_c,video_c,author_c,discover,400,0\n",
+        "date,time_ms,hourmin,user_id,video_id,author_id,tab,duration_ms,"
+        "long_view,is_click,play_time_ms,is_like,is_follow,is_comment,"
+        "is_forward,is_hate,is_profile_enter\n"
+        "20220408,1,1200,user_secret_a,video_a,author_a,home,100,1,1,90,0,0,0,0,0,0\n"
+        "20220408,2,1201,user_secret_a,video_b,author_b,home,200,0,1,50,0,0,0,0,0,0\n"
+        "20220409,3,1202,user_b,video_a,author_a,discover,300,1,1,250,0,0,0,0,0,0\n"
+        "20220409,4,1203,user_c,video_c,author_c,discover,400,0,0,0,0,0,0,0,0,0\n",
         encoding="utf-8",
     )
     (root / "score.csv").write_text(
@@ -41,6 +44,7 @@ def test_eda_toolbox_builds_deterministic_aggregate_profile(tmp_path: Path) -> N
     assert first.score_rows == 2
     assert first.train_positive_count == 2
     assert first.train_positive_rate == 0.5
+    assert first.train_columns == list(CANDIDATE_TRAIN_COLUMNS)
     assert first.train_date_min == 20220408
     assert first.score_date_max == 20220410
     assert first.train_cardinalities == {
@@ -75,7 +79,45 @@ def test_eda_toolbox_rejects_a_labelled_score_view(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(PlannerEdaError, match="exact columns"):
+    with pytest.raises(PlannerEdaError, match="approved schema"):
+        PlannerEdaToolbox(root).inspect()
+
+
+def test_eda_toolbox_accepts_legacy_training_schema_for_resume(
+    tmp_path: Path,
+) -> None:
+    root = _write_views(tmp_path / "candidate-full")
+    (root / "train.csv").write_text(
+        "date,user_id,video_id,author_id,tab,duration_ms,long_view\n"
+        "20220408,user_a,video_a,author_a,home,100,1\n",
+        encoding="utf-8",
+    )
+
+    profile = PlannerEdaToolbox(root).inspect()
+
+    assert profile.train_rows == 1
+    assert profile.train_columns == [
+        "date",
+        "user_id",
+        "video_id",
+        "author_id",
+        "tab",
+        "duration_ms",
+        "long_view",
+    ]
+
+
+def test_eda_toolbox_rejects_unapproved_training_columns(tmp_path: Path) -> None:
+    root = _write_views(tmp_path / "candidate-full")
+    train = root / "train.csv"
+    train.write_text(
+        train.read_text(encoding="utf-8").replace(
+            "is_profile_enter\n", "is_profile_enter,validation_label\n", 1
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PlannerEdaError, match="approved schema"):
         PlannerEdaToolbox(root).inspect()
 
 

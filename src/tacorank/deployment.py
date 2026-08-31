@@ -20,6 +20,10 @@ from typing import Any, Dict, Iterable, Mapping, Sequence, Tuple
 
 import certifi
 
+from .candidate_schema import (
+    CANDIDATE_SCORE_COLUMNS,
+    CANDIDATE_TRAIN_COLUMNS,
+)
 from .coding import (
     TRAE_DEEPSEEK_REASONING_MARKER,
     TRAE_DEEPSEEK_TOOL_JSON_MARKER,
@@ -126,9 +130,10 @@ def setup_trae_deployment(
                 "def run(invocation: PipelineInvocation) -> None; read only "
                 "invocation.input_root and write exactly invocation.output_path as "
                 "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
-                "invocation.seed; return None. train.csv has the exact columns "
-                "date,user_id,video_id,author_id,tab,duration_ms,long_view, where "
-                "date is an integer YYYYMMDD value; "
+                "invocation.seed; return None. train.csv uses the controller-owned "
+                "KuaiRand training schema with the base ranking fields plus approved "
+                "timestamps and auxiliary engagement labels; date is an integer "
+                "YYYYMMDD value; "
                 "score.csv has row_id,date,user_id,video_id,author_id,tab,duration_ms "
                 "and never exposes long_view. CSV values arrive as text, and numeric "
                 "fields may use integral decimal notation such as duration_ms=209900.0; "
@@ -272,27 +277,15 @@ def setup_live_deployment(
         "baseline_parity_receipt_path": str(
             generated_data["baseline_parity_receipt_path"]
         ),
-        "candidate_allowed_columns": [
-            "date",
-            "user_id",
-            "video_id",
-            "author_id",
-            "tab",
-            "duration_ms",
-            "long_view",
-            "row_id",
-            "time_ms",
-            "hourmin",
-            "is_click",
-            "play_time_ms",
-            "is_like",
-            "is_follow",
-            "is_comment",
-            "is_forward",
-            "is_hate",
-            "is_profile_enter",
-            *HISTORY_FEATURE_COLUMNS,
-        ],
+        "candidate_allowed_columns": list(
+            dict.fromkeys(
+                (
+                    *CANDIDATE_TRAIN_COLUMNS,
+                    *CANDIDATE_SCORE_COLUMNS,
+                    *HISTORY_FEATURE_COLUMNS,
+                )
+            )
+        ),
         "protected_columns": ["label"],
         "hidden_path_tokens": ["hidden_labels", "final_labels", "test_labels"],
         "future_column_patterns": ["(?:^|_)future(?:_|$)"],
@@ -904,12 +897,7 @@ def _write_train(path: Path, data: Path, *, expected_rows: int) -> None:
     source = data / "log_standard_4_08_to_4_21_pure.csv"
     count = 0
     with _exclusive_csv(path) as handle:
-        fieldnames = (
-            "date", "time_ms", "hourmin", "user_id", "video_id", "author_id",
-            "tab", "duration_ms", "long_view", "is_click", "play_time_ms",
-            "is_like", "is_follow", "is_comment", "is_forward", "is_hate",
-            "is_profile_enter",
-        )
+        fieldnames = CANDIDATE_TRAIN_COLUMNS
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         with source.open(newline="", encoding="utf-8") as source_handle:
@@ -949,9 +937,7 @@ def _write_train(path: Path, data: Path, *, expected_rows: int) -> None:
 def _write_score(path: Path, rows: Iterable[Sequence[Any]]) -> None:
     with _exclusive_csv(path) as handle:
         writer = csv.writer(handle)
-        writer.writerow(
-            ("row_id", "date", "user_id", "video_id", "author_id", "tab", "duration_ms")
-        )
+        writer.writerow(CANDIDATE_SCORE_COLUMNS)
         for row_id, row in enumerate(rows):
             writer.writerow((row_id, *row[:6]))
 
