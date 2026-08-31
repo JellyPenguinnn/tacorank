@@ -175,7 +175,11 @@ class ResearchPlanner:
             )
 
         literature_evidence = ()
+        literature_required = None
         if self.literature_skill is not None:
+            literature_required = bool(
+                getattr(self.literature_skill, "requires_citation", True)
+            )
             logger.info(
                 "literature_research_started context_id=%s method_card_id=%s",
                 _get(context, "context_id", None),
@@ -196,6 +200,7 @@ class ResearchPlanner:
             input_token_limit=self.input_token_limit,
             output_token_limit=self.output_token_limit,
             literature_evidence=literature_evidence,
+            literature_required=literature_required,
         )
         logger.info(
             "research_provider_selected context_id=%s parent_id=%s family=%s "
@@ -213,6 +218,7 @@ class ResearchPlanner:
             context,
             choice=choice,
             literature_evidence=literature_evidence,
+            literature_required=literature_required,
         )
         if not result.accepted:
             logger.warning(
@@ -234,6 +240,7 @@ class ResearchPlanner:
                     context,
                     choice=choice,
                     literature_evidence=literature_evidence,
+                    literature_required=literature_required,
                 )
         if not result.accepted:
             logger.warning(

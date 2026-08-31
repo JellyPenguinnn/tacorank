@@ -262,6 +262,19 @@ def _ordered_eligible_method_cards(context: Any, family: str) -> tuple[Any, ...]
     return tuple(ordered)
 
 
+def _globally_attempted_method_ids(context: Any) -> set[str]:
+    """Return method cards already tested anywhere in the durable history."""
+
+    return {
+        method_id
+        for summary in as_list(get_value(context, "family_history", None))
+        for method_id in map(
+            str, as_list(get_value(summary, "method_card_ids", None))
+        )
+        if method_id
+    }
+
+
 def _cost_tier(value: Any) -> str:
     tier = get_value(value, "cost_tier", value)
     normalized = _normalized(tier)
@@ -1302,66 +1315,79 @@ class SearchPolicy:
     def choose_parallel_direction(
         self, context: Any, direction_index: int, direction_count: int
     ) -> PolicyChoice:
-        """Choose one legal, independently testable lane for a parallel round.
+        """Choose a bounded lane without globally replaying prior directions.
 
-        Each lane is pinned to a different eligible method card.  The duplicate
-        identity is method-card based, so free-text hypotheses cannot make a
-        repeated card into a distinct experiment.
+        Lane zero is the normal outcome-routed search choice, so a trusted
+        improvement or explicit refinement can deepen one prior method. Extra
+        lanes are scouting actions and may use only method cards never attempted
+        anywhere in the run. This prevents each parallel round from replaying
+        the same portfolio merely because the selected parent changed.
         """
 
         if direction_index < 0 or direction_index >= direction_count:
             raise ValueError("parallel direction index is out of range")
+        choices = self._parallel_choices(context)
+        if direction_index >= len(choices):
+            raise ValueError(
+                "parallel direction index exceeds unique legal search choices"
+            )
+        return choices[direction_index]
+
+    def _parallel_choices(self, context: Any) -> tuple[PolicyChoice, ...]:
+        """Build one policy route plus globally untried scouting methods."""
+
         graph = GraphView.from_context(context)
         eligible = list(graph.eligible_parents())
         allowed = _allowed_families(context)
         if not eligible or not allowed or not method_card_map(context):
-            return self.choose(context)
-        parent = _best_parent(eligible)
+            fallback = self.choose(context)
+            return (fallback,) if fallback.action == "propose" else ()
+
         choices: list[PolicyChoice] = []
+        primary = self.choose(context)
+        if primary.action == "propose":
+            choices.append(primary)
+
+        selected_methods = {
+            str(choice.method_card_id)
+            for choice in choices
+            if choice.method_card_id
+        }
+        attempted_methods = _globally_attempted_method_ids(context)
+        parent = _best_parent(eligible)
         for family in allowed:
             if family == "ensemble":
                 continue
             for card in _ordered_eligible_method_cards(context, family):
+                method_id = str(get_value(card, "method_id", ""))
+                if (
+                    not method_id
+                    or method_id in attempted_methods
+                    or method_id in selected_methods
+                ):
+                    continue
                 choices.append(
                     _proposal(
                         parent=parent,
                         family=family,
                         card=card,
                         phase="parallel_round",
-                        reason_code="PARALLEL_DIRECTION_%d_OF_%d"
-                        % (direction_index + 1, direction_count),
+                        reason_code="PARALLEL_GLOBALLY_UNTRIED_METHOD",
                         reason=(
-                            "Produce atomic direction %d of %d using the distinct "
-                            "research method %s."
-                            % (
-                                direction_index + 1,
-                                direction_count,
-                                get_value(card, "method_id", ""),
-                            )
+                            "Use spare round capacity to test globally untried "
+                            "research method %s from trusted parent %s; previously "
+                            "attempted directions are not replayed as scouting lanes."
+                            % (method_id, parent.experiment_id)
                         ),
                     )
                 )
-        if not choices:
-            return self.choose(context)
-        if direction_index >= len(choices):
-            raise ValueError(
-                "parallel direction index exceeds unique eligible method cards"
-            )
-        return choices[direction_index]
+                selected_methods.add(method_id)
+        return tuple(choices)
 
     def parallel_direction_capacity(self, context: Any) -> int:
-        """Return the number of unique legal method-card lanes at a checkpoint."""
+        """Return policy-primary plus globally untried scouting capacity."""
 
-        graph = GraphView.from_context(context)
-        eligible = list(graph.eligible_parents())
-        allowed = _allowed_families(context)
-        if not eligible or not allowed or not method_card_map(context):
-            return 1 if self.choose(context).action == "propose" else 0
-        return sum(
-            len(_ordered_eligible_method_cards(context, family))
-            for family in allowed
-            if family != "ensemble"
-        )
+        return len(self._parallel_choices(context))
 
     def choose_synthesis(
         self, context: Any, component_experiment_ids: Sequence[str]

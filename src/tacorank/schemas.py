@@ -562,10 +562,10 @@ class ResearchCampaign(StrictModel):
 
 
 class LiteratureEvidence(StrictModel):
-    """Bounded scholarly evidence retrieved by the online planner skill."""
+    """Bounded scholarly evidence exposed to the code-blind planner."""
 
     evidence_id: NonEmptyStr
-    provider: Literal["openalex"] = "openalex"
+    provider: Literal["openalex", "paper_bank"] = "openalex"
     paper_id: NonEmptyStr
     title: NonEmptyStr
     abstract: NonEmptyStr
@@ -576,6 +576,14 @@ class LiteratureEvidence(StrictModel):
     influential_citation_count: int = Field(default=0, ge=0)
     url: NonEmptyStr
     query: NonEmptyStr
+    organization: Optional[Literal["bytedance", "meta", "kuaishou"]] = None
+    relationship: Optional[
+        Literal["company_authored", "company_coauthored", "company_deployed"]
+    ] = None
+    topics: List[NonEmptyStr] = Field(default_factory=list)
+    priority: Optional[int] = Field(default=None, ge=1, le=3)
+    prominence_basis: List[NonEmptyStr] = Field(default_factory=list)
+    authors_truncated: bool = False
 
     @field_validator("evidence_id")
     @classmethod
@@ -587,6 +595,13 @@ class LiteratureEvidence(StrictModel):
     def validate_authors(cls, values: List[str]) -> List[str]:
         if len(values) != len(set(values)):
             raise ValueError("literature evidence authors must be unique")
+        return values
+
+    @field_validator("topics", "prominence_basis")
+    @classmethod
+    def validate_unique_literature_tags(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("literature evidence tags must be unique")
         return values
 
     @field_validator("url")

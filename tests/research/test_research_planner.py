@@ -165,6 +165,33 @@ def test_planner_researches_and_requires_immutable_literature(planner_context):
     assert result["resource_delta"].wall_time_ms == 25
 
 
+def test_planner_treats_advisory_bank_evidence_as_optional(planner_context):
+    evidence = paper_evidence()
+
+    class Skill:
+        requires_citation = False
+        resource_delta = ResourceDelta()
+
+        async def research(self, context, choice):
+            del context, choice
+            return [evidence]
+
+    provider = MockResearchProvider(
+        lambda request: make_spec(planner_context, request.policy_choice)
+    )
+    planner = ResearchPlanner(
+        provider,
+        output_factory=output_factory,
+        literature_skill=Skill(),
+    )
+
+    result = asyncio.run(planner.propose(planner_context))
+
+    assert provider.requests[0].literature_required is False
+    assert result["action"] == "propose"
+    assert result["spec"].literature_evidence == []
+
+
 def test_planner_returns_blocked_when_no_parent(planner_context):
     planner_context.eligible_frontier = []
     planner = ResearchPlanner(

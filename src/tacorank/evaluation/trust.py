@@ -33,8 +33,9 @@ class TrustConfig:
     gain_concentration_threshold: float = 0.70
     drift_slope_threshold: float = 0.002
     validation_arm_gap_threshold: float = 0.006
-    # Proxy deltas below this magnitude are not reliable enough to prune or to
-    # claim an improvement.  They receive one bounded full-fidelity check.
+    # Proxy deltas below this magnitude are not reliable enough to claim an
+    # improvement. The decision layer promotes only the positive side of this
+    # noise band and cleanly prunes zero or negative deltas to bound resources.
     proxy_improvement_threshold: float = 0.0016
     require_non_decreasing_metrics: bool = False
     no_op: NoOpConfig = field(default_factory=NoOpConfig)
