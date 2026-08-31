@@ -136,6 +136,18 @@ def _violation_codes(result: Any) -> set[str]:
     }
 
 
+def _bounded_evidence(value: Any) -> str:
+    """Retain both classification context and the terminal exception detail."""
+
+    normalized = normalize_text(str(value))
+    if len(normalized) <= EVIDENCE_LIMIT:
+        return normalized
+    separator = " ... "
+    head = 300
+    tail = EVIDENCE_LIMIT - head - len(separator)
+    return normalized[:head] + separator + normalized[-tail:]
+
+
 def _prediction_change_evidence(change: Any) -> str:
     """Render how far a no-op candidate sat from its parent, if measured.
 
