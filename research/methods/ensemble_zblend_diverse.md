@@ -26,6 +26,14 @@ the candidate, plus contract-permitted columns.
 
 ## Expected effect
 
+Offline measurement on this exact contract (2026-08-31): a per-user z-sum
+of three diverse members — the accepted causal-replacement model, the
+compact-rank variant, and a reference causal lambdarank — scored 0.60411
+full-fidelity versus the 0.60147 parent and 0.60351 best single blend.
+Diversity of independently designed feature frames is what pays; members
+from one shared frame measured only 0.60216.
+
+
 Sibling measurement: about +0.005 over the best single member when the
 members are architecturally diverse; near zero when they are seeds of the
 same model (+0.001).
