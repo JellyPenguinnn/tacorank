@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Type, TypeVa
 
 from ..artifacts import ArtifactStore
 from ..config import RunConfig, VerifiedContract
+from ..git.refs import GitOperationError, read_blob_at_commit
 from ..memory.projections import project
 from ..memory.retrieval import (
     active_lessons,
@@ -175,12 +176,20 @@ def _path_is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-def _sha256_file(path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def _sha256_file_at_commit(
+    repository_root, commit_sha: str, relative_path: str
+) -> str:
+    try:
+        encoded = read_blob_at_commit(
+            repository_root,
+            commit_sha,
+            relative_path,
+        )
+    except GitOperationError as exc:
+        raise ContextBuildError(
+            "cannot bind implementation from immutable parent commit: %s" % exc
+        ) from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _code_blind(value: object) -> object:
@@ -480,8 +489,11 @@ class ContextBuilder:
         verified = legacy_campaign_method is not None
         if verified:
             targets = ["solution/experiment_config.py"]
-            implementation_target = root / "solution/research_scaffold.py"
-            implementation_sha256 = _sha256_file(implementation_target)
+            implementation_sha256 = _sha256_file_at_commit(
+                root,
+                proposal.parent_commit_sha,
+                "solution/research_scaffold.py",
+            )
             implementation_id = METHOD_IMPLEMENTATION_IDS[legacy_campaign_method]
             active_parameters = sorted(
                 METHOD_ACTIVE_PARAMETERS[legacy_campaign_method]

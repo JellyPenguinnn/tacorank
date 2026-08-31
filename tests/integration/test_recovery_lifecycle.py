@@ -12,6 +12,7 @@ from tacorank.orchestrator.fakes import (
     FakePatchGate,
 )
 from tacorank.orchestrator.state import ExperimentStatus
+from tacorank.providers.research_provider import ProviderError
 from tacorank.recovery.policy import RecoveryManager
 from tacorank.schemas import (
     CheckResult,
@@ -231,6 +232,12 @@ class PermanentInitialCodingWorker(FakeCodingWorker):
         )
 
 
+class FailingNextPlanner:
+    async def propose(self, context):
+        del context
+        raise ProviderError("next planner request failed")
+
+
 class ProposeThenBlockPlanner:
     def __init__(self, delegate):
         self.delegate = delegate
@@ -272,6 +279,31 @@ def test_coder_context_failure_is_recorded_at_the_coding_boundary(
     assert state.phase == "planning"
     assert state.current_experiment is None
     assert state.experiments["exp_001"].status.value == "invalid"
+
+
+def test_planner_failure_after_pre_evaluation_abandon_is_durable(
+    harness, baseline_evaluation
+):
+    harness.coding_worker = PermanentInitialCodingWorker(
+        harness.event_store.artifact_store
+    )
+    harness.recovery_manager = RecoveryManager()
+    harness.bootstrap(baseline_evaluation)
+
+    recovered = asyncio.run(harness.run_one_experiment())
+    assert recovered.phase == "planning"
+    assert recovered.current_experiment is None
+    assert recovered.experiments["exp_001"].status == ExperimentStatus.INVALID
+
+    harness.planner = FailingNextPlanner()
+    stopped = asyncio.run(harness.run_one_experiment())
+
+    assert stopped.stop_reason_code == "PLANNER_PROVIDER_FAILURE"
+    assert [event.event_type for event in harness.events()][-2:] == [
+        EventType.PLANNING_FAILED,
+        EventType.RUN_STOPPED,
+    ]
+    assert harness.events()[-2].payload.result.error_summary == "next planner request failed"
 
 
 class FailOnceRunner(FakeExecutionRunner):

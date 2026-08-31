@@ -15,7 +15,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional, Sequence
 
 
@@ -97,6 +97,49 @@ def resolve_commit(repository: Path, object_id: str) -> str:
             f"Git resolved {expected} to a different object ID",
         )
     return resolved
+
+
+def read_blob_at_commit(
+    repository: Path,
+    commit_sha: str,
+    relative_path: str,
+    *,
+    max_bytes: int = 4 * 1024 * 1024,
+) -> bytes:
+    """Read one bounded repository file from an exact immutable commit.
+
+    The revision and path are validated separately before being joined into
+    Git's ``<commit>:<path>`` object syntax. This keeps callers from deriving
+    integrity identities from a mutable checkout while preserving the module's
+    argv-only Git boundary.
+    """
+
+    if not isinstance(relative_path, str) or not relative_path:
+        raise GitOperationError("INVALID_BLOB_PATH", "blob path must be non-empty")
+    path = PurePosixPath(relative_path)
+    if (
+        path.is_absolute()
+        or relative_path != path.as_posix()
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise GitOperationError(
+            "INVALID_BLOB_PATH", "blob path must be a normalized relative path"
+        )
+    if (
+        isinstance(max_bytes, bool)
+        or not isinstance(max_bytes, int)
+        or max_bytes < 1
+    ):
+        raise GitOperationError("INVALID_GIT_BOUND", "invalid blob size bound")
+
+    repo = Path(repository).resolve(strict=True)
+    commit = resolve_commit(repo, commit_sha)
+    result = _git(
+        repo,
+        ("cat-file", "blob", "%s:%s" % (commit, relative_path)),
+        max_stdout_bytes=max_bytes,
+    )
+    return result.stdout
 
 
 def branch_tip(repository: Path, branch: str) -> Optional[str]:

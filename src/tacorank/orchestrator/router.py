@@ -956,7 +956,10 @@ class Harness:
         invalid_plan_attempts = _consecutive_invalid_provider_plans(self.events())
         while True:
             try:
-                planner_output = await self.planner.propose(planner_context)
+                planner_output = await self._request_planner_with_retry(
+                    lambda: self.planner.propose(planner_context),
+                    label="sequential_experiment",
+                )
             except Exception as error:
                 self._record_planning_failure(
                     context_id=planner_context.context_id,
@@ -973,6 +976,31 @@ class Harness:
                 )
                 return None
             if planner_output.action == PlannerAction.PROPOSE:
+                proposal = planner_output.spec
+                assert proposal is not None
+                if proposal.context_id != planner_context.context_id:
+                    raise ResumablePlanningError(
+                        "planner proposal cites a different context; "
+                        "resume from the persisted planner checkpoint"
+                    )
+                try:
+                    spec = self.context_builder.bind_implementation(proposal)
+                except Exception as error:
+                    self._record_planning_failure(
+                        context_id=planner_context.context_id,
+                        error=error,
+                        causation_event_id=planner_context_event.event_id,
+                    )
+                    self.stop(
+                        StopDecision(
+                            True,
+                            "PLANNER_BINDING_FAILURE",
+                            "The accepted research proposal could not be bound to "
+                            "immutable implementation evidence; the run was stopped "
+                            "with durable failure evidence.",
+                        )
+                    )
+                    return None
                 break
             invalid_provider_plan = (
                 planner_output.action == PlannerAction.BLOCKED
@@ -1022,14 +1050,6 @@ class Harness:
             self.stop(decision)
             return None
 
-        proposal = planner_output.spec
-        assert proposal is not None
-        if proposal.context_id != planner_context.context_id:
-            raise ResumablePlanningError(
-                "planner proposal cites a different context; "
-                "resume from the persisted planner checkpoint"
-            )
-        spec = self.context_builder.bind_implementation(proposal)
         proposal_event = self._append(
             ExperimentProposedPayload(spec=spec),
             stage="proposed",
@@ -1970,20 +1990,41 @@ class Harness:
             )
             raise error
 
-        prepared = []
-        for experiment_id, output in zip(
-            self._parallel_experiment_ids(count), outputs
-        ):
-            proposal = output.spec
-            assert proposal is not None
-            if proposal.context_id != planner_context.context_id:
-                raise ResumablePlanningError(
-                    "parallel planner proposal cites a different context"
+        bound_specs = []
+        try:
+            for experiment_id, output in zip(
+                self._parallel_experiment_ids(count), outputs
+            ):
+                proposal = output.spec
+                assert proposal is not None
+                if proposal.context_id != planner_context.context_id:
+                    raise ResumablePlanningError(
+                        "parallel planner proposal cites a different context"
+                    )
+                proposal = proposal.model_copy(
+                    update={"experiment_id": experiment_id}
                 )
-            proposal = proposal.model_copy(
-                update={"experiment_id": experiment_id}
+                bound_specs.append(
+                    (self.context_builder.bind_implementation(proposal), output)
+                )
+        except Exception as error:
+            self._record_planning_failure(
+                context_id=planner_context.context_id,
+                error=error,
+                causation_event_id=context_event.event_id,
             )
-            spec = self.context_builder.bind_implementation(proposal)
+            self.stop(
+                StopDecision(
+                    True,
+                    "PLANNER_BINDING_FAILURE",
+                    "A parallel proposal could not be bound to immutable "
+                    "implementation evidence.",
+                )
+            )
+            return []
+
+        prepared = []
+        for spec, output in bound_specs:
             proposal_event = self._append(
                 ExperimentProposedPayload(spec=spec),
                 stage="parallel_proposed",
@@ -2161,7 +2202,23 @@ class Harness:
         proposal = proposal.model_copy(
             update={"experiment_id": self._parallel_experiment_ids(1)[0]}
         )
-        spec = self.context_builder.bind_implementation(proposal)
+        try:
+            spec = self.context_builder.bind_implementation(proposal)
+        except Exception as error:
+            self._record_planning_failure(
+                context_id=planner_context.context_id,
+                error=error,
+                causation_event_id=context_event.event_id,
+            )
+            self.stop(
+                StopDecision(
+                    True,
+                    "PLANNER_BINDING_FAILURE",
+                    "The synthesis proposal could not be bound to immutable "
+                    "implementation evidence.",
+                )
+            )
+            return self.state()
         proposal_event = self._append(
             ExperimentProposedPayload(spec=spec),
             stage="synthesis_proposed",

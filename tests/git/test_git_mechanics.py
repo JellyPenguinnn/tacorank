@@ -19,6 +19,7 @@ from tacorank.git.refs import (
     GitOperationError,
     experiment_branch,
     is_ancestor,
+    read_blob_at_commit,
     resolve_commit,
 )
 from tacorank.git.worktrees import WorktreeManager
@@ -61,6 +62,20 @@ def test_ref_names_and_object_ids_are_fail_closed(repository: tuple[Path, str]) 
     with pytest.raises(GitOperationError) as failure:
         resolve_commit(root, "HEAD")
     assert failure.value.code == "INVALID_OBJECT_ID"
+
+
+def test_read_blob_at_commit_ignores_mutable_checkout(
+    repository: tuple[Path, str],
+) -> None:
+    root, base = repository
+    source = root / "solution" / "model.py"
+    source.write_text("VALUE = 999\n", encoding="utf-8")
+
+    assert read_blob_at_commit(root, base, "solution/model.py") == b"VALUE = 1\n"
+
+    with pytest.raises(GitOperationError) as failure:
+        read_blob_at_commit(root, base, "../solution/model.py")
+    assert failure.value.code == "INVALID_BLOB_PATH"
 
 
 def test_worktree_patch_commit_and_safe_removal(

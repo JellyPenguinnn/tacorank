@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from tacorank.coding import CodingWorkerError
+from tacorank.context.builder import ContextBuildError
 from tacorank.orchestrator.convergence import StopDecision
 from tacorank.orchestrator.fakes import (
     FakeCodingWorker,
@@ -302,6 +303,12 @@ class InvalidOncePlanner:
         return await BlockedPlanner().propose(context)
 
 
+class RaisingPlanner:
+    async def propose(self, context):
+        del context
+        raise ProviderError("planner transport returned malformed JSON")
+
+
 class IntegrityRejectingPatchGate:
     async def check(self, candidate):
         return PatchCheckResult(
@@ -482,6 +489,50 @@ def test_one_invalid_provider_plan_does_not_interrupt_campaign(
     assert planner.calls == 2
     assert state.status.value == "stopped"
     assert state.stop_reason_code == "no_legal_proposal"
+
+
+def test_planner_provider_failure_is_recorded_before_specific_stop(
+    harness, baseline_evaluation
+):
+    harness.planner = RaisingPlanner()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert state.stop_reason_code == "PLANNER_PROVIDER_FAILURE"
+    assert state.experiments_proposed == 0
+    assert [event.event_type for event in harness.events()][-2:] == [
+        EventType.PLANNING_FAILED,
+        EventType.RUN_STOPPED,
+    ]
+    failure = harness.events()[-2].payload.result
+    assert failure.error_class == "ProviderError"
+    assert failure.error_summary == "planner transport returned malformed JSON"
+
+
+def test_binding_failure_is_durable_and_never_becomes_generic_adapter_stop(
+    harness, baseline_evaluation, monkeypatch
+):
+    harness.bootstrap(baseline_evaluation)
+
+    def fail_binding(proposal):
+        del proposal
+        raise ContextBuildError("immutable parent implementation is unavailable")
+
+    monkeypatch.setattr(harness.context_builder, "bind_implementation", fail_binding)
+
+    state = asyncio.run(harness.run_one_experiment())
+
+    assert state.stop_reason_code == "PLANNER_BINDING_FAILURE"
+    assert state.experiments_proposed == 0
+    assert [event.event_type for event in harness.events()][-2:] == [
+        EventType.PLANNING_FAILED,
+        EventType.RUN_STOPPED,
+    ]
+    assert (
+        harness.events()[-2].payload.result.error_summary
+        == "immutable parent implementation is unavailable"
+    )
 
 
 def test_integrity_violation_is_recorded_and_stops_the_run(

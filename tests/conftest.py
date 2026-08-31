@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import shutil
+import subprocess
 
 import pytest
 
@@ -85,11 +86,48 @@ def repository(tmp_path: Path) -> Path:
         )
     (tmp_path / "artifacts").mkdir()
     (tmp_path / "runs").mkdir()
+    subprocess.run(
+        ["git", "init", "-q", str(tmp_path)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "."],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=TacoRank Tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixture baseline",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     return tmp_path
 
 
 @pytest.fixture
 def config(repository: Path) -> RunConfig:
+    baseline_commit_sha = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
     return RunConfig(
         run_id="run_test",
         repository_root=repository,
@@ -98,7 +136,7 @@ def config(repository: Path) -> RunConfig:
         primary_metric_name="primary",
         data_manifest_sha256=sha(b"data"),
         evaluator_sha256=sha(b"evaluator"),
-        baseline_commit_sha="b" * 40,
+        baseline_commit_sha=baseline_commit_sha,
         research_provider="deepseek",
         max_experiments=3,
         seed_schedule=[11, 22, 33, 44],

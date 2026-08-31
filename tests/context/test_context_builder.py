@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from tacorank.context.builder import (
     _planner_primary_score,
 )
 from tacorank.context.redaction import redact
+from tacorank.git.refs import read_blob_at_commit
 from tacorank.research.duplicate_detection import compute_duplicate_key
 from tacorank.schemas import (
     ArtifactKind,
@@ -339,12 +341,28 @@ def test_controller_hash_binds_verified_configuration_capability(
     }
     values["duplicate_key"] = compute_duplicate_key(values)
 
+    implementation_path = "solution/research_scaffold.py"
+    immutable_bytes = read_blob_at_commit(
+        harness.config.repository_root,
+        harness.config.baseline_commit_sha,
+        implementation_path,
+    )
+    checkout_path = harness.config.repository_root / implementation_path
+    checkout_path.write_text(
+        checkout_path.read_text(encoding="utf-8")
+        + "\n# Concurrent checkout edit must not affect run identity.\n",
+        encoding="utf-8",
+    )
+
     spec = harness.context_builder.bind_implementation(ResearchProposal(**values))
 
     assert spec.target_files == ["solution/experiment_config.py"]
     assert spec.trial_type.value == "configuration"
     assert spec.implementation_id == "objective_bpr_v2"
-    assert len(spec.implementation_sha256 or "") == 64
+    assert spec.implementation_sha256 == hashlib.sha256(immutable_bytes).hexdigest()
+    assert spec.implementation_sha256 != hashlib.sha256(
+        checkout_path.read_bytes()
+    ).hexdigest()
     assert set(spec.active_parameter_names) == set(parameters)
 
 
