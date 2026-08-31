@@ -247,7 +247,9 @@ def _assessment(
     flags: Sequence[str],
     aggregate,
 ) -> TrustAssessment:
-    has_confirmed_aggregate = aggregate.count >= 3
+    # Keep equal to TrustConfig.required_seed_count (and the schema floor in
+    # schemas.EvaluationResult): two confirmed seeds carry the aggregate.
+    has_confirmed_aggregate = aggregate.count >= 2
     return TrustAssessment(
         verdict=verdict,
         stability=stability,
