@@ -89,6 +89,20 @@ _CODE_RECOVERY_ACTIONS = frozenset(
 )
 
 
+class _RepairWorkerUnavailable(Exception):
+    """A repair worker failed; the failure and recovery are already recorded.
+
+    Raised by ``_execute_code_repair`` after it records the adapter failure
+    and obtains a non-retry recovery decision, so upper layers must honor
+    ``action`` instead of recording or deciding the same failure again.
+    """
+
+    def __init__(self, action: RecoveryAction, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.action = action
+        self.cause = cause
+
+
 class ResumablePlanningError(OrchestrationError):
     """Provider output is invalid, but the durable planning checkpoint is safe.
 
@@ -618,13 +632,43 @@ class Harness:
             update={"recovery_instructions": decision.instructions}
         )
         if decision.action == RecoveryAction.RESTART_FROM_TRUSTED_PARENT:
-            candidate = await self.coding_worker.restart_from_trusted_parent(
-                context, decision
-            )
+            worker_call = self.coding_worker.restart_from_trusted_parent
             patch_stage = "trusted_parent_restart_patch_created"
         else:
-            candidate = await self.coding_worker.repair_patch(context, decision)
+            worker_call = self.coding_worker.repair_patch
             patch_stage = "repair_patch_created"
+        try:
+            candidate = await worker_call(context, decision)
+        except Exception as error:
+            # A repair worker blip (a Trae step-limit or provider hiccup)
+            # previously escaped to the top-level handler, which stops the
+            # whole run because the continuation point of an arbitrary escaped
+            # exception is unknown. Here the continuation point IS known: the
+            # worktree is disposable and no execution is in flight, so honor
+            # exactly one policy-granted same-commit retry of the same repair
+            # before falling back to that conservative stop.
+            failure_event = self._record_adapter_failure(
+                experiment_id=decision.experiment_id,
+                attempt=decision.repair_attempt + 1,
+                stage="coding",
+                error=error,
+                causation_event_id=decision_event.event_id,
+            )
+            retry_action, retry_recovery = await self._recover(
+                failure_event,
+                failure_event.payload.result,
+                decision.experiment_id,
+            )
+            if retry_action != RecoveryAction.RETRY_SAME_COMMIT:
+                # The failure and its recovery decision are already recorded;
+                # signal the decided action upward without re-deciding it.
+                raise _RepairWorkerUnavailable(retry_action, error) from error
+            _, retry_context, retry_decision_event = retry_recovery
+            retry_context = retry_context.model_copy(
+                update={"recovery_instructions": decision.instructions}
+            )
+            candidate = await worker_call(retry_context, decision)
+            decision_event = retry_decision_event
         candidate = candidate.__class__.model_validate(
             {
                 **candidate.model_dump(mode="json"),
@@ -816,6 +860,23 @@ class Harness:
             # inspect/replace the provider instead of converting it into a
             # stopped run.
             raise
+        except _RepairWorkerUnavailable as failure:
+            # The repair worker failure and its recovery decision are already
+            # in the ledger. Honor the decided action without re-deciding:
+            # planning continues for return_to_planner; every other action
+            # keeps the conservative safe stop, because a mid-fidelity
+            # abandon without a terminal decision can deadlock the planner.
+            if failure.action == RecoveryAction.RETURN_TO_PLANNER:
+                return self.state()
+            self.stop(
+                StopDecision(
+                    True,
+                    "ADAPTER_FAILURE_%s" % failure.action.value.upper(),
+                    "The coding repair adapter failed; recovery recorded %s "
+                    "and the run was stopped safely." % failure.action.value,
+                )
+            )
+            return self.state()
         except Exception as error:
             try:
                 return await self._handle_unexpected_adapter_failure(error)
@@ -1503,25 +1564,14 @@ class Harness:
                                 recovery, proposal_event.event_id
                             )
                         )
-                    except CodingWorkerError as error:
+                    except _RepairWorkerUnavailable as failure:
                         # The no-op evidence remains a valid research result
-                        # even when the bounded repair worker exhausts its 20
-                        # internal steps. Preserve the worker failure, then
-                        # return ownership to planning instead of stopping the
-                        # autonomous loop.
-                        failure_event = self._record_adapter_failure(
-                            experiment_id=spec.experiment_id,
-                            attempt=attempt,
-                            stage="coding",
-                            error=error,
-                            causation_event_id=self.events()[-1].event_id,
-                        )
-                        action, recovery = await self._recover(
-                            failure_event,
-                            failure_event.payload.result,
-                            spec.experiment_id,
-                        )
-                        if action == RecoveryAction.RETURN_TO_PLANNER:
+                        # even when the bounded repair worker exhausts its
+                        # internal steps. ``_execute_code_repair`` already
+                        # recorded the worker failure and its recovery
+                        # decision; return ownership to planning instead of
+                        # stopping the autonomous loop.
+                        if failure.action == RecoveryAction.RETURN_TO_PLANNER:
                             return self.state()
                         raise
                     if self._stop_if_runtime_budget_exhausted():

@@ -51,6 +51,12 @@ smoke, proxy, and full alike.
 
 ## Minimal implementation
 
+Start from the reference implementation in the model_lgbm_lambdarank_blend
+card when it is supplied: keep its data loading, feature frame, category
+alignment, grouping, and output plumbing, and change only the objective and
+the combine step (output the model's own score instead of the blended
+residual, with the FM score added as an input feature).
+
 Train one LightGBM model (binary objective on long_view, or lambdarank grouped
 by user) over the permitted raw fields, a small set of strictly past-only
 aggregate features, and the aligned FM parent score as one input feature. Use
