@@ -752,6 +752,12 @@ class Harness:
             retry_context = retry_context.model_copy(
                 update={"recovery_instructions": decision.instructions}
             )
+            # The failed attempt may have consumed a repair slot, so the
+            # worker's identity check requires the reissued decision to carry
+            # the retry context's attempt number, not the stale original.
+            decision = decision.model_copy(
+                update={"repair_attempt": int(retry_context.repair_attempt)}
+            )
             candidate = await worker_call(retry_context, decision)
             decision_event = retry_decision_event
         candidate = candidate.__class__.model_validate(
