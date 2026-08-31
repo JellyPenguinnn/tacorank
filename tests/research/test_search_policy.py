@@ -791,7 +791,10 @@ def test_meaningful_no_gain_backtracks_to_highest_scoring_experimental_path(
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.parent.experiment_id == "exp_002"
     assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    # exp_002 already spent temporal_history_compact, so refining its own
+    # family now takes the family's other card instead of leaving the branch
+    # after a single attempt.
+    assert choice.method_card_id == "temporal_history_target_attention"
 
 
 def test_meaningful_no_gain_switches_family_after_best_path_refinement(
@@ -823,6 +826,22 @@ def test_meaningful_no_gain_switches_family_after_best_path_refinement(
         method_card_ids=["temporal_history_compact"],
         status="rejected",
     )
+    # The family only switches once every temporal_history card has been spent
+    # on exp_002. Leaving the second one unattempted would test same-family
+    # refinement instead.
+    attention = make_summary(
+        "exp_005",
+        parent_experiment_id="exp_002",
+        family="temporal_history",
+        score=0.60129,
+        parent_eligible=False,
+        decision="reject",
+        trust_verdict="negative",
+        parent_delta=-0.0000985105993917,
+        prediction_change=0.02,
+        method_card_ids=["temporal_history_target_attention"],
+        status="rejected",
+    )
     latest = make_summary(
         "exp_004",
         parent_experiment_id="exp_002",
@@ -839,7 +858,7 @@ def test_meaningful_no_gain_switches_family_after_best_path_refinement(
         baseline=root,
         current_best=root,
         eligible_frontier=[root, strongest, latest],
-        family_history=[strongest, refinement, latest],
+        family_history=[strongest, refinement, attention, latest],
         method_cards=planner_context.method_cards,
         playbook=planner_context.playbook,
     )

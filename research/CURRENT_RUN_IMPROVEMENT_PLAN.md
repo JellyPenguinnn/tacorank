@@ -39,7 +39,7 @@ before backtracking, rather than probing every research family from baseline.
   ],
   "method_order": {
     "objective": ["objective_pairwise_bpr", "objective_lambdarank_ndcg", "objective_listwise_user_softmax"],
-    "temporal_history": ["temporal_history_compact"],
+    "temporal_history": ["temporal_history_compact", "temporal_history_target_attention"],
     "multitask": ["multitask_single_auxiliary"],
     "duration_bias": ["duration_bias_quantile_deconfounded", "duration_bias_censored_watch_time"],
     "features": ["features_list_context_relative", "temporal_drift_past_only"],
