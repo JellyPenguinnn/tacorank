@@ -77,7 +77,8 @@ bagging fraction 0.85, roughly 400 rounds, and drop raw video_id (its
 signal enters through the target encodings; keep author_id as the one raw
 id worth having). Categorical dtype for the kept id columns, groups built
 per user with a stable sort and restored by inverse permutation, raw-score
-prediction, seed bound to invocation.seed, and finite scores everywhere.
+prediction, seed bound to invocation.seed, num_threads=8 (the full frozen container
+quota — never 1), and finite scores everywhere.
 Train at full strength for every fidelity.
 
 ## Sources

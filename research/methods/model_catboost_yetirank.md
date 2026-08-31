@@ -49,7 +49,8 @@ CatBoost
 parameters measured strong in the sibling study: loss_function YetiRank,
 depth 6, learning_rate 0.05, around 245 iterations (frozen — there is no
 label access for early stopping in this harness), random_seed bound to
-invocation.seed, categorical ids passed as CatBoost cat_features strings,
+invocation.seed, thread_count=8 (the full frozen container quota — never 1;
+the quota is fixed so full threading stays reproducible), categorical ids passed as CatBoost cat_features strings,
 drop raw video_id and music_id. Predict raw scores, keep them
 unconstrained, ensure finiteness. Train at full strength for every
 fidelity.
