@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from tacorank.coding import CodingWorkerError
+from tacorank.context.builder import ContextBuildError
 from tacorank.orchestrator.convergence import StopDecision
 from tacorank.orchestrator.fakes import (
     FakeCodingWorker,
@@ -388,6 +389,46 @@ def test_bounded_parallel_round_preserves_lane_failures_before_safe_stop(
     assert all(
         event.payload.output.resource_delta.llm_input_tokens == 11
         for event in recommendations
+    )
+
+
+def test_parallel_round_quarantines_pre_coder_lane_failure(
+    harness, baseline_evaluation
+):
+    harness.config = harness.config.model_copy(
+        update={
+            "max_experiments": 10,
+            "parallel_directions": 3,
+            "parallel_schedule": [3, 3, 2],
+            "research_agent_mode": "bounded_react",
+            "synthesize_parallel_improvements": False,
+        }
+    )
+    harness.planner = ParallelPlanner(harness.config.baseline_commit_sha)
+    original_build_coder = harness.context_builder.build_coder
+
+    def fail_one_lane(events, spec, **kwargs):
+        if spec.experiment_id == "exp_002":
+            raise ContextBuildError("mandatory context exceeds the hard token budget")
+        return original_build_coder(events, spec, **kwargs)
+
+    harness.context_builder.build_coder = fail_one_lane
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_parallel_round())
+
+    assert state.stop_reason_code is None
+    assert state.experiments["exp_002"].status == ExperimentStatus.INVALID
+    failures = [
+        event
+        for event in harness.events()
+        if event.event_type == EventType.ADAPTER_FAILED
+    ]
+    assert len(failures) == 1
+    assert failures[0].payload.result.experiment_id == "exp_002"
+    assert failures[0].payload.result.failure_stage == "coding"
+    assert not any(
+        event.event_type == EventType.RUN_STOPPED for event in harness.events()
     )
 
 

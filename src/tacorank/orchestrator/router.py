@@ -829,6 +829,15 @@ class Harness:
                         if event.payload.context.role == "recovery"
                         else "coding"
                     )
+            elif event.event_type == EventType.EXPERIMENT_PROPOSED:
+                # A failure while compiling the initial coder context occurs
+                # after proposal creation but before a coder context, patch, or
+                # execution event exists. Treat it as a coding-stage failure
+                # so the adapter-failure transition is legal for a PROPOSED
+                # node; falling back to recovery would make the control plane
+                # reject its own evidence and mask the original error.
+                if event.payload.spec.experiment_id == experiment_id:
+                    return "coding"
         return "recovery"
 
     async def _handle_unexpected_adapter_failure(self, error: Exception) -> object:

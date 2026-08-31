@@ -381,6 +381,35 @@ def test_coder_context_fails_instead_of_trimming_approved_guidance(
         harness.context_builder.build_coder(harness.events(), spec, max_tokens=1)
 
 
+def test_multi_card_coder_context_uses_expanded_budget(
+    harness, baseline_evaluation
+):
+    harness.bootstrap(baseline_evaluation)
+    planner_context = harness.context_builder.build_planner(harness.events())
+    proposal = asyncio.run(
+        harness.planner.propose(planner_context)
+    ).spec
+    assert proposal is not None
+    values = proposal.model_copy(
+        update={
+            "experiment_id": "exp_002",
+            "family": "composition",
+            "method_card_ids": [
+                "objective_pairwise_bpr",
+                "model_deep_cross_network",
+            ],
+            "duplicate_key": "composition:objective:dcn",
+        }
+    )
+    spec = harness.context_builder.bind_implementation(values)
+
+    context = harness.context_builder.build_coder(harness.events(), spec)
+
+    assert len(context.selected_method_cards) == 2
+    assert context.estimated_tokens > harness.config.context_token_limit
+    assert context.estimated_tokens <= harness.config.synthesis_context_token_limit
+
+
 def test_coder_context_rejects_unavailable_method_guidance(
     harness, baseline_evaluation
 ):
@@ -394,6 +423,18 @@ def test_coder_context_rejects_unavailable_method_guidance(
 
     with pytest.raises(ContextBuildError, match="method_that_does_not_exist"):
         harness.context_builder.build_coder(harness.events(), spec)
+
+
+def test_unstarted_experiment_failure_is_classified_as_coding(
+    harness, baseline_evaluation
+):
+    harness.bootstrap(baseline_evaluation)
+
+    prepared = asyncio.run(harness._prepare_experiment())
+    assert prepared is not None
+    spec, _ = prepared
+
+    assert harness._adapter_failure_stage(spec.experiment_id) == "coding"
 
 
 def test_execution_attempts_are_unique_across_fidelities(harness, baseline_evaluation):

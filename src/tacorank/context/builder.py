@@ -1283,7 +1283,14 @@ class ContextBuilder:
         effective_max_tokens = (
             max_tokens if max_tokens is not None else self.config.context_token_limit
         )
-        if spec.component_experiment_ids and max_tokens is None:
+        if max_tokens is None and (
+            spec.component_experiment_ids or len(spec.method_card_ids) > 1
+        ):
+            # Multi-card compositions carry several complete, source-aware
+            # method cards. They need the same expanded prompt budget as a
+            # patch synthesis, even when they do not yet have component
+            # experiment IDs. A cold-start composition otherwise fails while
+            # building coder context before Trae can inspect it.
             effective_max_tokens = self.config.synthesis_context_token_limit
         selected_method_cards: List[Dict[str, object]] = []
         wanted = set(spec.method_card_ids)
