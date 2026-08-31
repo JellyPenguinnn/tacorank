@@ -43,7 +43,7 @@ before backtracking, rather than probing every research family from baseline.
     "multitask": ["multitask_single_auxiliary"],
     "duration_bias": ["duration_bias_quantile_deconfounded", "duration_bias_censored_watch_time"],
     "features": ["features_list_context_relative", "temporal_drift_past_only"],
-    "model": ["model_gbdt_stack", "model_compact_ranker", "model_stacked_cross_residual"],
+    "model": ["model_lgbm_lambdarank_blend", "model_gbdt_stack", "model_compact_ranker", "model_stacked_cross_residual"],
     "ensemble": ["ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]
   }
@@ -57,9 +57,12 @@ below explains the evidence semantics and research rationale for humans.
 `model` leads the family order deliberately: fourteen bounded additive
 residual experiments in run_20260831T_v4 all stayed within ±0.005 of the FM
 parent (spearman 0.988), so the remaining headroom requires a larger
-hypothesis class first — `model_gbdt_stack` replaces the served score with a
-LightGBM model that takes the FM score as an input feature — with residual
-families as follow-ups on the stronger parent.
+hypothesis class first. `model_lgbm_lambdarank_blend` goes first because the
+sibling evaluation run_017_global_repro50 confirmed its exact recipe at
++0.0023 full-fidelity primary (its seed-mean added ~+0.0002 more);
+`model_gbdt_stack` follows as the replacement-capable step beyond it. The
+same sibling run's DCNv2 hybrid attempt failed in coding twice — treat deep
+architectures as low priority under this contract's CPU budget.
 
 This file tells the Planner how to turn verified evaluation feedback into the
 next research direction. It is seed knowledge, not dynamic memory. During a

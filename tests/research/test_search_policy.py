@@ -13,9 +13,9 @@ def test_policy_starts_score_guided_depth_first_from_baseline(planner_context):
     assert choice.action == "propose"
     assert choice.phase == "depth"
     assert choice.reason_code == "SCORE_GUIDED_DEPTH_FIRST"
-    assert choice.family == "objective"
+    assert choice.family == "model"
     assert choice.parent.experiment_id == "exp_0000"
-    assert choice.method_card_id == "objective_pairwise_bpr"
+    assert choice.method_card_id == "model_lgbm_lambdarank_blend"
 
 
 def test_clean_evaluator_baseline_does_not_imply_executable_parent_parity(
@@ -336,8 +336,8 @@ def test_playbook_continues_after_no_op_with_independent_choice(planner_context)
 
     assert choice.action == "propose"
     assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
-    assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    assert choice.family == "model"
+    assert choice.method_card_id == "model_lgbm_lambdarank_blend"
 
 
 def test_no_op_tree_ranker_can_choose_one_same_mechanism_reimplementation(
@@ -442,7 +442,7 @@ def test_playbook_branches_after_terminal_proxy_prune(planner_context):
     assert choice.reason_code == "EARLY_FIDELITY_REJECTED"
     assert choice.parent.experiment_id == "exp_0000"
     assert choice.family == "model"
-    assert choice.method_card_id == "model_gbdt_stack"
+    assert choice.method_card_id == "model_lgbm_lambdarank_blend"
 
 
 def test_soft_pairwise_tradeoff_gets_one_bounded_listwise_child(planner_context):
@@ -920,7 +920,7 @@ def test_optional_ranker_cannot_inject_an_illegal_choice(planner_context):
     choice = policy.choose(planner_context)
 
     assert choice.family == "model"
-    assert choice.method_card_id == "model_gbdt_stack"
+    assert choice.method_card_id == "model_lgbm_lambdarank_blend"
 
 
 def test_policy_fails_closed_when_contract_has_no_allowed_families(planner_context):

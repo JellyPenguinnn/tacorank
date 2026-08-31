@@ -44,7 +44,7 @@ def make_spec(context, choice):
                 "cost_tier": "medium",
             },
         )(),
-        "method_card_ids": ["objective_pairwise_bpr"],
+        "method_card_ids": [choice.method_card_id or "objective_pairwise_bpr"],
         "evidence_event_ids": ["evt_000001"],
     }.items():
         setattr(spec, name, value)
