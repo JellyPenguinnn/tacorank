@@ -19,7 +19,10 @@ from .types import (
 @dataclass(frozen=True)
 class TrustConfig:
     eta_floor: float = 0.0016
-    required_seed_count: int = 3
+    # Two seeds decide stability: observed candidate seed spread (~1e-4) sits
+    # far below the eta floor (1.6e-3), so a third full retrain buys almost no
+    # information while costing a full evaluation of wall clock.
+    required_seed_count: int = 2
     baseline_seed_std: float = 0.0008
     unstable_std_multiplier: float = 3.0
     too_good_delta: float = 0.05

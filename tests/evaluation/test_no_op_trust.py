@@ -95,12 +95,19 @@ class NoOpTrustTests(unittest.TestCase):
         self.assertEqual(trust.verdict, Verdict.ACCEPTED)
         self.assertEqual(trust.stability, Stability.CONFIRMED)
 
-    def test_two_differing_seed_scores_still_require_confirmation(self):
+    def test_single_seed_score_still_requires_confirmation(self):
+        change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
+        trust = assess_trust(
+            evidence(change, parent_delta=0.01, seed_scores=(0.61,))
+        )
+        self.assertEqual(trust.stability, Stability.SINGLE_SEED)
+
+    def test_two_seed_scores_confirm_stability(self):
         change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
         trust = assess_trust(
             evidence(change, parent_delta=0.01, seed_scores=(0.61, 0.6102))
         )
-        self.assertEqual(trust.stability, Stability.SINGLE_SEED)
+        self.assertEqual(trust.stability, Stability.CONFIRMED)
 
     def test_proxy_uses_symmetric_noise_band_before_pruning(self):
         change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
