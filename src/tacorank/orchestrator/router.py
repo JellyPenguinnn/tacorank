@@ -899,41 +899,57 @@ class Harness:
             stage="planner_context",
             causation_event_id=events[-1].event_id,
         )
-        try:
-            planner_output = await self.planner.propose(planner_context)
-        except Exception as error:
-            self._record_planning_failure(
-                context_id=planner_context.context_id,
-                error=error,
-                causation_event_id=planner_context_event.event_id,
-            )
-            self.stop(
-                StopDecision(
-                    True,
-                    "PLANNER_PROVIDER_FAILURE",
-                    "The research planner failed before proposing a new experiment; "
-                    "the run was stopped with durable failure evidence.",
+        invalid_plan_attempts = _consecutive_invalid_provider_plans(self.events())
+        while True:
+            try:
+                planner_output = await self.planner.propose(planner_context)
+            except Exception as error:
+                self._record_planning_failure(
+                    context_id=planner_context.context_id,
+                    error=error,
+                    causation_event_id=planner_context_event.event_id,
                 )
+                self.stop(
+                    StopDecision(
+                        True,
+                        "PLANNER_PROVIDER_FAILURE",
+                        "The research planner failed before proposing a new experiment; "
+                        "the run was stopped with durable failure evidence.",
+                    )
+                )
+                return None
+            if planner_output.action == PlannerAction.PROPOSE:
+                break
+            invalid_provider_plan = (
+                planner_output.action == PlannerAction.BLOCKED
+                and planner_output.reason_code == "INVALID_PROVIDER_PLAN"
             )
-            return None
-        if planner_output.action != PlannerAction.PROPOSE:
+            recommendation_stage = (
+                "planner_recommended_invalid_%02d" % (invalid_plan_attempts + 1)
+                if invalid_provider_plan
+                else "planner_recommended"
+            )
             self._append(
                 PlannerRecommendedPayload(output=planner_output),
-                stage="planner_recommended",
+                stage=recommendation_stage,
                 causation_event_id=planner_context_event.event_id,
                 resource_delta=planner_output.resource_delta,
             )
             if planner_output.action == PlannerAction.BLOCKED:
                 if planner_output.reason_code == "INVALID_PROVIDER_PLAN":
-                    invalid_count = _consecutive_invalid_provider_plans(
-                        self.events()
-                    )
-                    if invalid_count < MAX_CONSECUTIVE_INVALID_PROVIDER_PLANS:
-                        return self.state()
+                    invalid_plan_attempts += 1
+                    if (
+                        invalid_plan_attempts
+                        < MAX_CONSECUTIVE_INVALID_PROVIDER_PLANS
+                    ):
+                        # Retry against the exact same immutable context. Rebuilding
+                        # it would duplicate a context artifact and could turn a
+                        # recoverable invalid proposal into an adapter failure.
+                        continue
                     raise ResumablePlanningError(
                         "research provider failed bounded plan validation %d times; "
                         "resume from the persisted planner checkpoint"
-                        % invalid_count
+                        % invalid_plan_attempts
                     )
                 if not _is_search_space_exhaustion(planner_output.reason_code):
                     raise ResumablePlanningError(

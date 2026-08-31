@@ -1220,6 +1220,16 @@ class SearchPolicy:
         if campaign is not None:
             return campaign
 
+        no_op_candidates = _no_op_choices(context, eligible, allowed)
+        if no_op_candidates is not None:
+            if no_op_candidates:
+                return self._rank(no_op_candidates, context)
+            return _blocked(
+                "NO_ELIGIBLE_METHOD",
+                "The latest candidate was a no-op and no legal reimplementation "
+                "or independent method remains.",
+            )
+
         routed = _playbook_choice(context, eligible, allowed)
         if routed is not None:
             return routed

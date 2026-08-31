@@ -542,24 +542,6 @@ class ContextBuilder:
                     "implementation target is protected: %s" % target
                 )
 
-        requested_targets = {
-            target
-            for method_id in proposal.method_card_ids
-            for target in cards[method_id].implementation_targets
-        }
-        # Older/custom method cards without an assignment retain the narrow
-        # stable-entrypoint behavior. Shipped cards name every helper needed by
-        # their mechanism, so unrelated editable files are not exposed to Trae.
-        if not requested_targets:
-            requested_targets = {"solution/candidate.py"}
-        if "solution/candidate.py" not in requested_targets:
-            raise ContextBuildError(
-                "method implementation targets must include the production entrypoint"
-            )
-        targets = [
-            target for target in interfaces if target in requested_targets
-        ]
-
         return ExperimentSpec(
             **proposal.model_dump(mode="python"),
             # The research family is sufficient as a stable lesson-retrieval tag;
@@ -1143,6 +1125,18 @@ class ContextBuilder:
                 )
             )
         optional: List[Tuple[str, str, str]] = []
+        # Durable lessons are the highest-value optional feedback. Include them
+        # before duplicated best/history summaries so a tight context budget
+        # cannot silently erase the agent's learned constraints.
+        lesson_events = active_lessons(visible, tags=normalized_tags, limit=5)
+        for event in lesson_events:
+            optional.append(
+                (
+                    event.event_id,
+                    "Applicable active lesson",
+                    self._planner_lesson_feedback(event),
+                )
+            )
         if current_best is not None:
             optional.append(
                 (
@@ -1162,15 +1156,6 @@ class ContextBuilder:
                         self._planner_experiment_feedback(summary),
                     )
                 )
-        lesson_events = active_lessons(visible, tags=normalized_tags, limit=5)
-        for event in lesson_events:
-            optional.append(
-                (
-                    event.event_id,
-                    "Applicable active lesson",
-                    self._planner_lesson_feedback(event),
-                )
-            )
         for card in load_method_cards(
             self.config.repository_root / "research/methods"
         ).cards:

@@ -5,15 +5,24 @@ import asyncio
 from tacorank.memory.replay import replay
 from tacorank.coding.trae_adapter import CodingWorkerError
 from tacorank.context.builder import ContextBuildError
-from tacorank.orchestrator.fakes import FakeCodingWorker, FakeExecutionRunner
+from tacorank.orchestrator.fakes import (
+    FakeCodingWorker,
+    FakeExecutionRunner,
+    FakeOutputGate,
+    FakePatchGate,
+)
 from tacorank.orchestrator.state import ExperimentStatus
 from tacorank.recovery.policy import RecoveryManager
 from tacorank.schemas import (
+    CheckResult,
+    CheckStatus,
     EventType,
+    PatchCheckResult,
     PlannerAction,
     PlannerOutput,
     RecoveryAction,
     RunOutcome,
+    Violation,
 )
 
 
@@ -179,7 +188,8 @@ def test_coder_context_failure_is_recorded_at_the_coding_boundary(
     assert failure.payload.result.failure_stage == "coding"
     assert state.stop_reason_code is None
     assert state.phase == "planning"
-    assert state.current_experiment.status.value == "invalid"
+    assert state.current_experiment is None
+    assert state.experiments["exp_001"].status.value == "invalid"
 
 
 class FailOnceRunner(FakeExecutionRunner):
@@ -431,7 +441,8 @@ def test_trae_exception_quarantines_candidate_and_returns_to_planning(
     assert decisions[-1].action == RecoveryAction.ABANDON
     assert state.status.value == "running"
     assert state.phase == "planning"
-    assert state.current_experiment.status == ExperimentStatus.INVALID
+    assert state.current_experiment is None
+    assert state.experiments["exp_001"].status == ExperimentStatus.INVALID
     assert replay(events).status.value == "running"
 
 

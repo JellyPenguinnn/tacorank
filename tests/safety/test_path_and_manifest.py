@@ -112,7 +112,16 @@ def test_git_manifest_canonicalizes_cross_platform_line_endings(
     )
     protected = repository / "contract" / "COMPETITION.md"
     protected.write_bytes(b"sealed contract\r\n")
-    assert git(repository, "status", "--porcelain").strip() == ""
+    # Compare canonical Git content rather than the racy worktree stat cache;
+    # some Git builds report a same-content CRLF rewrite as modified until the
+    # index is refreshed even though the clean filter produces the same blob.
+    assert git(
+        repository,
+        "diff",
+        "--exit-code",
+        "--",
+        "contract/COMPETITION.md",
+    ).strip() == ""
     manifest = ProtectedManifest.capture(
         repository,
         ("contract",),

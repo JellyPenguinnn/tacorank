@@ -28,6 +28,18 @@ METHOD_FORMULATIONS = {
     "features_history_affinity": "history_affinity",
 }
 
+CONTROL_PARAMETER_PRIORITY = (
+    "max_train_rows",
+    "residual_scale",
+    "l2",
+    "epochs",
+    "learning_rate",
+    "embedding_dim",
+    "negative_count",
+    "history_shrinkage",
+    "history_decay_days",
+)
+
 
 def reference_variant_parameters(
     context: Any,
@@ -94,3 +106,30 @@ def treatment_partition(
     )
     held = tuple(name for name in names if name not in set(changed))
     return changed, held
+
+
+def enforce_controlled_treatment(
+    parameters: Mapping[str, Any],
+    reference: Mapping[str, Any],
+    active_parameters: Iterable[str],
+) -> Dict[str, Any]:
+    """Keep one matched control when a proposal changes every active parameter."""
+
+    resolved = dict(parameters)
+    changed, held = treatment_partition(resolved, reference, active_parameters)
+    if held or not changed:
+        return resolved
+    changed_set = set(changed)
+    anchor = next(
+        (
+            name
+            for name in CONTROL_PARAMETER_PRIORITY
+            if name in changed_set and name in reference
+        ),
+        None,
+    )
+    if anchor is None:
+        anchor = next((name for name in changed if name in reference), None)
+    if anchor is not None:
+        resolved[anchor] = reference[anchor]
+    return resolved

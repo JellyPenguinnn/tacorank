@@ -563,6 +563,40 @@ class PlanValidator:
             errors.append("INVALID_EVIDENCE_EVENT_ID")
         if not evidence_events.issubset(source_events):
             errors.append("EVIDENCE_OUTSIDE_CONTEXT")
+
+        available_literature: dict[str, dict[str, Any]] = {}
+        for item in literature_evidence:
+            snapshot = _literature_snapshot(item)
+            if snapshot is None:
+                errors.append("LITERATURE_SKILL_EVIDENCE_INVALID")
+                continue
+            evidence_id = str(snapshot["evidence_id"])
+            if evidence_id in available_literature:
+                errors.append("DUPLICATE_LITERATURE_SKILL_EVIDENCE")
+            available_literature[evidence_id] = snapshot
+
+        proposed_literature = as_list(
+            get_value(spec, "literature_evidence", None)
+        )
+        if available_literature and not proposed_literature:
+            errors.append("LITERATURE_EVIDENCE_REQUIRED")
+        proposed_literature_ids = [
+            str(get_value(item, "evidence_id", ""))
+            for item in proposed_literature
+        ]
+        if len(proposed_literature_ids) != len(set(proposed_literature_ids)):
+            errors.append("DUPLICATE_LITERATURE_EVIDENCE")
+        for item in proposed_literature:
+            snapshot = _literature_snapshot(item)
+            if snapshot is None:
+                errors.append("INVALID_LITERATURE_EVIDENCE")
+                continue
+            source = available_literature.get(str(snapshot["evidence_id"]))
+            if source is None:
+                errors.append("LITERATURE_EVIDENCE_OUTSIDE_SKILL")
+            elif snapshot != source:
+                errors.append("LITERATURE_EVIDENCE_TAMPERED")
+
         history = as_list(get_value(context, "family_history", None))
         hypothesis_evidence = get_value(spec, "hypothesis_evidence", None)
         prior_evaluations = {

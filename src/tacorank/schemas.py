@@ -561,6 +561,42 @@ class ResearchCampaign(StrictModel):
         return sum(self.family_budgets.values())
 
 
+class LiteratureEvidence(StrictModel):
+    """Bounded scholarly evidence retrieved by the online planner skill."""
+
+    evidence_id: NonEmptyStr
+    provider: Literal["openalex"] = "openalex"
+    paper_id: NonEmptyStr
+    title: NonEmptyStr
+    abstract: NonEmptyStr
+    year: Optional[int] = Field(default=None, ge=1800, le=2100)
+    authors: List[NonEmptyStr] = Field(default_factory=list)
+    venue: Optional[NonEmptyStr] = None
+    citation_count: int = Field(default=0, ge=0)
+    influential_citation_count: int = Field(default=0, ge=0)
+    url: NonEmptyStr
+    query: NonEmptyStr
+
+    @field_validator("evidence_id")
+    @classmethod
+    def validate_evidence_id(cls, value: str) -> str:
+        return _validate_id(value, "literature_evidence_id")
+
+    @field_validator("authors")
+    @classmethod
+    def validate_authors(cls, values: List[str]) -> List[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("literature evidence authors must be unique")
+        return values
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        if not re.fullmatch(r"https://[^\s/?#]+(?:/[^\s]*)?", value):
+            raise ValueError("literature evidence URL must use HTTPS")
+        return value
+
+
 class HypothesisEvidence(StrictModel):
     """Machine-checkable evidence and treatment boundary for one hypothesis."""
 
@@ -621,6 +657,7 @@ class ResearchProposal(StrictModel):
     # leave this empty.
     component_experiment_ids: List[NonEmptyStr] = Field(default_factory=list)
     evidence_event_ids: List[NonEmptyStr] = Field(default_factory=list)
+    literature_evidence: List[LiteratureEvidence] = Field(default_factory=list)
     hypothesis_evidence: Optional[HypothesisEvidence] = None
     duplicate_key: NonEmptyStr
 

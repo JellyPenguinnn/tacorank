@@ -52,6 +52,43 @@ DEFAULT_TARGET_INTERFACE_EXCERPTS = {
 }
 
 
+# Production contains both the stable typed campaign scaffold and the modular
+# implementation surface merged from main. Development fixtures may provide
+# only the smaller default surface, so keep this expansion production-only.
+PRODUCTION_TARGET_INTERFACE_EXCERPTS = {
+    **DEFAULT_TARGET_INTERFACE_EXCERPTS,
+    "solution/candidate.py": (
+        "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
+        "-> None. Read only invocation.input_root and write exactly "
+        "invocation.output_path as row_id,user_id,video_id,score CSV. Preserve "
+        "the authenticated, row-aligned, unconstrained real-valued FM parent; "
+        "never sigmoid, clip, normalize, or rescale it. Training dates strictly "
+        "precede score dates, score rows never expose long_view, and duration_ms "
+        "is video duration rather than watch time. Preserve deterministic finite "
+        "scores, row order, duplicates, and exact parent fallback."
+    ),
+    "solution/features.py": (
+        "Candidate-owned feature boundary. Fit on training data only. Any history "
+        "aggregate must be deterministic and use only interactions earlier than "
+        "the row it scores; scoring rows never contain long_view."
+    ),
+    "solution/model.py": (
+        "Candidate-owned model components. Preserve deterministic seeds, finite "
+        "unconstrained ranking scores, and non-zero trainable gradients."
+    ),
+    "solution/train.py": (
+        "Candidate-owned training orchestration. Read train.csv only, respect "
+        "fidelity and seed, and never early-stop or select using public-validation "
+        "or score-population labels."
+    ),
+    "solution/inference.py": (
+        "Candidate-owned scoring helpers. Add only the approved bounded residual "
+        "on the original FM scale, preserve exact parent fallback, and create one "
+        "ordered finite output CSV exclusively."
+    ),
+}
+
+
 class RunConfig(StrictModel):
     schema_version: Literal["1.0"] = "1.0"
     run_id: NonEmptyStr

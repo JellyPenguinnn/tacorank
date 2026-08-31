@@ -619,6 +619,11 @@ def _render_lesson(lesson_id: str, record: dict) -> str:
 
 def render_summary(events: Sequence[Event]) -> str:
     state = project(events)
+    planning_failures = [
+        event.payload.result
+        for event in events
+        if event.payload.type == "planning.failed"
+    ]
     specifications = {
         event.payload.spec.experiment_id: event.payload.spec
         for event in events

@@ -13,6 +13,7 @@ from tacorank.providers import deepseek as deepseek_module
 from tacorank.providers.deepseek import DeepSeekResearchProvider
 from tacorank.providers.research_provider import ProviderError, ProviderRequest
 from tacorank.research.duplicate_detection import compute_duplicate_key
+from tacorank.research.literature import OpenAlexLiteratureSkill
 from tacorank.research.plan_validation import PlanValidator
 from tacorank.research.search_policy import SearchPolicy
 from tacorank.schemas import LiteratureEvidence, ResearchProposal, TokenMeasurement
@@ -479,6 +480,145 @@ def test_deepseek_provider_binds_latest_prior_evaluation_when_citation_is_invali
         result, planner_context, choice=choice
     )
     assert validation.accepted, validation.errors
+
+
+def test_deepseek_provider_enforces_control_when_all_treatment_values_change(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = ["temporal_history"]
+    planner_context.contract_summary.research_capabilities.append(
+        "strict_temporal_cutoff"
+    )
+    planner_context.research_campaign = {
+        "campaign_id": "temporal_depth_test",
+        "family_order": ["temporal_history"],
+        "family_budgets": {"temporal_history": 25},
+        "family_method_card_ids": {
+            "temporal_history": ["temporal_history_compact"]
+        },
+        "family_directives": {
+            "temporal_history": "Adapt from prior matched evidence."
+        },
+        "minimum_family_full_evaluations": 25,
+        "family_convergence_patience": 25,
+    }
+    prior = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    prior.evaluation_event_id = "evt_000010"
+    planner_context.family_history = [prior]
+    planner_context.source_event_ids.append("evt_000010")
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, payload, timeout
+        return response(
+            candidate(
+                method_card_ids=["temporal_history_compact"],
+                variant_instruction="Test longer, more strongly shrunk history.",
+                variant_parameters={
+                    "formulation": "temporal_history",
+                    "residual_scale": 0.2,
+                    "max_train_rows": 200000,
+                    "history_decay_days": 30.0,
+                    "history_shrinkage": 50.0,
+                },
+                hypothesis_evidence={
+                    "observation": "The prior objective result remained within noise.",
+                    "source_evaluation_event_ids": ["evt_000010"],
+                    "changed_factors": ["history_decay_days"],
+                    "held_constant": ["max_train_rows"],
+                    "expected_metric_effects": {"GAUC": 0.001},
+                },
+            )
+        )
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(ProviderRequest(planner_context, choice))
+    )
+
+    assert result["variant_parameters"]["max_train_rows"] == 100000
+    assert "matched control(s)" in result["variant_instruction"]
+    assert result["hypothesis_evidence"]["source_evaluation_event_ids"] == [
+        "evt_000010"
+    ]
+    assert result["hypothesis_evidence"]["held_constant"] == [
+        "max_train_rows"
+    ]
+    assert set(result["hypothesis_evidence"]["changed_factors"]) == {
+        "formulation",
+        "residual_scale",
+        "history_decay_days",
+        "history_shrinkage",
+    }
+    validation = PlanValidator().validate(
+        result, planner_context, choice=choice
+    )
+    assert validation.accepted, validation.errors
+
+
+def test_deepseek_provider_does_not_fabricate_missing_hypothesis_evidence(
+    planner_context,
+):
+    planner_context.contract_summary.allowed_families = ["objective"]
+    planner_context.research_campaign = {
+        "campaign_id": "objective_depth_test",
+        "family_order": ["objective"],
+        "family_budgets": {"objective": 25},
+        "family_method_card_ids": {"objective": ["objective_pairwise_bpr"]},
+        "family_directives": {"objective": "Adapt from prior evidence."},
+        "minimum_family_full_evaluations": 25,
+        "family_convergence_patience": 25,
+    }
+    prior = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        method_card_ids=["objective_pairwise_bpr"],
+    )
+    prior.campaign_id = "objective_depth_test"
+    prior.evaluation_event_id = "evt_000010"
+    prior.variant_parameters = {
+        "formulation": "bpr",
+        "embedding_dim": 8,
+        "learning_rate": 0.01,
+        "epochs": 2,
+        "negative_count": 2,
+        "l2": 0.0001,
+        "residual_scale": 0.05,
+        "max_train_rows": 100000,
+    }
+    planner_context.family_history = [prior]
+    planner_context.source_event_ids.append("evt_000010")
+
+    def transport(url, headers, payload, timeout):
+        del url, headers, payload, timeout
+        return response(
+            candidate(
+                variant_instruction="Increase BPR negatives.",
+                variant_parameters={"negative_count": 4},
+                hypothesis_evidence=None,
+            )
+        )
+
+    choice = SearchPolicy().choose(planner_context)
+    provider = DeepSeekResearchProvider(api_key="secret-key", transport=transport)
+    result = asyncio.run(
+        provider.generate(ProviderRequest(planner_context, choice))
+    )
+
+    assert result["hypothesis_evidence"] is None
+    validation = PlanValidator().validate(
+        result, planner_context, choice=choice
+    )
+    assert not validation.accepted
+    assert "HYPOTHESIS_EVIDENCE_REQUIRED_AFTER_PRIOR_EVALUATION" in (
+        validation.errors
+    )
 
 
 def test_deepseek_provider_preserves_policy_owned_ensemble_components(

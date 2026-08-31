@@ -569,7 +569,7 @@ def test_protected_audit_can_override_public_best_with_baseline(
     )
     harness.bootstrap(baseline_evaluation)
     asyncio.run(harness.run_one_experiment())
-    harness.stop(StopDecision(True, "test_complete", "Finish the test search."))
+    harness.stop(StopDecision(True, "experiment_budget", "Finish the test search."))
     request_count = len(runner.requests)
 
     state = asyncio.run(harness.finalize())
@@ -594,7 +594,7 @@ def test_protected_audit_can_select_trusted_candidate_beyond_public_best(
     harness.bootstrap(baseline_evaluation)
     asyncio.run(harness.run_one_experiment())
     asyncio.run(harness.run_one_experiment())
-    harness.stop(StopDecision(True, "test_complete", "Finish the test search."))
+    harness.stop(StopDecision(True, "experiment_budget", "Finish the test search."))
 
     state = asyncio.run(harness.finalize())
 

@@ -281,30 +281,27 @@ def test_adaptive_campaign_starts_with_objective_screening(
     assert choice.variant_id == "objective_01"
 
 
-def test_adaptive_campaign_advances_after_five_non_improving_full_trials(
+def test_deep_campaign_does_not_advance_after_five_non_improving_full_trials(
     planner_context,
 ):
     planner_context.contract_summary.allowed_families = [
         "objective",
         "temporal_history",
-        "features",
     ]
     planner_context.research_campaign = SimpleNamespace(
-        campaign_id="objective_temporal_features_50_v3",
-        family_order=["objective", "temporal_history", "features"],
-        family_budgets={"objective": 27, "temporal_history": 15, "features": 8},
+        campaign_id="objective_temporal_50_v4",
+        family_order=["objective", "temporal_history"],
+        family_budgets={"objective": 25, "temporal_history": 25},
         family_method_card_ids={
             "objective": ["objective_pairwise_bpr"],
             "temporal_history": ["temporal_history_compact"],
-            "features": ["features_history_affinity"],
         },
         family_directives={
             "objective": "Adapt objective parameters.",
             "temporal_history": "Adapt temporal parameters.",
-            "features": "Adapt point-in-time history affinity.",
         },
-        minimum_family_full_evaluations=5,
-        family_convergence_patience=5,
+        minimum_family_full_evaluations=25,
+        family_convergence_patience=25,
     )
     history = []
     for slot in range(1, 6):
@@ -317,7 +314,7 @@ def test_adaptive_campaign_advances_after_five_non_improving_full_trials(
             method_card_ids=["objective_pairwise_bpr"],
         )
         summary.status = "rejected"
-        summary.campaign_id = "objective_temporal_features_50_v3"
+        summary.campaign_id = "objective_temporal_50_v4"
         summary.variant_id = "objective_%02d" % slot
         history.append(summary)
     planner_context.family_history = history
@@ -325,8 +322,8 @@ def test_adaptive_campaign_advances_after_five_non_improving_full_trials(
     choice = SearchPolicy().choose(planner_context)
 
     assert choice.action == "propose"
-    assert choice.family == "temporal_history"
-    assert choice.variant_id == "temporal_history_01"
+    assert choice.family == "objective"
+    assert choice.variant_id == "objective_06"
 
 
 def test_adaptive_campaign_improvement_resets_family_patience(planner_context):
@@ -632,7 +629,6 @@ def test_playbook_cannot_reintroduce_contract_disallowed_family(planner_context)
     ("overrides", "reason_code"),
     [
         ({"output_accepted": False}, "OUTPUT_CHECK_REJECTED"),
-        ({"prediction_change": 0.0001}, "NO_OP_REQUIRES_RECOVERY"),
         ({"output_accepted": None}, "RESULT_NOT_BRANCHABLE"),
         ({"integrity": None}, "RESULT_NOT_BRANCHABLE"),
         ({"stability": None}, "RESULT_NOT_BRANCHABLE"),

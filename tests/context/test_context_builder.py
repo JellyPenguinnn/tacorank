@@ -378,8 +378,8 @@ def test_coder_context_contains_the_real_worker_contract(harness, baseline_evalu
     assert context.token_limit == harness.config.coding_token_limit
     assert context.estimated_tokens <= harness.config.context_token_limit
     assert context.target_interface_excerpts == {
-        "solution/candidate.py": (
-            harness.config.target_interface_excerpts["solution/candidate.py"]
+        "solution/experiment_config.py": (
+            harness.config.target_interface_excerpts["solution/experiment_config.py"]
         )
     }
     assert "solution/model.py" not in context.content

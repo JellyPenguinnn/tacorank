@@ -23,6 +23,7 @@ from ..research.graph_view import as_list, get_value
 from ..research.variant_configuration import (
     METHOD_FORMULATIONS,
     VARIANT_PARAMETER_DEFAULTS,
+    enforce_controlled_treatment,
     reference_variant_parameters,
     resolve_variant_parameters,
     treatment_partition,
@@ -266,6 +267,8 @@ def _research_summary(value: Any) -> Dict[str, Any]:
         "trust_flags",
         "failure_hypotheses",
         "diagnostic_limitations",
+        "diagnostic_best_slice",
+        "diagnostic_worst_slice",
         "decision",
         "decision_reason_code",
         "highest_completed_fidelity",
@@ -433,6 +436,19 @@ def _repair_instruction(validation_errors: tuple[str, ...]) -> str:
             "function or class names, line references, commands, and editing steps. "
             "Restate the proposal only as a scientific hypothesis, intervention, "
             "ranking mechanism, success criterion, and falsification condition."
+        )
+    if any(
+        error in validation_errors
+        for error in (
+            "HYPOTHESIS_EVIDENCE_REQUIRED_AFTER_PRIOR_EVALUATION",
+            "HYPOTHESIS_TREATMENT_BOUNDARY_REQUIRED",
+            "CAMPAIGN_TREATMENT_BOUNDARY_MISMATCH",
+        )
+    ):
+        instructions.append(
+            "Cite one supplied prior evaluation. Change a strict non-empty subset "
+            "of the active parameters and keep at least one active parameter fixed "
+            "as a matched control; normally keep max_train_rows fixed."
         )
     return " ".join(instructions)
 
@@ -661,6 +677,13 @@ class DeepSeekResearchProvider:
                 request.context,
                 selected_family=str(get_value(choice, "family", "")),
             ),
+            "literature_research": {
+                "required": bool(request.literature_evidence),
+                "papers": [
+                    _research_literature(item)
+                    for item in request.literature_evidence
+                ],
+            },
         }
         if validation_errors:
             payload["repair"] = {
@@ -762,6 +785,24 @@ class DeepSeekResearchProvider:
         evidence = [item for item in supplied_evidence if item in set(source_events)]
         if not evidence:
             evidence = source_events
+        available_literature = {
+            str(get_value(item, "evidence_id", "")): item
+            for item in request.literature_evidence
+            if get_value(item, "evidence_id", None)
+        }
+        selected_literature = []
+        seen_literature_ids = set()
+        for evidence_id in map(
+            str, as_list(raw.get("literature_evidence_ids"))
+        ):
+            if (
+                evidence_id in available_literature
+                and evidence_id not in seen_literature_ids
+            ):
+                selected_literature.append(
+                    _jsonable(available_literature[evidence_id])
+                )
+                seen_literature_ids.add(evidence_id)
         cards_by_id = {
             str(get_value(card, "method_id", "")): card
             for card in as_list(get_value(context, "method_cards", []))
@@ -821,22 +862,55 @@ class DeepSeekResearchProvider:
         prior_evaluation_ids = set(prior_evaluation_ids_in_order)
         raw_hypothesis_evidence = raw.get("hypothesis_evidence")
         hypothesis_evidence = None
+        controller_held_controls: tuple[str, ...] = ()
         if prior_evaluation_ids and isinstance(raw_hypothesis_evidence, Mapping):
-            effects = raw_hypothesis_evidence.get("expected_metric_effects")
+            evidence_source = raw_hypothesis_evidence
+            if active_parameters:
+                proposed_parameters = dict(variant_parameters)
+                variant_parameters = enforce_controlled_treatment(
+                    variant_parameters, reference, active_parameters
+                )
+                controller_held_controls = tuple(
+                    name
+                    for name in active_parameters
+                    if proposed_parameters.get(name) != variant_parameters.get(name)
+                )
+            effects = evidence_source.get("expected_metric_effects")
             cited = [
                 str(item)
                 for item in as_list(
-                    raw_hypothesis_evidence.get("source_evaluation_event_ids")
+                    evidence_source.get("source_evaluation_event_ids")
                 )
                 if str(item) in prior_evaluation_ids
             ]
             if not cited:
                 cited = [prior_evaluation_ids_in_order[-1]]
-            changed, held = treatment_partition(
-                variant_parameters, reference, active_parameters
-            )
+            if active_parameters:
+                changed, held = treatment_partition(
+                    variant_parameters, reference, active_parameters
+                )
+            else:
+                raw_changed = tuple(
+                    dict.fromkeys(
+                        _text(item)
+                        for item in as_list(evidence_source.get("changed_factors"))
+                        if _text(item)
+                    )
+                )
+                changed = raw_changed
+                changed_set = set(changed)
+                raw_held = tuple(
+                    item
+                    for item in dict.fromkeys(
+                        _text(item)
+                        for item in as_list(evidence_source.get("held_constant"))
+                        if _text(item)
+                    )
+                    if item not in changed_set
+                )
+                held = raw_held
             hypothesis_evidence = {
-                "observation": _text(raw_hypothesis_evidence.get("observation")),
+                "observation": _text(evidence_source.get("observation")),
                 "source_evaluation_event_ids": cited,
                 "changed_factors": list(changed),
                 "held_constant": list(held),
@@ -883,6 +957,13 @@ class DeepSeekResearchProvider:
             "variant_id": get_value(choice, "variant_id", None),
             "variant_instruction": (
                 _text(raw.get("variant_instruction"))
+                + (
+                    " Controller retained matched control(s) at the inherited "
+                    "reference value: %s."
+                    % ", ".join(controller_held_controls)
+                    if controller_held_controls
+                    else ""
+                )
                 if campaign_id
                 else None
             ),
@@ -895,6 +976,7 @@ class DeepSeekResearchProvider:
                 )
             ],
             "evidence_event_ids": evidence,
+            "literature_evidence": selected_literature,
             "hypothesis_evidence": hypothesis_evidence,
         }
         normalized["duplicate_key"] = compute_duplicate_key(normalized)

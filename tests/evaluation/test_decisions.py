@@ -159,7 +159,7 @@ class DecisionTests(unittest.TestCase):
         self.assertTrue(decision.parent_eligible)
         self.assertFalse(decision.best_eligible)
 
-    def test_confirmed_result_beyond_best_tolerance_is_rejected(self):
+    def test_confirmed_result_beyond_best_tolerance_is_retained_as_evidence(self):
         decision = decide(
             result(
                 Verdict.INCONCLUSIVE,
@@ -172,7 +172,7 @@ class DecisionTests(unittest.TestCase):
             CTX,
         )
 
-        self.assertEqual(decision.decision, Decision.REJECT)
+        self.assertEqual(decision.decision, Decision.RETAIN)
         self.assertEqual(decision.reason_code, "WITHIN_NOISE")
         self.assertFalse(decision.parent_eligible)
 
@@ -192,7 +192,7 @@ class DecisionTests(unittest.TestCase):
         with self.assertRaises(NoOpRecoveryRequired):
             decide(result(Verdict.NO_OP, Stability.NOT_APPLICABLE), CTX)
 
-    def test_confirmed_within_noise_result_is_retained_not_rejected(self):
+    def test_confirmed_within_noise_result_is_an_exploratory_parent(self):
         decision = decide(
             result(
                 Verdict.INCONCLUSIVE,
@@ -202,8 +202,12 @@ class DecisionTests(unittest.TestCase):
             CTX,
         )
 
-        self.assertEqual(decision.decision, Decision.RETAIN)
-        self.assertEqual(decision.reason_code, "WITHIN_NOISE")
+        self.assertEqual(decision.decision, Decision.ACCEPT)
+        self.assertTrue(decision.parent_eligible)
+        self.assertFalse(decision.best_eligible)
+        self.assertEqual(
+            decision.reason_code, "EXPLORATORY_PARENT_WITHIN_TOLERANCE"
+        )
 
     def test_unbiased_audit_never_updates_experiment_state(self):
         audit = replace(

@@ -6,7 +6,7 @@ from tacorank.research.portfolio import load_method_cards
 def test_schema_v1_method_cards_load_with_markdown_sections():
     portfolio = load_method_cards(Path(__file__).parents[2] / "research" / "methods")
 
-    assert len(portfolio.cards) == 12
+    assert len(portfolio.cards) == 17
     card = next(card for card in portfolio.cards if card.method_id == "objective_pairwise_bpr")
     assert card.schema_version == "1.0"
     assert card.family == "objective"
@@ -40,7 +40,11 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
         "verified_best_prediction",
         "diverse_clean_proxy_member",
     )
-    assert residual.implementation_targets == ("solution/candidate.py",)
+    assert residual.implementation_targets == (
+        "solution/candidate.py",
+        "solution/features.py",
+        "solution/inference.py",
+    )
 
     affinity = next(
         card
@@ -50,6 +54,15 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
     assert affinity.capability_status == "verified"
     assert affinity.implementation_id == "features_history_affinity_v1"
     assert "history_shrinkage" in affinity.active_parameters
+
+    loss_aligned = next(
+        card
+        for card in portfolio.cards
+        if card.method_id == "objective_loss_aligned_features"
+    )
+    assert loss_aligned.family == "objective"
+    assert loss_aligned.prerequisites == ("pairwise_tested",)
+    assert "simultaneous_loss_change" in loss_aligned.prohibition_conditions
 
     static = next(
         card

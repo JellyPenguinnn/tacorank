@@ -9,28 +9,24 @@ from tacorank.config import ContractError, RunConfig, verify_contract
 from tacorank.schemas import ResearchCampaign
 
 
-def test_objective_temporal_feature_campaign_has_exact_fifty_slot_budget():
+def test_objective_temporal_campaign_has_exact_fifty_slot_budget():
     path = Path(__file__).parents[2] / "research/campaigns/objective_temporal_50.json"
     campaign = ResearchCampaign.model_validate(
         json.loads(path.read_text(encoding="utf-8"))
     )
 
-    assert campaign.campaign_id == "objective_temporal_features_50_v3"
-    assert campaign.family_order == ["objective", "temporal_history", "features"]
+    assert campaign.campaign_id == "objective_temporal_50_v4"
+    assert campaign.family_order == ["objective", "temporal_history"]
     assert campaign.family_budgets == {
-        "objective": 27,
-        "temporal_history": 15,
-        "features": 8,
+        "objective": 25,
+        "temporal_history": 25,
     }
     assert campaign.experiment_budget == 50
-    assert campaign.minimum_family_full_evaluations == 5
-    assert campaign.family_convergence_patience == 5
+    assert campaign.minimum_family_full_evaluations == 25
+    assert campaign.family_convergence_patience == 25
     assert campaign.family_method_card_ids["objective"] == [
         "objective_pairwise_bpr",
         "objective_listwise_user_softmax",
-    ]
-    assert campaign.family_method_card_ids["features"] == [
-        "features_history_affinity"
     ]
 
 
