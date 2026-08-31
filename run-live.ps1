@@ -42,6 +42,11 @@ param(
     [int]$MaxExperiments = 15,
     [string[]]$Families = @("model", "temporal_history", "duration_bias", "ensemble"),
     [string]$EnvFile = "..\.env",
+    # Where per-run Trae runtimes are created. The coding worker refuses to
+    # start if a .env is reachable from the runtime root upwards, so keeping
+    # runtimes outside the directory holding your credentials satisfies that
+    # check by layout rather than by moving the file.
+    [string]$RuntimeRoot = "",
     [switch]$SkipRun
 )
 
@@ -122,7 +127,8 @@ Write-Host "clean"
 
 # --- Paths -----------------------------------------------------------------
 $deploymentDir = Join-Path $repo ".tacorank\deployments\$RunId"
-$runtimeDir    = Join-Path (Split-Path $repo -Parent) ".tacorank-runtime\tacorank-$RunId"
+$runtimeBase   = if ($RuntimeRoot) { $RuntimeRoot } else { Join-Path (Split-Path $repo -Parent) ".tacorank-runtime" }
+$runtimeDir    = Join-Path $runtimeBase "tacorank-$RunId"
 $runDir        = Join-Path $repo "runs\$RunId"
 foreach ($path in @($deploymentDir, $runtimeDir, $runDir)) {
     if (Test-Path $path) { Fail "already exists for run id '$RunId': $path (choose another -RunId)" }
