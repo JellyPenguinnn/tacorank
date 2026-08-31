@@ -232,9 +232,18 @@ def build_parser() -> argparse.ArgumentParser:
     setup_trae.add_argument("--runtime-dir", type=Path)
     setup_trae.add_argument("--python312", type=Path)
     setup_trae.add_argument("--docker", type=Path)
-    setup_trae.add_argument("--coding-step-limit", type=int)
-    setup_trae.add_argument("--repair-step-limit", type=int)
-    setup_trae.add_argument("--solution-revision-step-limit", type=int)
+    setup_trae.add_argument(
+        "--coding-step-limit", type=int,
+        help="maximum Trae steps for an initial coding task (default: 96)",
+    )
+    setup_trae.add_argument(
+        "--repair-step-limit", type=int,
+        help="maximum Trae steps for a bounded repair task (default: 48)",
+    )
+    setup_trae.add_argument(
+        "--solution-revision-step-limit", type=int,
+        help="maximum Trae steps for verifier-requested revisions (default: 48)",
+    )
 
     trae_preflight = commands.add_parser(
         "trae-preflight",
