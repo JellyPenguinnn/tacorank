@@ -300,7 +300,7 @@ class RuntimeMetricsSpec:
     argv: Tuple[str, ...]
     cwd: Path
     environment: Mapping[str, str]
-    timeout_seconds: float = 2.0
+    timeout_seconds: float = 5.0
 
 
 @dataclass(frozen=True)

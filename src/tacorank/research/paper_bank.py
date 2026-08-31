@@ -51,6 +51,13 @@ RECORD_FIELDS = {
 
 
 METHOD_BANK_TOPICS = {
+    "objective_direct_within_user_ranker": (
+        "ranking",
+        "objective",
+        "collaborative_filtering",
+        "feature_interaction",
+        "evaluation",
+    ),
     "objective_pairwise_bpr": (
         "ranking",
         "objective",

@@ -42,7 +42,7 @@ the outcome policy explicitly requests refinement or deepening.
     "other"
   ],
   "method_order": {
-    "objective": ["objective_pairwise_bpr", "objective_loss_aligned_features", "objective_listwise_user_softmax"],
+    "objective": ["objective_direct_within_user_ranker", "objective_pairwise_bpr", "objective_loss_aligned_features", "objective_listwise_user_softmax"],
     "temporal_history": ["temporal_history_compact"],
     "multitask": ["multitask_single_auxiliary"],
     "duration_bias": ["duration_bias_censored_watch_time"],

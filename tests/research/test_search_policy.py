@@ -15,7 +15,7 @@ def test_policy_starts_score_guided_depth_first_from_baseline(planner_context):
     assert choice.reason_code == "SCORE_GUIDED_DEPTH_FIRST"
     assert choice.family == "objective"
     assert choice.parent.experiment_id == "exp_0000"
-    assert choice.method_card_id == "objective_pairwise_bpr"
+    assert choice.method_card_id == "objective_direct_within_user_ranker"
 
 
 def test_parallel_direction_is_indexed_and_legal(planner_context):
@@ -25,7 +25,7 @@ def test_parallel_direction_is_indexed_and_legal(planner_context):
     assert choice.phase == "depth"
     assert choice.reason_code == "SCORE_GUIDED_DEPTH_FIRST"
     assert choice.parent.experiment_id == "exp_0000"
-    assert choice.method_card_id == "objective_pairwise_bpr"
+    assert choice.method_card_id == "objective_direct_within_user_ranker"
 
 
 def test_parallel_directions_use_distinct_eligible_method_cards(planner_context):
@@ -311,6 +311,14 @@ def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
         parent_delta=None,
         method_card_ids=["objective_loss_aligned_features"],
     )
+    direct = make_summary(
+        "exp_0005",
+        parent_experiment_id="exp_0001",
+        family="objective",
+        parent_eligible=False,
+        parent_delta=None,
+        method_card_ids=["objective_direct_within_user_ranker"],
+    )
     contract = SimpleNamespace(**vars(planner_context.contract_summary))
     contract.allowed_families = ["objective"]
     context = SimpleNamespace(
@@ -318,7 +326,7 @@ def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
         baseline=root,
         current_best=best,
         eligible_frontier=[root, best],
-        family_history=[best, pairwise, loss_aligned_features, listwise],
+        family_history=[best, pairwise, loss_aligned_features, listwise, direct],
         method_cards=planner_context.method_cards,
         playbook=planner_context.playbook,
     )
@@ -327,7 +335,7 @@ def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
 
     assert choice.reason_code == "SCORE_GUIDED_DEPTH_FIRST"
     assert choice.parent.experiment_id == "exp_0000"
-    assert choice.method_card_id == "objective_pairwise_bpr"
+    assert choice.method_card_id == "objective_direct_within_user_ranker"
 
 
 def test_playbook_routes_pairwise_gauc_up_ndcg_down_to_objective(planner_context):
@@ -823,7 +831,7 @@ def test_playbook_refines_meaningful_pairwise_no_gain_in_family(planner_context)
 
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.family == "objective"
-    assert choice.method_card_id == "objective_loss_aligned_features"
+    assert choice.method_card_id == "objective_direct_within_user_ranker"
 
 
 def test_directionally_positive_parent_prevents_premature_search_stop(
@@ -846,7 +854,7 @@ def test_directionally_positive_parent_prevents_premature_search_stop(
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.parent.experiment_id == "exp_0006"
     assert choice.family == "objective"
-    assert choice.method_card_id == "objective_pairwise_bpr"
+    assert choice.method_card_id == "objective_direct_within_user_ranker"
 
 
 def test_near_best_exploratory_parent_continues_depth_first(planner_context):
@@ -1040,7 +1048,7 @@ def test_optional_ranker_cannot_inject_an_illegal_choice(planner_context):
     choice = policy.choose(planner_context)
 
     assert choice.family == "objective"
-    assert choice.method_card_id == "objective_pairwise_bpr"
+    assert choice.method_card_id == "objective_direct_within_user_ranker"
 
 
 def test_policy_fails_closed_when_contract_has_no_allowed_families(planner_context):

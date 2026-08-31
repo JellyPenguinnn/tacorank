@@ -100,14 +100,16 @@ class DockerStatsUsageReader:
 
     def _read_stats_line(self, *, timeout_seconds: Optional[float]) -> str:
         # The Docker client can be running a few milliseconds before the daemon
-        # has registered the named container. Retry only initial discovery;
-        # telemetry loss after the first successful sample remains fail-closed.
+        # has registered the named container. Retry initial discovery more broadly;
+        # after the first successful sample permit one bounded transient retry and
+        # then remain fail-closed.
         # Docker Desktop may take several hundred milliseconds to register a
         # just-started container with ``docker stats`` (especially through the
         # Windows named-pipe backend).  Give initial discovery a bounded grace
-        # window; once a sample has been observed, telemetry loss remains
-        # fail-closed.
-        attempts = 6 if self._previous_monotonic is None else 1
+        # window. Docker Desktop can also miss one established-container sample
+        # while its stats endpoint is busy, so one retry remains inside the same
+        # fixed deadline.
+        attempts = 6 if self._previous_monotonic is None else 2
         budget = self.specification.timeout_seconds
         if timeout_seconds is not None:
             budget = min(budget, max(0.0, timeout_seconds))

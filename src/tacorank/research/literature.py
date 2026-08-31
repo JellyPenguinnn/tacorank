@@ -35,6 +35,9 @@ LiteratureTransport = Callable[
 
 
 METHOD_QUERIES = {
+    "objective_direct_within_user_ranker": (
+        "within user pairwise listwise learning to rank recommender systems BPR"
+    ),
     "objective_pairwise_bpr": (
         "Bayesian Personalized Ranking BPR pairwise recommender implicit feedback"
     ),
@@ -83,6 +86,16 @@ METHOD_QUERIES = {
 # each group in its title or abstract. These static gates keep a highly cited
 # but topically unrelated paper from grounding an implementation proposal.
 METHOD_RELEVANCE_GROUPS = {
+    "objective_direct_within_user_ranker": (
+        ("recommend", "ranking"),
+        (
+            "bayesian personalized ranking",
+            "bpr",
+            "pairwise",
+            "listwise",
+            "learning to rank",
+        ),
+    ),
     "objective_pairwise_bpr": (
         ("recommend", "ranking"),
         (

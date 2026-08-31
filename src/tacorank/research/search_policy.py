@@ -29,6 +29,7 @@ DEFAULT_FAMILY_ORDER = HIGH_VALUE_FAMILIES + (
 )
 DEFAULT_METHOD_ORDER = {
     "objective": (
+        "objective_direct_within_user_ranker",
         "objective_pairwise_bpr",
         "objective_loss_aligned_features",
         "objective_listwise_user_softmax",
@@ -98,6 +99,8 @@ def _diagnostic_suffix(summary: Any) -> str:
         except (TypeError, ValueError):
             return ""
     preferred = (
+        "within_user_spearman_vs_parent",
+        "within_user_rank_changed_fraction",
         "spearman_vs_fm_baseline",
         "user_rankable_fraction",
         "item_personalized_fraction",
@@ -154,7 +157,7 @@ def _playbook_is_valid(context: Any) -> bool:
         and bool(families)
         and len(families) == len(set(families))
         and bool(objective_methods)
-        and objective_methods[0] == "objective_pairwise_bpr"
+        and objective_methods[0] == "objective_direct_within_user_ranker"
     )
 
 

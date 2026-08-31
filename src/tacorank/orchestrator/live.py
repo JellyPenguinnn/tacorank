@@ -902,6 +902,8 @@ class ProtectedEvaluationBridge:
                 change.changed_row_fraction,
                 None,
                 1.0,
+                change.within_user_spearman_vs_parent,
+                change.within_user_rank_changed_fraction,
             ),
             diagnostic_metrics=dict(canonical.diagnostic_metrics),
             trust=DomainTrustAssessment(

@@ -412,6 +412,7 @@ class EvaluationService:
             predictions.scores,
             request.parent_scores,
             self.trust_config.no_op.score_tolerance,
+            user_ids=predictions.user_ids,
         )
         diagnostic_summary = compute_evaluation_diagnostics(
             user_ids=predictions.user_ids,
@@ -704,9 +705,26 @@ def _prediction_quality_diagnostics(
                 "parent_residual_std": _population_std(residuals),
             }
         )
+        parent_change = analyze_prediction_change(
+            scores,
+            parent,
+            tolerance,
+            user_ids=predictions.user_ids,
+        )
+        if parent_change.within_user_spearman_vs_parent is not None:
+            diagnostics["within_user_spearman_vs_parent"] = float(
+                parent_change.within_user_spearman_vs_parent
+            )
+        if parent_change.within_user_rank_changed_fraction is not None:
+            diagnostics["within_user_rank_changed_fraction"] = float(
+                parent_change.within_user_rank_changed_fraction
+            )
     if baseline_scores is not None:
         baseline_change = analyze_prediction_change(
-            scores, baseline_scores, tolerance
+            scores,
+            baseline_scores,
+            tolerance,
+            user_ids=predictions.user_ids,
         )
         correlation = baseline_change.spearman_vs_parent
         diagnostics["spearman_vs_fm_baseline"] = (

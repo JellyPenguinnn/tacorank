@@ -21,7 +21,8 @@ def control_block(*, rules=None, objective_methods=None):
             "rule_order": list(rules or REQUIRED_RULE_ORDER),
             "family_order": ["objective"],
             "method_order": {
-                "objective": objective_methods or ["objective_pairwise_bpr"]
+                "objective": objective_methods
+                or ["objective_direct_within_user_ranker"]
             },
         }
     )
@@ -36,7 +37,10 @@ def test_markdown_playbook_control_block_is_executable():
 
     assert playbook.rule_order[0] == "output_rejected"
     assert playbook.family_order[0] == "objective"
-    assert playbook.methods_for("objective")[0] == "objective_pairwise_bpr"
+    assert (
+        playbook.methods_for("objective")[0]
+        == "objective_direct_within_user_ranker"
+    )
     assert len(playbook.source_sha256) == 64
 
 
@@ -65,13 +69,13 @@ def test_markdown_playbook_rejects_missing_mandatory_rule(tmp_path):
         load_improvement_playbook(path)
 
 
-def test_markdown_playbook_forces_pairwise_bpr_first(tmp_path):
+def test_markdown_playbook_forces_direct_ranker_first(tmp_path):
     path = tmp_path / "playbook.md"
     path.write_text(
         control_block(
             objective_methods=[
                 "objective_listwise_user_softmax",
-                "objective_pairwise_bpr",
+                "objective_direct_within_user_ranker",
             ]
         ),
         encoding="utf-8",
@@ -101,5 +105,5 @@ def test_shared_playbook_schema_rejects_unsafe_rule_reordering():
             source_sha256="a" * 64,
             rule_order=reordered,
             family_order=["objective"],
-            method_order={"objective": ["objective_pairwise_bpr"]},
+            method_order={"objective": ["objective_direct_within_user_ranker"]},
         )

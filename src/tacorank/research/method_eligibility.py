@@ -85,8 +85,13 @@ def available_capabilities(context: Any) -> frozenset[str]:
     pairwise_results = [
         summary
         for summary in history
-        if "objective_pairwise_bpr"
-        in {str(item) for item in as_list(get_value(summary, "method_card_ids", None))}
+        if {
+            "objective_direct_within_user_ranker",
+            "objective_pairwise_bpr",
+        }.intersection(
+            str(item)
+            for item in as_list(get_value(summary, "method_card_ids", None))
+        )
         and _is_clean_evaluated_result(summary)
     ]
     if pairwise_results:

@@ -75,8 +75,23 @@ def test_eda_toolbox_rejects_a_labelled_score_view(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(PlannerEdaError, match="exact columns"):
+    with pytest.raises(PlannerEdaError, match="declared columns"):
         PlannerEdaToolbox(root).inspect()
+
+
+def test_eda_toolbox_accepts_declared_auxiliary_training_columns(
+    tmp_path: Path,
+) -> None:
+    root = _write_views(tmp_path / "candidate-full")
+    train = root / "train.csv"
+    rows = train.read_text(encoding="utf-8").splitlines()
+    rows[0] += ",is_click,play_time_ms"
+    rows[1:] = [row + ",1,75" for row in rows[1:]]
+    train.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    profile = PlannerEdaToolbox(root).inspect()
+
+    assert profile.train_columns[-2:] == ["is_click", "play_time_ms"]
 
 
 def test_eda_toolbox_rejects_symlinked_input_files(tmp_path: Path) -> None:

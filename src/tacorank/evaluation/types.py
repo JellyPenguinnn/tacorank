@@ -69,6 +69,8 @@ class PredictionChange:
     changed_row_fraction: Optional[float]
     identical_score_fraction: Optional[float]
     unique_score_fraction: float
+    within_user_spearman_vs_parent: Optional[float] = None
+    within_user_rank_changed_fraction: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,12 @@ class EvaluationResult:
             prediction_change=CanonicalPredictionChange(
                 spearman_vs_parent=self.prediction_change.spearman_vs_parent,
                 changed_row_fraction=self.prediction_change.changed_row_fraction,
+                within_user_spearman_vs_parent=(
+                    self.prediction_change.within_user_spearman_vs_parent
+                ),
+                within_user_rank_changed_fraction=(
+                    self.prediction_change.within_user_rank_changed_fraction
+                ),
             ),
             diagnostic_metrics=dict(self.diagnostic_metrics),
             trust=CanonicalTrustAssessment(

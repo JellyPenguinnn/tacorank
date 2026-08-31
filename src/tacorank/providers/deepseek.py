@@ -57,10 +57,11 @@ Treat diagnostic_metrics as label-free experimental feedback: use them to reason
 collapsed residuals, missing personalization, or excessive divergence from the
 setup-verified FM parent. Never call a frozen evaluator result "baseline parity"
 unless baseline_parity is explicitly present in contract.research_capabilities.
-Treat the setup-verified FM score as the strong research parent. Prefer one bounded
-additive residual on that original ranking-score scale; do not propose clipping,
-sigmoid conversion, normalization, or replacement of the FM parent unless the
-authoritative policy block explicitly selects a replacement-capable method.
+Treat the setup-verified FM score as the comparison parent. Residual method cards use
+one bounded additive residual on that original ranking-score scale. A method card
+tagged parent_replacement instead requires a directly trained score path with no FM
+blend; state that replacement explicitly in the change summary; do not propose
+clipping, sigmoid conversion, or normalization of either score path.
 
 Treat family_history as short-term iteration feedback. It deliberately includes
 negative proxy, no-op, inconclusive, redundant, and suspicious outcomes; weight each

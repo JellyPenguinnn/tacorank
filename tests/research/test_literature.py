@@ -67,7 +67,7 @@ def test_openalex_skill_queries_selected_method_and_bounds_evidence(
     evidence = asyncio.run(skill.research(planner_context, choice))
 
     assert [item.paper_id for item in evidence] == ["W200", "W300"]
-    assert all(item.query.startswith("Bayesian Personalized Ranking") for item in evidence)
+    assert all(item.query.startswith("within user pairwise") for item in evidence)
     assert all(item.provider == "openalex" for item in evidence)
     assert evidence[0].abstract == (
         "Pairwise ranking optimizes relative preference ordering."
@@ -77,7 +77,7 @@ def test_openalex_skill_queries_selected_method_and_bounds_evidence(
     query = parse_qs(urlparse(url).query)
     assert urlparse(url).path == "/works"
     assert query["search"] == [
-        "Bayesian Personalized Ranking BPR pairwise recommender implicit feedback"
+        "within user pairwise listwise learning to rank recommender systems BPR"
     ]
     assert query["per-page"] == ["20"]
     assert "abstract_inverted_index" in query["select"][0]

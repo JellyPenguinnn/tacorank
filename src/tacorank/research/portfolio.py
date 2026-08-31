@@ -74,6 +74,49 @@ def default_portfolio() -> ExperimentPortfolio:
     return ExperimentPortfolio(
         cards=[
             MethodCard(
+                method_id="objective_direct_within_user_ranker",
+                family="objective",
+                summary=(
+                    "Replace FM with a direct within-user pairwise/listwise ranker."
+                ),
+                tags=("pairwise", "listwise", "within_user", "parent_replacement"),
+                cost_tier="medium",
+                mechanism=(
+                    "Replace the FM score path with a directly trained within-user "
+                    "ranker optimized by pairwise BPR or a bounded pairwise-listwise "
+                    "objective."
+                ),
+                prerequisites=(
+                    "baseline_parity",
+                    "within_user_positive_negative_pairs",
+                    "user_impression_groups",
+                ),
+                allowed_data=(
+                    "train_interactions",
+                    "user_id",
+                    "video_id",
+                    "author_id",
+                    "tab",
+                    "date",
+                    "duration_ms",
+                    "long_view",
+                ),
+                expected_effect=(
+                    "Learn user-conditioned relative ordering without an FM residual."
+                ),
+                falsifier=(
+                    "No meaningful within-user rank change or trusted metric gain."
+                ),
+                prohibition_conditions=("evaluator_or_split_change_required",),
+                implementation_targets=(
+                    "solution/candidate.py",
+                    "solution/features.py",
+                    "solution/model.py",
+                    "solution/train.py",
+                    "solution/inference.py",
+                ),
+            ),
+            MethodCard(
                 method_id="objective_pairwise_bpr",
                 family="objective",
                 summary="Align training with within-user ranking metrics using pairwise BPR.",

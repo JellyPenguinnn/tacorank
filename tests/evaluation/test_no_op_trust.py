@@ -35,6 +35,28 @@ class NoOpTrustTests(unittest.TestCase):
         change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
         self.assertFalse(is_no_op(change, 0.0, NoOpConfig()))
 
+    def test_within_user_rank_preserving_transform_is_no_op(self):
+        change = analyze_prediction_change(
+            [20.0, 10.0, -10.0, -20.0],
+            [2.0, 1.0, 4.0, 3.0],
+            user_ids=["a", "a", "b", "b"],
+        )
+
+        self.assertEqual(change.changed_row_fraction, 1.0)
+        self.assertAlmostEqual(change.within_user_spearman_vs_parent, 1.0)
+        self.assertEqual(change.within_user_rank_changed_fraction, 0.0)
+        self.assertTrue(is_no_op(change, 0.0, NoOpConfig()))
+
+    def test_within_user_swap_prevents_no_op(self):
+        change = analyze_prediction_change(
+            [1.0, 2.0, 4.0, 3.0],
+            [2.0, 1.0, 4.0, 3.0],
+            user_ids=["a", "a", "b", "b"],
+        )
+
+        self.assertEqual(change.within_user_rank_changed_fraction, 0.5)
+        self.assertFalse(is_no_op(change, 0.0, NoOpConfig()))
+
     def test_integrity_precedes_improvement(self):
         change = analyze_prediction_change([0.3, 0.2, 0.1], [0.1, 0.2, 0.3])
         trust = assess_trust(

@@ -96,8 +96,10 @@ def load_improvement_playbook(path: str | Path, *, source_path: str | None = Non
         if any(not item for item in normalized) or len(normalized) != len(set(normalized)):
             raise PlaybookError("method_order entries must be unique non-empty strings")
         method_order[str(family)] = normalized
-    if method_order.get("objective", (None,))[0] != "objective_pairwise_bpr":
-        raise PlaybookError("objective_pairwise_bpr must be the first objective method")
+    if method_order.get("objective", (None,))[0] != "objective_direct_within_user_ranker":
+        raise PlaybookError(
+            "objective_direct_within_user_ranker must be the first objective method"
+        )
     return ImprovementPlaybook(
         schema_version="1.0",
         source_path=source_path or path.as_posix(),

@@ -968,6 +968,12 @@ class TrustAssessment(StrictModel):
 class PredictionChange(StrictModel):
     spearman_vs_parent: float = Field(ge=-1.0, le=1.0)
     changed_row_fraction: float = Field(ge=0.0, le=1.0)
+    within_user_spearman_vs_parent: Optional[float] = Field(
+        default=None, ge=-1.0, le=1.0
+    )
+    within_user_rank_changed_fraction: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
 
 
 class EvaluationDiagnostics(StrictModel):
@@ -1426,8 +1432,13 @@ class PlannerPlaybookSummary(StrictModel):
             for methods in self.method_order.values()
         ):
             raise ValueError("playbook method_order entries must be non-empty and unique")
-        if self.method_order.get("objective", [None])[0] != "objective_pairwise_bpr":
-            raise ValueError("objective_pairwise_bpr must be the first objective method")
+        if (
+            self.method_order.get("objective", [None])[0]
+            != "objective_direct_within_user_ranker"
+        ):
+            raise ValueError(
+                "objective_direct_within_user_ranker must be the first objective method"
+            )
         return self
 
 

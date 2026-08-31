@@ -123,11 +123,62 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
     )
     deployment.mkdir(parents=True)
     data.mkdir(parents=True)
-    for name in deployment_module.RAW_REQUIRED:
-        (data / name).write_text("header\n", encoding="utf-8")
     train = [_row(index, index % 2) for index in range(6)]
     valid = [_row(index + 10, index % 2) for index in range(4)]
     test = [_row(index + 20, 0) for index in range(3)]
+    raw_columns = [
+        "user_id",
+        "video_id",
+        "date",
+        "hourmin",
+        "duration_ms",
+        "long_view",
+        "tab",
+        *deployment_module._RAW_AUXILIARY_COLUMNS[1:],
+    ]
+    with (data / "log_standard_4_08_to_4_21_pure.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=raw_columns)
+        writer.writeheader()
+        for row in train:
+            payload = {column: "0" for column in raw_columns}
+            payload.update(
+                user_id=row[1],
+                video_id=row[2],
+                date=row[0],
+                duration_ms=row[5],
+                long_view=row[6],
+                tab=row[4],
+            )
+            writer.writerow(payload)
+    with (data / "log_random_4_22_to_5_08_pure.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=raw_columns)
+        writer.writeheader()
+        for date in (20220422, 20220429):
+            payload = {column: "0" for column in raw_columns}
+            payload.update(
+                user_id="random_user",
+                video_id="video_10",
+                date=date,
+                duration_ms="1010",
+                long_view="1",
+                tab="random",
+                is_rand="1",
+            )
+            writer.writerow(payload)
+    (data / "log_standard_4_22_to_5_08_pure.csv").write_text(
+        ",".join(raw_columns) + "\n", encoding="utf-8"
+    )
+    (data / "video_features_basic_pure.csv").write_text(
+        "video_id,author_id\n"
+        + "".join(
+            "video_%d,author_%d\n" % (index, index) for index in range(30)
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         deployment_module,
         "_load_official_splits",
@@ -156,6 +207,17 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
 
     result = deployment_module._prepare_data(root, deployment, data)
 
+    train_header = (
+        result["input_roots"]["candidate_full"] / "train.csv"
+    ).read_text(encoding="utf-8").splitlines()[0]
+    assert train_header == ",".join(deployment_module.CANDIDATE_TRAIN_COLUMNS)
+    assert "play_time_ms" in train_header
+    random_rows = (
+        result["input_roots"]["candidate_full"] / "random_exposure.csv"
+    ).read_text(encoding="utf-8").splitlines()
+    assert len(random_rows) == 2
+    assert "20220422" in random_rows[1]
+    assert "20220429" not in "\n".join(random_rows)
     smoke_header = (result["input_roots"]["candidate_smoke"] / "score.csv").read_text(
         encoding="utf-8"
     ).splitlines()[0]
@@ -182,6 +244,9 @@ def test_prepare_data_builds_separate_unlabelled_views_and_attested_labels(
     attested = {record["path"] for record in manifest["files"]}
     assert (
         result["input_roots"]["candidate_full"] / "score.csv"
+    ).relative_to(root).as_posix() in attested
+    assert (
+        result["input_roots"]["candidate_full"] / "random_exposure.csv"
     ).relative_to(root).as_posix() in attested
     assert result["population_csvs"]["full"].relative_to(root).as_posix() in attested
     assert submission_rows.relative_to(root).as_posix() in attested

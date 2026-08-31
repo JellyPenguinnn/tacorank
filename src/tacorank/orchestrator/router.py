@@ -1757,13 +1757,7 @@ class Harness:
         if callable(capacity):
             available = capacity(planner_context)
             if available < 1:
-                self.stop(
-                    StopDecision(
-                        True,
-                        "PARALLEL_ROUND_INCOMPLETE",
-                        "No unique legal research method remains for a parallel round.",
-                    )
-                )
+                self.stop(self.deterministic_stop(no_legal_proposal=True))
                 return []
             if available < count:
                 logger.info(

@@ -25,6 +25,29 @@ class ContractError(RuntimeError):
     pass
 
 
+CANDIDATE_TRAIN_COLUMNS = (
+    "date",
+    "user_id",
+    "video_id",
+    "author_id",
+    "tab",
+    "duration_ms",
+    "long_view",
+    "hourmin",
+    "is_click",
+    "is_like",
+    "is_follow",
+    "is_comment",
+    "is_forward",
+    "is_hate",
+    "play_time_ms",
+    "profile_stay_time",
+    "comment_stay_time",
+    "is_profile_enter",
+    "is_rand",
+)
+
+
 DEFAULT_TARGET_INTERFACE_EXCERPTS = {
     "solution/candidate.py": (
         "Required candidate entrypoint: def run(invocation: PipelineInvocation) "
@@ -35,13 +58,15 @@ DEFAULT_TARGET_INTERFACE_EXCERPTS = {
         "invocation.seed; return None. fm_baseline_predictions.csv contains "
         "unconstrained real-valued FM ranking scores, not probabilities. Never "
         "sigmoid, clip to [0,1], normalize, or rescale the FM parent or the "
-        "parent-plus-residual result. Bound only the residual on the parent's "
-        "original score scale and preserve the exact parent score when no "
-        "supported residual is available."
+        "parent-plus-residual result. For residual-capable methods, bound only "
+        "the residual on the parent's original score scale and preserve the exact "
+        "parent score when no supported residual is available. A method card tagged "
+        "parent_replacement instead trains and emits its direct ranker score without "
+        "blending in the FM score."
     ),
     "solution/features.py": (
-        "Candidate-owned feature boundary. Preserve the strict train.csv and "
-        "score.csv schemas and the fitted-on-training-only FeatureEncoder API. "
+        "Candidate-owned feature boundary. Preserve the declared train.csv and "
+        "strict score.csv schemas and the fitted-on-training-only FeatureEncoder API. "
         "Scoring rows never contain long_view. Any new aggregate must be "
         "deterministic and use only interactions earlier than the row it scores."
     ),
@@ -58,10 +83,12 @@ DEFAULT_TARGET_INTERFACE_EXCERPTS = {
         "validation or score-population labels."
     ),
     "solution/inference.py": (
-        "Candidate-owned scoring and output helpers. Preserve authenticated, "
-        "row-aligned FM parent scores, add only the approved bounded residual on "
-        "the original score scale, retain exact parent fallback, and create exactly "
-        "one ordered finite output CSV exclusively."
+        "Candidate-owned scoring and output helpers. Residual methods preserve "
+        "authenticated, row-aligned FM parent scores, add only the approved bounded "
+        "residual on the original score scale, and retain exact parent fallback. "
+        "A method card tagged parent_replacement may bypass the FM score path and "
+        "emit a deterministic finite direct-ranker score. Create exactly one ordered "
+        "finite output CSV exclusively."
     ),
 }
 
@@ -74,15 +101,20 @@ PRODUCTION_TARGET_INTERFACE_EXCERPTS = {
         "invocation.input_root and write exactly invocation.output_path as "
         "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
         "invocation.seed; return None. train.csv columns are exactly "
-        "date,user_id,video_id,author_id,tab,duration_ms,long_view; score.csv "
+        + ",".join(CANDIDATE_TRAIN_COLUMNS)
+        + "; score.csv "
         "columns are exactly row_id,date,user_id,video_id,author_id,tab,duration_ms "
         "and never expose long_view. fm_baseline_predictions.csv contains the "
         "setup-verified official FM score aligned one-to-one with score.csv; its "
         ".sha256 file authenticates it. These are unconstrained real-valued "
         "ranking scores, not probabilities. Never sigmoid, clip to [0,1], "
-        "normalize, or rescale the FM parent or the parent-plus-residual result. "
-        "Bound only the residual on the parent's original score scale and preserve "
-        "the exact parent when no supported residual is available. duration_ms is "
+        "normalize, or rescale the FM parent or a parent-plus-residual result. "
+        "Residual methods bound only the residual on the parent's original score "
+        "scale and preserve the exact parent when no supported residual is available. "
+        "A method card tagged parent_replacement must train and emit the direct "
+        "within-user ranker score rather than blend it with FM. random_exposure.csv "
+        "contains only the 2022-04-22 through 2022-04-28 random-exposure audit "
+        "population and must not be used for fitting or adaptive selection. duration_ms is "
         "video duration, never watch time. Training dates strictly precede score "
         "dates. Preserve contiguous row_id order, duplicate rows, finite "
         "deterministic scores, and exclusive output creation. Use all training rows "
@@ -149,6 +181,8 @@ class RunConfig(StrictModel):
             "date",
             "duration_ms",
             "long_view",
+            "auxiliary_engagement_labels",
+            "random_exposure_log",
             "verified_predictions",
         ]
     )

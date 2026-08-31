@@ -27,7 +27,7 @@ from .coding import (
     TRAE_STATELESS_DOCKER_MARKER,
     hash_trae_runtime_package,
 )
-from .config import PRODUCTION_TARGET_INTERFACE_EXCERPTS
+from .config import CANDIDATE_TRAIN_COLUMNS, PRODUCTION_TARGET_INTERFACE_EXCERPTS
 from .docker_host import normalize_local_docker_host
 from .evaluation.proxy import split_validation_indices
 
@@ -41,8 +41,10 @@ DATA_ARCHIVE_MD5 = "0820331067a3784d9691136f772b35a7"
 RAW_REQUIRED = (
     "log_standard_4_08_to_4_21_pure.csv",
     "log_standard_4_22_to_5_08_pure.csv",
+    "log_random_4_22_to_5_08_pure.csv",
     "video_features_basic_pure.csv",
 )
+_RAW_AUXILIARY_COLUMNS = CANDIDATE_TRAIN_COLUMNS[7:]
 TRAE_ONLY_DATA_BOUNDARY_SHA256 = hashlib.sha256(
     b"tacorank-trae-only-no-dataset-v1"
 ).hexdigest()
@@ -251,15 +253,7 @@ def setup_live_deployment(
         "baseline_parity_receipt_path": str(
             generated_data["baseline_parity_receipt_path"]
         ),
-        "candidate_allowed_columns": [
-            "date",
-            "user_id",
-            "video_id",
-            "author_id",
-            "tab",
-            "duration_ms",
-            "long_view",
-        ],
+        "candidate_allowed_columns": list(CANDIDATE_TRAIN_COLUMNS),
         "protected_columns": ["label"],
         "hidden_path_tokens": ["hidden_labels", "final_labels", "test_labels"],
         "future_column_patterns": ["(?:^|_)future(?:_|$)"],
@@ -319,6 +313,8 @@ def setup_live_deployment(
             "date",
             "duration_ms",
             "long_view",
+            "auxiliary_engagement_labels",
+            "random_exposure_log",
             "verified_predictions",
         ],
         "research_capabilities": [
@@ -535,7 +531,9 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     common = views / "common"
     common.mkdir(mode=0o700)
     train_path = common / "train.csv"
-    _write_train(train_path, train)
+    _write_train(train_path, train, data=data)
+    random_exposure_path = common / "random_exposure.csv"
+    _write_random_exposure(random_exposure_path, data=data)
     command_directories = {
         "candidate_smoke": views / "candidate-smoke",
         "candidate_proxy": views / "candidate-proxy",
@@ -557,6 +555,7 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
     for command_id, directory in command_directories.items():
         directory.mkdir(mode=0o700)
         os.link(train_path, directory / "train.csv")
+        os.link(random_exposure_path, directory / "random_exposure.csv")
         rows, indices = index_sets[command_id]
         selected: Iterable[Sequence[Any]] = rows
         if indices is not None:
@@ -704,14 +703,148 @@ def _load_official_splits(root: Path, data: Path) -> Mapping[str, Any]:
     return module.load(str(data))
 
 
-def _write_train(path: Path, rows: Sequence[Sequence[Any]]) -> None:
+def _write_train(
+    path: Path,
+    rows: Sequence[Sequence[Any]],
+    *,
+    data: Path | None = None,
+) -> None:
     with _exclusive_csv(path) as handle:
         writer = csv.writer(handle)
-        writer.writerow(
-            ("date", "user_id", "video_id", "author_id", "tab", "duration_ms", "long_view")
+        if data is None:
+            writer.writerow(CANDIDATE_TRAIN_COLUMNS[:7])
+            writer.writerows(rows)
+            return
+        writer.writerow(CANDIDATE_TRAIN_COLUMNS)
+        raw_path = data / "log_standard_4_08_to_4_21_pure.csv"
+        official_index = 0
+        with raw_path.open(newline="", encoding="utf-8") as raw_handle:
+            reader = csv.DictReader(raw_handle, strict=True)
+            _require_raw_columns(reader, raw_path)
+            for raw_number, raw in enumerate(reader, start=1):
+                try:
+                    date = int(raw["date"])
+                except (TypeError, ValueError) as error:
+                    raise DeploymentError(
+                        "standard training log contains an invalid date at row %d"
+                        % raw_number
+                    ) from error
+                if not 20220408 <= date <= 20220421:
+                    continue
+                if official_index >= len(rows):
+                    raise DeploymentError(
+                        "standard training log has more rows than the official split"
+                    )
+                official = rows[official_index]
+                _verify_raw_training_row(raw, official, raw_number)
+                writer.writerow(
+                    (
+                        *official,
+                        *(raw[column] for column in _RAW_AUXILIARY_COLUMNS),
+                    )
+                )
+                official_index += 1
+        if official_index != len(rows):
+            raise DeploymentError(
+                "standard training log has fewer rows than the official split"
+            )
+
+
+def _write_random_exposure(path: Path, *, data: Path) -> None:
+    """Expose only the public-validation-period random log as an audit view."""
+
+    authors = _load_video_authors(data / "video_features_basic_pure.csv")
+    raw_path = data / "log_random_4_22_to_5_08_pure.csv"
+    written = 0
+    with _exclusive_csv(path) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(CANDIDATE_TRAIN_COLUMNS)
+        with raw_path.open(newline="", encoding="utf-8") as raw_handle:
+            reader = csv.DictReader(raw_handle, strict=True)
+            _require_raw_columns(reader, raw_path)
+            for raw_number, raw in enumerate(reader, start=1):
+                try:
+                    date = int(raw["date"])
+                    duration = float(raw["duration_ms"])
+                except (TypeError, ValueError) as error:
+                    raise DeploymentError(
+                        "random exposure log contains invalid numeric data at row %d"
+                        % raw_number
+                    ) from error
+                if not 20220422 <= date <= 20220428:
+                    continue
+                label = 1 if raw["long_view"] != "0" else 0
+                writer.writerow(
+                    (
+                        date,
+                        raw["user_id"],
+                        raw["video_id"],
+                        authors.get(raw["video_id"], "UNK"),
+                        raw["tab"],
+                        duration,
+                        label,
+                        *(raw[column] for column in _RAW_AUXILIARY_COLUMNS),
+                    )
+                )
+                written += 1
+    if written == 0:
+        raise DeploymentError("random exposure audit view is empty")
+
+
+def _require_raw_columns(reader: csv.DictReader, path: Path) -> None:
+    required = {
+        "date",
+        "user_id",
+        "video_id",
+        "tab",
+        "duration_ms",
+        "long_view",
+        *_RAW_AUXILIARY_COLUMNS,
+    }
+    missing = required - set(reader.fieldnames or ())
+    if missing:
+        raise DeploymentError(
+            "%s is missing required candidate columns: %s"
+            % (path.name, ", ".join(sorted(missing)))
         )
-        for row in rows:
-            writer.writerow(row)
+
+
+def _verify_raw_training_row(
+    raw: Mapping[str, str], official: Sequence[Any], row_number: int
+) -> None:
+    expected = (
+        int(raw["date"]),
+        raw["user_id"],
+        raw["video_id"],
+        raw["tab"],
+        float(raw["duration_ms"]),
+        1 if raw["long_view"] != "0" else 0,
+    )
+    observed = (
+        int(official[0]),
+        str(official[1]),
+        str(official[2]),
+        str(official[4]),
+        float(official[5]),
+        int(official[6]),
+    )
+    if observed != expected:
+        raise DeploymentError(
+            "candidate training row does not align with official split at row %d"
+            % row_number
+        )
+
+
+def _load_video_authors(path: Path) -> Dict[str, str]:
+    authors: Dict[str, str] = {}
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, strict=True)
+        required = {"video_id", "author_id"}
+        if not required.issubset(reader.fieldnames or ()):
+            raise DeploymentError("video feature data is missing author identity")
+        for row in reader:
+            authors[row["video_id"]] = row["author_id"]
+    return authors
 
 
 def _write_score(path: Path, rows: Iterable[Sequence[Any]]) -> None:

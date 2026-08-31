@@ -113,6 +113,13 @@ class ParallelPlanner:
         )
 
 
+class ExhaustedParallelPlanner:
+    @staticmethod
+    def parallel_direction_capacity(context):
+        del context
+        return 0
+
+
 class ConcurrentCodingWorker:
     def __init__(self, delegate) -> None:
         self.delegate = delegate
@@ -240,6 +247,17 @@ def test_parallel_round_runs_independent_lanes_and_serializes_public_queries(
         and event.payload.result.population.value == "public_validation"
     ]
     assert public_indices == list(range(1, len(public_indices) + 1))
+
+
+def test_parallel_round_exhaustion_is_a_normal_finalizable_stop(
+    harness, baseline_evaluation
+):
+    harness.planner = ExhaustedParallelPlanner()
+    harness.bootstrap(baseline_evaluation)
+
+    state = asyncio.run(harness.run_parallel_round())
+
+    assert state.stop_reason_code == "no_legal_proposal"
 
 
 def test_parallel_round_synthesizes_all_independent_improvements(

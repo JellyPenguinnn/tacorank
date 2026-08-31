@@ -38,7 +38,10 @@ def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_e
     assert first.contract_summary.data_manifest_sha256 == harness.config.data_manifest_sha256
     assert first.contract_summary.evaluator_sha256 == harness.config.evaluator_sha256
     assert first.playbook.rule_order[0] == "output_rejected"
-    assert first.playbook.method_order["objective"][0] == "objective_pairwise_bpr"
+    assert (
+        first.playbook.method_order["objective"][0]
+        == "objective_direct_within_user_ranker"
+    )
     assert first.refinement_frontier_ids == []
     assert first.ensemble_candidate_ids == []
     pairwise = next(
