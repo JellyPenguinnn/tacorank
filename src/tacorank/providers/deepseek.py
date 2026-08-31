@@ -745,13 +745,21 @@ class DeepSeekResearchProvider:
                     "success_criterion": "observable validation criterion",
                     "falsification_condition": "observable failure condition",
                     "confidence": "number from 0 to 1",
-                    "conservative_parameter_guidance": "bounded suggestions only",
+                    "conservative_parameter_guidance": {
+                        "default_setting": "one conservative fixed configuration",
+                        "single_parameter_sensitivity": {
+                            "parameter": "one capacity or regularization control",
+                            "values": ["conservative_value", "nearby_value"],
+                        },
+                        "rationale": "why this bounded setting is appropriate",
+                    },
                     "spec": "one candidate plan object, no implementation paths",
                 },
                 "turn_rules": [
                     "Return one JSON object only.",
                     "For a tool turn, include only the action and bounded IDs/query.",
                     "For finalize_plan, include every finalize_schema field and a complete spec.",
+                    "conservative_parameter_guidance must be a non-empty JSON object, never a string.",
                     "If repair_hint is present, correct that issue before choosing the next action.",
                 ],
             },

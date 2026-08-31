@@ -276,6 +276,13 @@ def test_research_turn_retry_is_compact_and_disables_thinking(planner_context):
     assert "compact JSON object only" in payload["messages"][0]["content"]
     assert prompt_document["turn_attempt"] == 2
     assert prompt_document["repair_hint"] == "research_turn_schema_invalid"
+    assert isinstance(
+        prompt_document["finalize_schema"]["conservative_parameter_guidance"],
+        dict,
+    )
+    assert "must be a non-empty JSON object" in " ".join(
+        prompt_document["turn_rules"]
+    )
 
 
 def test_deepseek_provider_grounds_plan_in_retrieved_literature(planner_context):
