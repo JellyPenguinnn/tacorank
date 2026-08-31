@@ -11,6 +11,9 @@ New live deployments use at most two simultaneous lanes. The first follows the
 normal outcome policy; the optional scouting lane must use a method never tried
 anywhere in the run. Repeating a prior method on a new parent is legal only when
 the outcome policy explicitly requests refinement or deepening.
+An operationally invalid attempt with no protected evaluation may be
+reimplemented once from the same trusted parent. A second invalid attempt for
+that parent/family/method retires the mechanism.
 
 ```json
 {
@@ -42,17 +45,19 @@ the outcome policy explicitly requests refinement or deepening.
     "other"
   ],
   "method_order": {
-    "objective": ["objective_direct_within_user_ranker", "objective_pairwise_bpr", "objective_loss_aligned_features", "objective_listwise_user_softmax"],
-    "temporal_history": ["temporal_history_compact"],
-    "multitask": ["multitask_single_auxiliary"],
+    "objective": ["objective_direct_within_user_ranker", "objective_pairwise_hinge_margin", "objective_pairwise_bpr", "objective_lambda_ndcg_surrogate", "objective_loss_aligned_features", "objective_listwise_user_softmax"],
+    "temporal_history": ["temporal_history_compact", "temporal_recency_weighted_ranker", "temporal_hour_context"],
+    "multitask": ["multitask_single_auxiliary", "multitask_watch_time_auxiliary", "multitask_negative_feedback_auxiliary"],
     "duration_bias": ["duration_bias_censored_watch_time"],
     "features": [
       "temporal_drift_past_only",
       "features_author_affinity_past_only",
-      "features_tab_context_residual"
+      "features_tab_context_residual",
+      "features_frequency_crosses",
+      "features_duration_context_interactions"
     ],
-    "model": ["model_compact_ranker"],
-    "sampling": ["sampling_deterministic_coverage"],
+    "model": ["model_compact_ranker", "model_field_aware_ranker"],
+    "sampling": ["sampling_deterministic_coverage", "sampling_hard_negative_pairs"],
     "ensemble": ["ensemble_diverse_residual_candidate", "ensemble_confirmed_members"],
     "evaluation": ["evaluation_random_exposure_robustness"]
   }

@@ -12,6 +12,7 @@ from tacorank.context.builder import (
 )
 from tacorank.context.redaction import redact
 from tacorank.research.duplicate_detection import compute_duplicate_key
+from tacorank.research.search_policy import SearchPolicy
 from tacorank.schemas import (
     ArtifactKind,
     CostEstimate,
@@ -44,6 +45,12 @@ def test_planner_context_is_byte_deterministic_and_immutable(harness, baseline_e
     )
     assert first.refinement_frontier_ids == []
     assert first.ensemble_candidate_ids == []
+    assert len(first.method_cards) == 26
+    assert any(
+        card.method_id == "multitask_watch_time_auxiliary"
+        for card in first.method_cards
+    )
+    assert SearchPolicy().parallel_direction_capacity(first) >= 20
     pairwise = next(
         card for card in first.method_cards if card.method_id == "objective_pairwise_bpr"
     )
@@ -154,7 +161,7 @@ def test_planner_context_separates_active_lessons_from_experiment_history(
     asyncio.run(harness.run_one_experiment())
 
     context = harness.context_builder.build_planner(
-        harness.events(), max_tokens=3_000
+        harness.events(), max_tokens=6_000
     )
 
     assert len(context.family_history) == 1

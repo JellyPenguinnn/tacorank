@@ -99,6 +99,10 @@ The core policy is deterministic, score-guided AIDE-style depth-first search:
   mechanisms; choosing an independent mechanism retires that branch, while a
   second no-op for the same parent/family/method retires the reimplementation
   option;
+- an implementation that becomes `invalid` before protected evaluation gets
+  one policy-selected reimplementation from the same trusted parent; a second
+  operational failure retires that parent/family/method combination without
+  treating either failure as research evidence;
 - a stateless LinUCB ranker is reconstructed from verified ledger history and
   reorders only the legal choices emitted by these deterministic gates. It
   cannot invent a family, method, parent, refinement, or ensemble component.
@@ -117,10 +121,11 @@ checkpoint selection.
 
 Semantic duplicate identity is `parent + family + method cards + ensemble
 components`. Rephrasing the same method does not normally authorize another
-trial from the same parent. The only exception is the policy-selected, single
-reimplementation after a verified no-op; the planner cannot repeat it after a
-second no-op. A genuine refinement receives a new parent commit and therefore a
-distinct identity.
+trial from the same parent. The only exceptions are policy-selected, single
+reimplementations after either a verified no-op or an operationally invalid
+attempt with no protected evaluation. The planner cannot repeat either after a
+second matching failure. A genuine refinement receives a new parent commit and
+therefore a distinct identity.
 
 ## Interfaces owned by Person 1
 

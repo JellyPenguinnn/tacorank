@@ -1,12 +1,27 @@
 from pathlib import Path
+from types import SimpleNamespace
 
-from tacorank.research.portfolio import load_method_cards
+from tacorank.research.method_eligibility import available_capabilities
+from tacorank.research.portfolio import default_portfolio, load_method_cards
 
 
 def test_schema_v1_method_cards_load_with_markdown_sections():
     portfolio = load_method_cards(Path(__file__).parents[2] / "research" / "methods")
 
-    assert len(portfolio.cards) == 16
+    assert len(portfolio.cards) == 26
+    assert default_portfolio().ids() == portfolio.ids()
+    assert {
+        "objective_pairwise_hinge_margin",
+        "objective_lambda_ndcg_surrogate",
+        "temporal_recency_weighted_ranker",
+        "temporal_hour_context",
+        "multitask_watch_time_auxiliary",
+        "multitask_negative_feedback_auxiliary",
+        "features_frequency_crosses",
+        "features_duration_context_interactions",
+        "model_field_aware_ranker",
+        "sampling_hard_negative_pairs",
+    }.issubset(portfolio.ids())
     direct = next(
         card
         for card in portfolio.cards
@@ -85,4 +100,21 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
         "solution/candidate.py",
         "solution/features.py",
         "solution/inference.py",
+    )
+
+
+def test_material_date_rate_shift_unlocks_temporal_drift(planner_context):
+    planner_context.data_profile = SimpleNamespace(
+        train_long_view_by_date=[
+            SimpleNamespace(positive_rate=0.20),
+            SimpleNamespace(positive_rate=0.24),
+        ]
+    )
+
+    assert "drift_diagnostics_material" in available_capabilities(planner_context)
+
+
+def test_verified_baseline_unlocks_public_evaluation(planner_context):
+    assert "standard_public_evaluation_complete" in available_capabilities(
+        planner_context
     )

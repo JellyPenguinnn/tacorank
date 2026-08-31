@@ -82,12 +82,31 @@ def available_capabilities(context: Any) -> frozenset[str]:
     if "random_exposure_log" in allowed_data:
         capabilities.add("random_exposure_log")
 
+    data_profile = get_value(context, "data_profile", None)
+    date_rates: list[float] = []
+    for item in as_list(get_value(data_profile, "train_long_view_by_date", None)):
+        try:
+            date_rates.append(float(get_value(item, "positive_rate", None)))
+        except (TypeError, ValueError):
+            continue
+    try:
+        drift_threshold = float(get_value(contract, "epsilon", 0.002) or 0.002)
+    except (TypeError, ValueError):
+        drift_threshold = 0.002
+    if (
+        len(date_rates) >= 2
+        and max(date_rates) - min(date_rates) > drift_threshold
+    ):
+        capabilities.add("drift_diagnostics_material")
+
     pairwise_results = [
         summary
         for summary in history
         if {
             "objective_direct_within_user_ranker",
+            "objective_pairwise_hinge_margin",
             "objective_pairwise_bpr",
+            "objective_lambda_ndcg_surrogate",
         }.intersection(
             str(item)
             for item in as_list(get_value(summary, "method_card_ids", None))
@@ -104,6 +123,8 @@ def available_capabilities(context: Any) -> frozenset[str]:
         if gauc is not None and ndcg is not None and gauc > epsilon and ndcg < -epsilon:
             capabilities.add("ndcg_weakness")
 
+    baseline = get_value(context, "baseline", None)
+    all_results = ([baseline] if baseline is not None else []) + history
     public_results = [
         summary
         for summary in history
@@ -111,7 +132,12 @@ def available_capabilities(context: Any) -> frozenset[str]:
         and _normalized(get_value(summary, "population", None))
         in {"", "public_validation"}
     ]
-    if public_results:
+    if any(
+        _is_clean_full_result(summary)
+        and _normalized(get_value(summary, "population", None))
+        in {"", "public_validation"}
+        for summary in all_results
+    ):
         capabilities.add("standard_public_evaluation_complete")
     confirmed = [
         summary

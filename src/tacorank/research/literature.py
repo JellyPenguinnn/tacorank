@@ -41,6 +41,12 @@ METHOD_QUERIES = {
     "objective_pairwise_bpr": (
         "Bayesian Personalized Ranking BPR pairwise recommender implicit feedback"
     ),
+    "objective_pairwise_hinge_margin": (
+        "pairwise hinge margin learning to rank recommender systems"
+    ),
+    "objective_lambda_ndcg_surrogate": (
+        "LambdaRank lambda NDCG listwise recommender ranking"
+    ),
     "objective_listwise_user_softmax": (
         "listwise learning to rank ListNet softmax recommender systems nDCG"
     ),
@@ -50,8 +56,20 @@ METHOD_QUERIES = {
     "temporal_history_compact": (
         "sequential recommendation temporal user behavior history attention"
     ),
+    "temporal_recency_weighted_ranker": (
+        "recency weighted temporal recommender user preference ranking"
+    ),
+    "temporal_hour_context": (
+        "time of day context aware recommender ranking"
+    ),
     "multitask_single_auxiliary": (
         "multi task learning recommender systems auxiliary engagement ranking"
+    ),
+    "multitask_watch_time_auxiliary": (
+        "multi task watch time long view video recommendation"
+    ),
+    "multitask_negative_feedback_auxiliary": (
+        "negative feedback multi task short video recommendation ranking"
     ),
     "duration_bias_censored_watch_time": (
         "Counteracting Duration Bias Video Recommendation Counterfactual Watch Time"
@@ -62,14 +80,26 @@ METHOD_QUERIES = {
     "features_tab_context_residual": (
         "context aware recommender feature interaction residual ranking"
     ),
+    "features_frequency_crosses": (
+        "frequency feature interaction cold start recommender ranking"
+    ),
+    "features_duration_context_interactions": (
+        "duration bias context interaction video recommendation"
+    ),
     "temporal_drift_past_only": (
         "temporal distribution shift recommender systems recency ranking"
     ),
     "model_compact_ranker": (
         "DeepFM deep cross network recommender ranking feature interaction"
     ),
+    "model_field_aware_ranker": (
+        "field aware factorization machine personalized recommender ranking"
+    ),
     "sampling_deterministic_coverage": (
         "negative sampling exposure bias recommender systems implicit feedback"
+    ),
+    "sampling_hard_negative_pairs": (
+        "hard negative sampling pairwise recommender implicit feedback"
     ),
     "ensemble_diverse_residual_candidate": (
         "rank ensemble diverse recommender systems score fusion"
@@ -105,6 +135,14 @@ METHOD_RELEVANCE_GROUPS = {
             "preference ordering",
         ),
     ),
+    "objective_pairwise_hinge_margin": (
+        ("recommend", "ranking"),
+        ("pairwise", "hinge", "margin", "learning to rank"),
+    ),
+    "objective_lambda_ndcg_surrogate": (
+        ("recommend", "ranking"),
+        ("lambdarank", "lambda", "ndcg", "listwise"),
+    ),
     "objective_listwise_user_softmax": (
         ("recommend", "ranking"),
         ("listwise", "listnet", "listmle", "softmax"),
@@ -118,9 +156,27 @@ METHOD_RELEVANCE_GROUPS = {
         ("recommend",),
         ("temporal", "sequential", "history", "behavior sequence"),
     ),
+    "temporal_recency_weighted_ranker": (
+        ("recommend",),
+        ("recency", "temporal", "time-aware", "time aware"),
+    ),
+    "temporal_hour_context": (
+        ("recommend", "ranking"),
+        ("time of day", "hour", "temporal context", "context aware"),
+    ),
     "multitask_single_auxiliary": (
         ("recommend", "ranking"),
         ("multi task", "multitask", "auxiliary task"),
+    ),
+    "multitask_watch_time_auxiliary": (
+        ("recommend", "ranking"),
+        ("multi task", "multitask", "auxiliary"),
+        ("watch time", "watch-time", "view duration"),
+    ),
+    "multitask_negative_feedback_auxiliary": (
+        ("recommend", "ranking"),
+        ("multi task", "multitask", "auxiliary"),
+        ("negative feedback", "dislike", "hate"),
     ),
     "duration_bias_censored_watch_time": (
         ("recommend", "video ranking"),
@@ -133,6 +189,15 @@ METHOD_RELEVANCE_GROUPS = {
     "features_tab_context_residual": (
         ("recommend", "ranking"),
         ("context aware", "contextual feature", "feature interaction"),
+    ),
+    "features_frequency_crosses": (
+        ("recommend", "ranking", "click through rate", "ctr"),
+        ("frequency", "cold start", "feature interaction", "popularity"),
+    ),
+    "features_duration_context_interactions": (
+        ("recommend", "video ranking"),
+        ("duration bias", "video duration", "watch time"),
+        ("context", "interaction"),
     ),
     "temporal_drift_past_only": (
         ("recommend",),
@@ -147,9 +212,18 @@ METHOD_RELEVANCE_GROUPS = {
             "feature interaction",
         ),
     ),
+    "model_field_aware_ranker": (
+        ("recommend", "click through rate", "ctr"),
+        ("field aware", "field-aware", "factorization machine"),
+    ),
     "sampling_deterministic_coverage": (
         ("recommend",),
         ("negative sampling", "exposure sampling", "implicit feedback sampling"),
+    ),
+    "sampling_hard_negative_pairs": (
+        ("recommend",),
+        ("hard negative", "negative sampling", "false negative"),
+        ("pairwise", "implicit feedback", "ranking"),
     ),
     "ensemble_diverse_residual_candidate": (
         ("recommend", "ranking"),

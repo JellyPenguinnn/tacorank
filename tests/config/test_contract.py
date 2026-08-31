@@ -138,6 +138,25 @@ def test_coding_token_limit_is_unbounded_by_default(config):
     assert parsed.coding_token_limit is None
 
 
+def test_default_research_data_exposes_enriched_training_columns(config):
+    assert {
+        "auxiliary_engagement_labels",
+        "random_exposure_log",
+        "hourmin",
+        "is_click",
+        "is_like",
+        "is_follow",
+        "is_comment",
+        "is_forward",
+        "is_hate",
+        "play_time_ms",
+        "profile_stay_time",
+        "comment_stay_time",
+        "is_profile_enter",
+        "is_rand",
+    }.issubset(config.allowed_research_data)
+
+
 @pytest.mark.parametrize(
     "seeds,match",
     [

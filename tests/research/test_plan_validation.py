@@ -349,6 +349,37 @@ def test_validator_allows_one_policy_selected_no_op_reimplementation(
     assert result.accepted, result.errors
 
 
+def test_validator_allows_one_policy_selected_operational_reimplementation(
+    planner_context,
+):
+    from tacorank.research.search_policy import SearchPolicy
+
+    prior = make_spec(planner_context, experiment_id="exp_0001")
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        score=None,
+        parent_eligible=False,
+        trust_verdict="inconclusive",
+        stability="not_applicable",
+        output_accepted=None,
+        parent_delta=None,
+        prediction_change=None,
+        method_card_ids=["objective_pairwise_bpr"],
+        status="invalid",
+    )
+    latest.duplicate_key = prior.duplicate_key
+    planner_context.family_history = [latest]
+    choice = SearchPolicy().choose(planner_context)
+    proposal = make_spec(planner_context, experiment_id="exp_0002")
+
+    result = PlanValidator().validate(proposal, planner_context, choice=choice)
+
+    assert choice.phase == "operational_reimplementation"
+    assert result.accepted, result.errors
+
+
 def test_validator_enforces_memory_schema_identifiers(planner_context):
     spec = make_spec(
         planner_context,

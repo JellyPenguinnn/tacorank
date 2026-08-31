@@ -49,7 +49,7 @@ def test_parallel_directions_use_distinct_eligible_method_cards(planner_context)
         for choice in choices
     }
 
-    assert capacity >= 7
+    assert capacity >= 14
     assert len(identities) == capacity
 
 
@@ -319,6 +319,22 @@ def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
         parent_delta=None,
         method_card_ids=["objective_direct_within_user_ranker"],
     )
+    hinge = make_summary(
+        "exp_0006",
+        parent_experiment_id="exp_0001",
+        family="objective",
+        parent_eligible=False,
+        parent_delta=None,
+        method_card_ids=["objective_pairwise_hinge_margin"],
+    )
+    lambda_ndcg = make_summary(
+        "exp_0007",
+        parent_experiment_id="exp_0001",
+        family="objective",
+        parent_eligible=False,
+        parent_delta=None,
+        method_card_ids=["objective_lambda_ndcg_surrogate"],
+    )
     contract = SimpleNamespace(**vars(planner_context.contract_summary))
     contract.allowed_families = ["objective"]
     context = SimpleNamespace(
@@ -326,7 +342,15 @@ def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
         baseline=root,
         current_best=best,
         eligible_frontier=[root, best],
-        family_history=[best, pairwise, loss_aligned_features, listwise, direct],
+        family_history=[
+            best,
+            pairwise,
+            loss_aligned_features,
+            listwise,
+            direct,
+            hinge,
+            lambda_ndcg,
+        ],
         method_cards=planner_context.method_cards,
         playbook=planner_context.playbook,
     )
@@ -575,6 +599,62 @@ def test_second_same_mechanism_no_op_retires_reimplementation(planner_context):
         candidate.reason_code == "NO_OP_REIMPLEMENT_MECHANISM"
         for candidate in seen
     )
+
+
+def test_operational_failure_gets_one_same_method_reimplementation(
+    planner_context,
+):
+    latest = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        score=None,
+        parent_eligible=False,
+        trust_verdict="inconclusive",
+        stability="not_applicable",
+        output_accepted=None,
+        parent_delta=None,
+        prediction_change=None,
+        method_card_ids=["objective_pairwise_bpr"],
+        status="invalid",
+    )
+
+    choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
+
+    assert choice.action == "propose"
+    assert choice.phase == "operational_reimplementation"
+    assert choice.reason_code == "OPERATIONAL_REIMPLEMENT_MECHANISM"
+    assert choice.parent.experiment_id == "exp_0000"
+    assert choice.method_card_id == "objective_pairwise_bpr"
+
+
+def test_second_operational_failure_retires_same_method(planner_context):
+    first = make_summary(
+        "exp_0001",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        score=None,
+        parent_eligible=False,
+        method_card_ids=["objective_pairwise_bpr"],
+        status="invalid",
+    )
+    latest = make_summary(
+        "exp_0002",
+        parent_experiment_id="exp_0000",
+        family="objective",
+        score=None,
+        parent_eligible=False,
+        method_card_ids=["objective_pairwise_bpr"],
+        status="invalid",
+    )
+    context = context_with_latest(planner_context, latest)
+    context.family_history = [first, latest]
+
+    choice = SearchPolicy().choose(context)
+
+    assert choice.action == "propose"
+    assert choice.reason_code == "OPERATIONAL_FAILURE_UNTESTED"
+    assert choice.method_card_id != "objective_pairwise_bpr"
 
 def test_playbook_branches_after_terminal_proxy_prune(planner_context):
     latest = make_summary(
@@ -938,7 +1018,7 @@ def test_meaningful_no_gain_backtracks_to_highest_scoring_experimental_path(
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.parent.experiment_id == "exp_002"
     assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    assert choice.method_card_id == "temporal_recency_weighted_ranker"
 
 
 def test_meaningful_no_gain_switches_family_after_best_path_refinement(
@@ -970,6 +1050,19 @@ def test_meaningful_no_gain_switches_family_after_best_path_refinement(
         method_card_ids=["temporal_history_compact"],
         status="rejected",
     )
+    recency_refinement = make_summary(
+        "exp_003b",
+        parent_experiment_id="exp_002",
+        family="temporal_history",
+        score=0.60129,
+        parent_eligible=False,
+        decision="reject",
+        trust_verdict="negative",
+        parent_delta=-0.0000985105993917,
+        prediction_change=0.04,
+        method_card_ids=["temporal_recency_weighted_ranker"],
+        status="rejected",
+    )
     latest = make_summary(
         "exp_004",
         parent_experiment_id="exp_002",
@@ -986,7 +1079,7 @@ def test_meaningful_no_gain_switches_family_after_best_path_refinement(
         baseline=root,
         current_best=root,
         eligible_frontier=[root, strongest, latest],
-        family_history=[strongest, refinement, latest],
+        family_history=[strongest, refinement, recency_refinement, latest],
         method_cards=planner_context.method_cards,
         playbook=planner_context.playbook,
     )

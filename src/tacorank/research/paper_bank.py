@@ -65,6 +65,19 @@ METHOD_BANK_TOPICS = {
         "collaborative_filtering",
         "evaluation",
     ),
+    "objective_pairwise_hinge_margin": (
+        "objective",
+        "ranking",
+        "optimization",
+        "automl",
+        "negative_feedback",
+    ),
+    "objective_lambda_ndcg_surrogate": (
+        "listwise",
+        "ranking",
+        "objective",
+        "evaluation",
+    ),
     "objective_listwise_user_softmax": (
         "listwise",
         "ranking",
@@ -86,12 +99,36 @@ METHOD_BANK_TOPICS = {
         "realtime",
         "attention",
     ),
+    "temporal_recency_weighted_ranker": (
+        "sequential",
+        "temporal_drift",
+        "user_modeling",
+        "attention",
+    ),
+    "temporal_hour_context": (
+        "realtime",
+        "context",
+        "sequential",
+        "cross_domain",
+    ),
     "multitask_single_auxiliary": (
         "multitask",
         "multiobjective",
         "user_modeling",
         "long_term",
         "retention",
+    ),
+    "multitask_watch_time_auxiliary": (
+        "watch_time",
+        "multitask",
+        "short_video",
+        "regression",
+    ),
+    "multitask_negative_feedback_auxiliary": (
+        "negative_feedback",
+        "multitask",
+        "multiobjective",
+        "ranking",
     ),
     "duration_bias_censored_watch_time": (
         "watch_time",
@@ -114,6 +151,18 @@ METHOD_BANK_TOPICS = {
         "multi_domain",
         "personalization",
     ),
+    "features_frequency_crosses": (
+        "feature_interaction",
+        "ctr",
+        "cold_start",
+        "ranking",
+    ),
+    "features_duration_context_interactions": (
+        "watch_time",
+        "duration_bias",
+        "feature_interaction",
+        "debiasing",
+    ),
     "temporal_drift_past_only": (
         "temporal_drift",
         "streaming",
@@ -128,12 +177,24 @@ METHOD_BANK_TOPICS = {
         "ranking",
         "efficiency",
     ),
+    "model_field_aware_ranker": (
+        "feature_interaction",
+        "personalization",
+        "embedding",
+        "ranking",
+    ),
     "sampling_deterministic_coverage": (
         "sampling",
         "exposure_bias",
         "negative_feedback",
         "debiasing",
         "exploration",
+    ),
+    "sampling_hard_negative_pairs": (
+        "sampling",
+        "negative_feedback",
+        "debiasing",
+        "training_data",
     ),
     "ensemble_diverse_residual_candidate": (
         "ensemble",

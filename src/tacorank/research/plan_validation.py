@@ -53,16 +53,22 @@ def _is_no_op_summary(summary: Any, context: Any) -> bool:
     return numeric_change is not None and numeric_change <= numeric_threshold
 
 
-def _authorized_no_op_reimplementation(
+def _authorized_reimplementation(
     spec: Any, context: Any, choice: Any
 ) -> bool:
-    """Allow one policy-selected duplicate mechanism after its first no-op."""
+    """Allow one policy-selected duplicate after no-op or operational invalidity."""
 
-    if (
-        str(get_value(choice, "phase", "")) != "no_op_reimplementation"
-        or str(get_value(choice, "reason_code", ""))
-        != "NO_OP_REIMPLEMENT_MECHANISM"
-    ):
+    phase = str(get_value(choice, "phase", ""))
+    reason_code = str(get_value(choice, "reason_code", ""))
+    no_op_retry = (
+        phase == "no_op_reimplementation"
+        and reason_code == "NO_OP_REIMPLEMENT_MECHANISM"
+    )
+    operational_retry = (
+        phase == "operational_reimplementation"
+        and reason_code == "OPERATIONAL_REIMPLEMENT_MECHANISM"
+    )
+    if not no_op_retry and not operational_retry:
         return False
     history = as_list(get_value(context, "family_history", None))
     if not history:
@@ -73,9 +79,19 @@ def _authorized_no_op_reimplementation(
     method_ids = {
         str(item) for item in as_list(get_value(latest, "method_card_ids", None))
     }
+    status = str(get_value(latest, "status", "")).lower()
+    latest_matches_retry = (
+        no_op_retry
+        and _is_no_op_summary(latest, context)
+        and status == "no_op"
+    ) or (
+        operational_retry
+        and status == "invalid"
+        and get_value(latest, "primary_score", None) is None
+        and get_value(latest, "metric_set", None) is None
+    )
     if (
-        not _is_no_op_summary(latest, context)
-        or str(get_value(latest, "status", "")).lower() != "no_op"
+        not latest_matches_retry
         or str(get_value(parent, "experiment_id", "")) != parent_id
         or str(get_value(spec, "parent_experiment_id", "")) != parent_id
         or str(get_value(spec, "family", ""))
@@ -85,10 +101,21 @@ def _authorized_no_op_reimplementation(
         or len(method_ids) != 1
     ):
         return False
-    matching_no_ops = 0
+    matching_attempts = 0
     for summary in history:
+        summary_status = str(get_value(summary, "status", "")).lower()
+        summary_matches_retry = (
+            no_op_retry
+            and _is_no_op_summary(summary, context)
+            and summary_status == "no_op"
+        ) or (
+            operational_retry
+            and summary_status == "invalid"
+            and get_value(summary, "primary_score", None) is None
+            and get_value(summary, "metric_set", None) is None
+        )
         if (
-            _is_no_op_summary(summary, context)
+            summary_matches_retry
             and str(get_value(summary, "parent_experiment_id", "")) == parent_id
             and str(get_value(summary, "family", ""))
             == str(get_value(latest, "family", ""))
@@ -96,8 +123,8 @@ def _authorized_no_op_reimplementation(
                 map(str, as_list(get_value(summary, "method_card_ids", None)))
             )
         ):
-            matching_no_ops += 1
-    return matching_no_ops == 1
+            matching_attempts += 1
+    return matching_attempts == 1
 
 SHARED_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 EVENT_ID_PATTERN = re.compile(r"evt_\d{6,}$")
@@ -448,7 +475,7 @@ class PlanValidator:
         for field in ("baseline", "current_best", "eligible_frontier", "family_history"):
             known_summaries.extend(as_list(get_value(context, field, None)))
         seen_detector = duplicate_detector or DuplicateDetector(known_summaries)
-        if seen_detector.contains(spec) and not _authorized_no_op_reimplementation(
+        if seen_detector.contains(spec) and not _authorized_reimplementation(
             spec, context, choice
         ):
             errors.append("DUPLICATE_EXPERIMENT")

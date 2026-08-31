@@ -30,15 +30,35 @@ DEFAULT_FAMILY_ORDER = HIGH_VALUE_FAMILIES + (
 DEFAULT_METHOD_ORDER = {
     "objective": (
         "objective_direct_within_user_ranker",
+        "objective_pairwise_hinge_margin",
         "objective_pairwise_bpr",
+        "objective_lambda_ndcg_surrogate",
         "objective_loss_aligned_features",
         "objective_listwise_user_softmax",
     ),
-    "temporal_history": ("temporal_history_compact",),
-    "multitask": ("multitask_single_auxiliary",),
+    "temporal_history": (
+        "temporal_history_compact",
+        "temporal_recency_weighted_ranker",
+        "temporal_hour_context",
+    ),
+    "multitask": (
+        "multitask_single_auxiliary",
+        "multitask_watch_time_auxiliary",
+        "multitask_negative_feedback_auxiliary",
+    ),
     "duration_bias": ("duration_bias_censored_watch_time",),
-    "features": ("temporal_drift_past_only",),
-    "model": ("model_compact_ranker",),
+    "features": (
+        "temporal_drift_past_only",
+        "features_author_affinity_past_only",
+        "features_tab_context_residual",
+        "features_frequency_crosses",
+        "features_duration_context_interactions",
+    ),
+    "model": ("model_compact_ranker", "model_field_aware_ranker"),
+    "sampling": (
+        "sampling_deterministic_coverage",
+        "sampling_hard_negative_pairs",
+    ),
     "ensemble": (
         "ensemble_parallel_round_synthesis",
         "ensemble_diverse_residual_candidate",
@@ -585,6 +605,69 @@ def _no_op_choices(
     return tuple(choices)
 
 
+def _operational_reimplementation_choice(
+    context: Any,
+    latest: Any,
+    eligible: Sequence[ExperimentNodeView],
+    allowed: tuple[str, ...],
+) -> PolicyChoice | None:
+    """Retry one method once when no research evaluation was produced."""
+
+    if (
+        _normalized(get_value(latest, "status", None)) != "invalid"
+        or get_value(latest, "primary_score", None) is not None
+        or get_value(latest, "metric_set", None) is not None
+    ):
+        return None
+    parent_id = str(get_value(latest, "parent_experiment_id", ""))
+    family = str(get_value(latest, "family", ""))
+    method_ids = tuple(
+        str(item)
+        for item in as_list(get_value(latest, "method_card_ids", None))
+        if str(item)
+    )
+    parent = next(
+        (node for node in eligible if node.experiment_id == parent_id),
+        None,
+    )
+    if parent is None or family not in allowed or len(method_ids) != 1:
+        return None
+    matching_invalid = sum(
+        1
+        for summary in as_list(get_value(context, "family_history", None))
+        if _normalized(get_value(summary, "status", None)) == "invalid"
+        and get_value(summary, "primary_score", None) is None
+        and get_value(summary, "metric_set", None) is None
+        and str(get_value(summary, "parent_experiment_id", "")) == parent_id
+        and str(get_value(summary, "family", "")) == family
+        and method_ids[0]
+        in {
+            str(item)
+            for item in as_list(get_value(summary, "method_card_ids", None))
+        }
+    )
+    if matching_invalid != 1:
+        return None
+    card = {
+        str(get_value(item, "method_id", "")): item
+        for item in eligible_method_cards(context, family)
+    }.get(method_ids[0])
+    if card is None:
+        return None
+    return _proposal(
+        parent=parent,
+        family=family,
+        card=card,
+        phase="operational_reimplementation",
+        reason_code="OPERATIONAL_REIMPLEMENT_MECHANISM",
+        reason=(
+            "The prior candidate failed before protected evaluation, so the "
+            "research mechanism remains untested. Reimplement it once from the "
+            "same trusted parent; a second invalid attempt retires the method."
+        ),
+    )
+
+
 def _required_method_choice(
     context: Any,
     parent: ExperimentNodeView,
@@ -756,6 +839,14 @@ def _playbook_choice(
         and get_value(latest, "primary_score", None) is None
         and get_value(latest, "metric_set", None) is None
     ):
+        retry = _operational_reimplementation_choice(
+            context,
+            latest,
+            eligible,
+            allowed,
+        )
+        if retry is not None:
+            return retry
         return _next_independent_choice(
             context,
             eligible,

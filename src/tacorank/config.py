@@ -183,6 +183,18 @@ class RunConfig(StrictModel):
             "long_view",
             "auxiliary_engagement_labels",
             "random_exposure_log",
+            "hourmin",
+            "is_click",
+            "is_like",
+            "is_follow",
+            "is_comment",
+            "is_forward",
+            "is_hate",
+            "play_time_ms",
+            "profile_stay_time",
+            "comment_stay_time",
+            "is_profile_enter",
+            "is_rand",
             "verified_predictions",
         ]
     )
