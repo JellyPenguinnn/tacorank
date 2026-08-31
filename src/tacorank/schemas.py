@@ -960,8 +960,9 @@ class TrustAssessment(StrictModel):
         supplied = (self.seed_mean is not None, self.seed_stderr is not None)
         if supplied[0] != supplied[1]:
             raise ValueError("seed mean and standard error must be supplied together")
-        if any(supplied) and self.seed_count < 3:
-            raise ValueError("seed aggregates require at least three seed results")
+        # Floor matches TrustConfig.required_seed_count: two confirmed seeds.
+        if any(supplied) and self.seed_count < 2:
+            raise ValueError("seed aggregates require at least two seed results")
         return self
 
 
