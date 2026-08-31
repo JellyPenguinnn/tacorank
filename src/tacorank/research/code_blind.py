@@ -7,17 +7,25 @@ from typing import Any, Mapping
 
 _CODE_EXTENSION = r"(?:py|pyi|js|ts|tsx|java|go|rs|cpp|cc|c|h)"
 
-# A single slash between plain research terms (for example ``user/item`` or
-# ``positive/negative``) is not a repository path.  Real implementation
-# references still match when they are explicit/absolute paths, contain at
-# least two path separators, start with a common code root, or name a source
-# file by extension.
+# Slash-separated research terms are not repository paths. This is true of one
+# slash (``user/item``, ``positive/negative``) and equally of several
+# (``train/valid/test``, ``smoke/proxy/full``, ``user/item/date``) -- the last
+# two are this harness's own vocabulary for its splits and fidelities, and the
+# reviewed model_compact_ranker card is written with the third. Counting
+# separators therefore cannot distinguish prose from a path, and rejecting a
+# plan for saying "the train/valid/test split" stops a run over nothing.
+#
+# A bare forward-slash chain is only matched when it also carries a path
+# signal, which the remaining branches already supply: a source-file
+# extension, an explicit relative/absolute prefix, or a known code root.
+# Backslash chains keep matching on their own, since a Windows path separator
+# does not occur in research prose.
 IMPLEMENTATION_REFERENCE_RE = re.compile(
     r"(?:^|\s)(?:[A-Za-z0-9_.-]+[/\\])+[A-Za-z0-9_.-]+\."
     + _CODE_EXTENSION
     + r"\b|"
     r"(?:^|\s)(?:\.\.?[/\\]|[/\\]|[A-Za-z]:\\)[A-Za-z0-9_.\\/-]+|"
-    r"(?:^|\s)(?:[A-Za-z0-9_.-]+[/\\]){2,}[A-Za-z0-9_.-]+|"
+    r"(?:^|\s)(?:[A-Za-z0-9_.-]+\\){2,}[A-Za-z0-9_.-]+|"
     r"(?:^|\s)(?:src|source|solution|app|lib|tests?|scripts?|config|contract|docs?)"
     r"[/\\][A-Za-z0-9_.-]+|"
     r"\b[A-Za-z0-9_.-]+\."
