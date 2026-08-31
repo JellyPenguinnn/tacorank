@@ -107,6 +107,25 @@ $docker = (Get-Command docker -ErrorAction SilentlyContinue)
 if (-not $docker) { Fail "docker was not found on PATH; start Docker Desktop" }
 $dockerPath = $docker.Source
 
+# Gate A checks candidate imports with importlib against this venv, while the
+# candidate itself runs in the container. If the two disagree the patch is
+# rejected with SYNTAX_IMPORT_FAILURE for a package that is genuinely present
+# where it executes, and the coding worker cannot fix that from inside.
+Step "Checking host imports match the candidate container"
+$venvPython = Join-Path $repo ".venv\Scripts\python.exe"
+$missing = & $venvPython -c @"
+import importlib.util
+missing = [m for m in ('numpy','pandas','scipy','sklearn','lightgbm')
+           if importlib.util.find_spec(m) is None]
+print(','.join(missing))
+"@
+if ($missing) {
+    Fail ("this venv cannot see: $missing. Gate A would reject candidates that " +
+          "import them even though the container has them. Run: " +
+          ".venv\Scripts\python.exe -m pip install -r requirements.txt")
+}
+Write-Host "host and container import sets agree"
+
 # --- Cleanliness -----------------------------------------------------------
 # setup-live refuses a dirty tree, and counts ignored files inside the pinned
 # submodule as dirty. Python imports leave bytecode that ordinary git status
