@@ -35,6 +35,7 @@ export type RunSummary = {
   baseline_primary_score: number | null;
   stop_reason_code: string | null;
   final_experiment_id: string | null;
+  final_selection_provisional: boolean;
   event_count: number;
   current_experiment_id: string | null;
   current_attempt: number | null;
@@ -309,6 +310,7 @@ async function summarizeLaunch(item: LaunchRecord, lockedPid: number | null): Pr
     baseline_primary_score: null,
     stop_reason_code: null,
     final_experiment_id: null,
+    final_selection_provisional: false,
     event_count: 0,
     current_experiment_id: null,
     current_attempt: null,
@@ -365,6 +367,7 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
   let stageStartedAt: string | null = null;
   let coderTimeout: number | null = null;
   let executionTimeout: number | null = null;
+  let searchStopped = false;
   const candidateScores = new Map<string, { experimentId: string; fidelity: string; score: number }>();
 
   for (const event of events) {
@@ -395,43 +398,50 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
       case 'patch.checked': phase = nested(payload, 'result').accepted === false ? 'recovery' : 'execution'; break;
       case 'execution.started': {
         const request = nested(payload, 'request');
-        phase = 'running'; activeAttempt = number(request.attempt);
+        phase = searchStopped ? 'finalize' : 'running'; activeAttempt = number(request.attempt);
         activeFidelity = text(request.fidelity); executionTimeout = number(request.timeout_seconds); break;
       }
-      case 'execution.finished': phase = text(nested(payload, 'result').outcome) === 'success' ? 'output_gate' : 'recovery'; break;
-      case 'adapter.failed': phase = 'recovery'; break;
-      case 'recovery.decided': phase = 'recovery'; break;
-      case 'output.checked': phase = nested(payload, 'result').accepted === false ? 'recovery' : 'evaluation'; break;
+      case 'execution.finished':
+        phase = searchStopped ? 'finalize' : text(nested(payload, 'result').outcome) === 'success' ? 'output_gate' : 'recovery';
+        break;
+      case 'adapter.failed': phase = searchStopped ? 'finalize' : 'recovery'; break;
+      case 'recovery.decided': phase = searchStopped ? 'finalize' : 'recovery'; break;
+      case 'output.checked':
+        phase = searchStopped ? 'finalize' : nested(payload, 'result').accepted === false ? 'recovery' : 'evaluation';
+        break;
       case 'evaluation.completed': {
-        phase = 'decision';
+        phase = searchStopped ? 'finalize' : 'decision';
         const result = nested(payload, 'result');
         const id = text(result.experiment_id);
         const fidelity = text(result.fidelity);
         const score = metricScore(payload);
         if (id && id !== 'baseline' && fidelity && score !== null) {
-          candidateScores.set(`${id}\u0000${fidelity}`, { experimentId: id, fidelity, score });
+          // Iteration cards display the latest evaluation for each experiment,
+          // so the summary must rank that same visible score.
+          candidateScores.set(id, { experimentId: id, fidelity, score });
         }
         break;
       }
       case 'experiment.decided': phase = 'planning'; break;
       case 'run.stopped':
-        status = 'stopped'; phase = 'stopped'; stopReason = text(payload.reason_code);
+        status = 'stopped'; phase = 'finalize'; stopReason = text(payload.reason_code); searchStopped = true;
         activeExperiment = null; activeAttempt = null; activeFidelity = null; break;
-      case 'final.selected': status = 'finalizing'; phase = 'submission'; finalId = text(payload.experiment_id); break;
+      case 'final.selected': status = 'finalizing'; phase = 'finalize'; finalId = text(payload.experiment_id); break;
       case 'submission.checked':
         status = payload.accepted === true ? 'finalized' : 'failed'; phase = status; break;
     }
     if (phase !== previousPhase) stageStartedAt = event.timestamp ?? null;
   }
   const evaluated = [...candidateScores.values()];
-  const fullFidelity = evaluated.filter((item) => item.fidelity === 'full');
-  const scorePool = fullFidelity.length ? fullFidelity : evaluated;
-  const bestCandidate = scorePool.reduce<typeof scorePool[number] | null>(
+  const bestCandidate = evaluated.reduce<typeof evaluated[number] | null>(
     (best, item) => best === null || item.score > best.score ? item : best,
     null,
   );
   bestId = bestCandidate?.experimentId ?? null;
   bestScore = bestCandidate?.score ?? null;
+  // Keep the ledger-selected final authoritative. A stopped, incomplete run
+  // may still show its highest latest experiment score as a provisional UI choice.
+  const provisionalFinalId = finalId === null && stopReason !== null ? bestId : null;
   const timeout = phase === 'coder_context' ? coderTimeout : phase === 'running' ? executionTimeout : null;
   const deadline = timeout !== null && stageStartedAt
     ? new Date(new Date(stageStartedAt).getTime() + timeout * 1000).toISOString()
@@ -454,7 +464,8 @@ export function summarizeRun(runId: string, events: LedgerEvent[]): RunSummary {
     best_primary_fidelity: bestCandidate?.fidelity ?? null,
     baseline_primary_score: baselineScore,
     stop_reason_code: stopReason,
-    final_experiment_id: finalId,
+    final_experiment_id: finalId ?? provisionalFinalId,
+    final_selection_provisional: provisionalFinalId !== null,
     event_count: events.length,
     current_experiment_id: activeExperiment,
     current_attempt: activeAttempt,
