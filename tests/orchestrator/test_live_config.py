@@ -45,6 +45,11 @@ def test_mount_policies_expose_pipeline_roots_at_canonical_paths(
         "submission_check"
     }
     for policy in policies:
+        if policy.command_id == "submission_check":
+            assert tuple(mount.target for mount in policy.mounts) == (
+                "/contracts",
+            )
+            continue
         assert tuple(mount.target for mount in policy.mounts) == (
             "/contracts",
             "/inputs",
