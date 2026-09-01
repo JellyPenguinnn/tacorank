@@ -65,6 +65,32 @@ def test_person4_consumes_canonical_recovery_context_names():
         )
 
 
+def test_recovery_context_accepts_every_granted_same_commit_retry():
+    # run_20260831T074812Z_35160 stopped fail-closed because the policy
+    # granted a second same-commit retry while this schema still capped the
+    # counter at 1. The schema bound must track the policy constant.
+    from tacorank.recovery.policy import MAX_SAME_COMMIT_RETRIES
+
+    context = RecoveryPolicyContext(
+        run_id="run_1",
+        experiment_id="exp_1",
+        original_experiment_spec=experiment_spec(),
+        current_patch_commit_sha="deadbeef",
+        failure_event_id="evt_1",
+        repair_attempts_used=0,
+        max_repair_attempts=2,
+        same_commit_retries_used=MAX_SAME_COMMIT_RETRIES,
+        remaining_repair_budget=2,
+        contract_summary="Frozen test contract.",
+    )
+    assert context.same_commit_retries_used == MAX_SAME_COMMIT_RETRIES
+    with pytest.raises(ValidationError):
+        RecoveryPolicyContext.model_validate(
+            context.model_dump()
+            | {"same_commit_retries_used": MAX_SAME_COMMIT_RETRIES + 1}
+        )
+
+
 def test_canonical_recovery_decision_never_allows_attempt_zero():
     values = dict(
         run_id="run_1",

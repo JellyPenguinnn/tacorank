@@ -13,12 +13,18 @@ class NoOpConfig:
     spearman_threshold: float = 0.9999
     changed_row_fraction_max: float = 0.001
     primary_delta_tolerance: float = 0.0016
+    # Minimum fraction of within-user item pairs a candidate must reorder to
+    # count as a real intervention. A bounded residual that shifts every score
+    # by a hair leaves changed_row_fraction at ~1.0 while reordering almost
+    # nothing, which is a no-op in every way the metrics can see.
+    within_user_rank_change_min: float = 0.002
 
 
 def analyze_prediction_change(
     scores: Sequence[float],
     parent_scores: Optional[Sequence[float]],
     tolerance: float = 1e-12,
+    user_ids: Optional[Sequence[object]] = None,
 ) -> PredictionChange:
     values = _finite_scores(scores)
     unique_fraction = len(set(values)) / len(values)
@@ -34,7 +40,58 @@ def analyze_prediction_change(
         changed_row_fraction=changed / len(values),
         identical_score_fraction=identical / len(values),
         unique_score_fraction=unique_fraction,
+        within_user_rank_change=(
+            None
+            if user_ids is None
+            else within_user_rank_change(values, parent, user_ids, tolerance)
+        ),
     )
+
+
+def within_user_rank_change(
+    scores: Sequence[float],
+    parent_scores: Sequence[float],
+    user_ids: Sequence[object],
+    tolerance: float = 1e-12,
+) -> Optional[float]:
+    """Fraction of within-user pairs the candidate orders differently.
+
+    A pair counts as reordered when the parent expressed a strict preference
+    and the candidate either reverses it or flattens it to a tie (and the
+    reverse case). Users with a single row contribute no pairs. Returns None
+    when no user contributes a comparable pair.
+    """
+
+    if not (len(scores) == len(parent_scores) == len(user_ids)):
+        raise ValueError("scores, parent scores, and user ids must align")
+    groups: dict[object, list[int]] = {}
+    for index, user in enumerate(user_ids):
+        groups.setdefault(user, []).append(index)
+    changed = 0
+    total = 0
+    for indices in groups.values():
+        if len(indices) < 2:
+            continue
+        for position, left in enumerate(indices):
+            for right in indices[position + 1 :]:
+                parent_gap = parent_scores[left] - parent_scores[right]
+                candidate_gap = scores[left] - scores[right]
+                parent_order = _sign(parent_gap, tolerance)
+                candidate_order = _sign(candidate_gap, tolerance)
+                if parent_order == 0 and candidate_order == 0:
+                    continue
+                total += 1
+                if parent_order != candidate_order:
+                    changed += 1
+    return changed / total if total else None
+
+
+def _sign(value: float, tolerance: float) -> int:
+    if value > tolerance:
+        return 1
+    if value < -tolerance:
+        return -1
+    return 0
 
 
 def is_no_op(
@@ -44,10 +101,19 @@ def is_no_op(
 ) -> bool:
     if change.spearman_vs_parent is None or change.changed_row_fraction is None:
         return False
+    if abs(float(parent_delta)) > config.primary_delta_tolerance:
+        return False
+    # Prefer the within-user pair measure when it is available: it is the only
+    # quantity GAUC and nDCG@5 actually respond to. A candidate can perturb
+    # every score (changed_row_fraction ~ 1.0) and still reorder nothing.
+    if change.within_user_rank_change is not None:
+        return change.within_user_rank_change <= config.within_user_rank_change_min
+    # Without user grouping, fall back to global rank correlation. The score
+    # equality test alone cannot see a uniformly tiny perturbation, so it is an
+    # additional way to qualify rather than a required condition.
     return (
         change.spearman_vs_parent >= config.spearman_threshold
-        and change.changed_row_fraction <= config.changed_row_fraction_max
-        and abs(float(parent_delta)) <= config.primary_delta_tolerance
+        or change.changed_row_fraction <= config.changed_row_fraction_max
     )
 
 

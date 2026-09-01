@@ -61,22 +61,33 @@ def convergence_pressure(events: Sequence[Event], config: RunConfig) -> int:
             evaluations[event.event_id] = result
         elif event.event_type == EventType.EXPERIMENT_DECIDED:
             decision = event.payload.decision
+            if decision.decision == ExperimentDecisionKind.PROMOTE:
+                continue
+            # The competition rule counts every iteration whose validation
+            # primary failed to improve by epsilon. A pruned or rejected
+            # experiment is such an iteration; only an implementation crash
+            # (INVALID) is excluded so failures cannot fake convergence.
+            if decision.decision == ExperimentDecisionKind.INVALID:
+                continue
+            improved = False
             if (
-                decision.decision == ExperimentDecisionKind.PROMOTE
-                or decision.fidelity_completed != Fidelity.FULL
-                or decision.evaluation_event_id is None
+                decision.fidelity_completed == Fidelity.FULL
+                and decision.evaluation_event_id is not None
             ):
-                continue
-            result = evaluations.get(decision.evaluation_event_id)
-            if result is None or not (
-                result.fidelity == Fidelity.FULL
-                and result.population == Population.PUBLIC_VALIDATION
-                and result.trust.verdict == TrustVerdict.ACCEPTED
-            ):
-                continue
-            score = result.metric_set.primary_score
-            if incumbent is None or score > incumbent + config.convergence_epsilon:
-                incumbent = score
+                result = evaluations.get(decision.evaluation_event_id)
+                if result is not None and (
+                    result.fidelity == Fidelity.FULL
+                    and result.population == Population.PUBLIC_VALIDATION
+                    and result.trust.verdict == TrustVerdict.ACCEPTED
+                ):
+                    score = result.metric_set.primary_score
+                    if (
+                        incumbent is None
+                        or score > incumbent + config.convergence_epsilon
+                    ):
+                        incumbent = score
+                        improved = True
+            if improved:
                 non_improving = 0
             else:
                 non_improving += 1

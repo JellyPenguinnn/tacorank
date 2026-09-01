@@ -6,7 +6,7 @@ from tacorank.research.portfolio import load_method_cards
 def test_schema_v1_method_cards_load_with_markdown_sections():
     portfolio = load_method_cards(Path(__file__).parents[2] / "research" / "methods")
 
-    assert len(portfolio.cards) == 15
+    assert len(portfolio.cards) == 27
     card = next(card for card in portfolio.cards if card.method_id == "objective_pairwise_bpr")
     assert card.schema_version == "1.0"
     assert card.family == "objective"
@@ -15,6 +15,10 @@ def test_schema_v1_method_cards_load_with_markdown_sections():
     assert card.prerequisites == (
         "baseline_parity",
         "within_user_positive_negative_pairs",
+        # A loss re-fit over the parent's own features cannot add information
+        # as an opening move; it is gated until a full result exists or the
+        # profile shows no within-list feature axis to try first.
+        "objective_refit_justified",
     )
     assert set(card.allowed_data) == {
         "train_interactions",

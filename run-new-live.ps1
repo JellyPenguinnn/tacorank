@@ -5,7 +5,10 @@ param(
     [switch]$SkipInstall,
     [string]$RunId,
     [string]$Python312,
-    [string]$Docker
+    [string]$Docker,
+    # Override the generated run-config max_experiments (e.g. 5 for a bounded
+    # probe run). 0 keeps the setup-live default.
+    [int]$MaxExperiments = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -158,6 +161,16 @@ try {
     Invoke-Checked "git" @("-C", $starterKit, "clean", "-q", "-fdX", "--", "__pycache__", "*.pyc", "*.pyo")
     $strictAfterSetup = (& git -C $starterKit status --porcelain=v1 --untracked-files=all --ignored=matching | Out-String).Trim()
     if (-not [string]::IsNullOrWhiteSpace($strictAfterSetup)) { Fail "setup generated unexpected submodule files" }
+
+    if ($MaxExperiments -gt 0) {
+        # Edit via Python to keep exact JSON encoding (no BOM, no re-escaping).
+        Invoke-Checked $controlPython @(
+            "-c",
+            "import json,sys; p=sys.argv[1]; c=json.load(open(p,encoding='utf-8')); c['max_experiments']=int(sys.argv[2]); json.dump(c,open(p,'w',encoding='utf-8'),indent=2)",
+            $config, "$MaxExperiments"
+        )
+        Write-Output "Capped max_experiments at $MaxExperiments"
+    }
 
     Invoke-Checked $taco @("preflight", "--config", $config, "--live-config", $liveConfig)
     if (Test-Path (Join-Path $runDir "events.jsonl")) { Fail "preflight unexpectedly created a ledger" }

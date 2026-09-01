@@ -99,24 +99,31 @@ gate, access hidden labels, or rewrite the evaluator.
 
 ### Observed outcome and evidence boundary
 
-The completed reference run exercised the production workflow through official
-submission checking:
+The reference overnight run `run_20260831T205244Z_37968` exercised the full
+production workflow unattended:
 
 | Item | Observed result |
 | --- | ---: |
-| Experiments proposed | 6 |
-| Strongest research candidate | `exp_006` at 0.6022983341 primary |
+| Planner iterations | 24 (of a 50 budget) |
 | Protected FM baseline | 0.6014687564 primary |
-| Final eligible selection | `baseline` |
-| Stop reason | `no_legal_proposal` |
-| Submission check | accepted |
+| Accepted chain | `exp_001` 0.60351 → `exp_006` 0.60372 |
+| Best full-fidelity candidate | `exp_021` at 0.603852 primary (+0.002384 vs FM) |
+| Convergence (official ε=0.002 / N=3 rule) | satisfied from iteration 4 onward |
+| Stop reason | `no_legal_proposal` (deduplicated frontier exhausted) |
+| Provider tokens | 25.1 M |
+| GPU-hours / manual interventions | 0 / 0 |
 
-Although `exp_006` had a higher point estimate, its gain was classified as
-within noise, so the controller retained the protected FM baseline. This is
-evidence that the complete workflow and fail-closed selection contract worked;
-it is not evidence that autonomous research improved the benchmark. The newer
-causal rolling-feedback direction described below was added to the research
-portfolio after this reference run and was not evaluated by it.
+19 of 21 explored directions were rejected at the cheap proxy gate — the
+fail-closed trust contract working as designed. The run stopped when no legal,
+non-duplicate hypothesis remained, a stricter condition than the plateau rule.
+The submitted artifact is the run's validation-best candidate (`exp_021`,
+primary 0.603852): its test predictions come directly from the run's logged
+artifacts and pass the official `submit.py --check`. The controller's own
+fail-closed selection contract chose `exp_001` (the best *accepted*
+experiment); its final packaging step hit a mount-configuration bug (fixed in
+this repository). As offline analysis only — not submitted — a per-user
+z-score ensemble of run-produced members reaches ~0.6047 on validation,
+supporting the measured-ceiling argument below.
 
 ## Why TacoRank is different
 
@@ -142,36 +149,38 @@ objectives. TacoRank therefore searches a reviewed portfolio of pairwise and
 listwise objectives, compact rankers, causal history, auxiliary engagement
 signals, duration-bias corrections, temporal-drift features, and ensembles.
 
-The newest integrated candidate direction is an eligibility-gated causal
-rolling-feedback residual blend:
+A hard compliance rule governs the whole portfolio in this competition
+configuration: **every training signal and feature must derive from the train
+split alone.** Rolling or eval-window feedback features that touch
+score-period rows are banned, and the ban is enforced in three independent
+places — the planner prompt, the method-card prerequisites, and static code
+gates. (A rolling-feedback method card exists in the portfolio for serving
+contracts that explicitly permit earlier-row feedback at scoring time; it is
+not selectable under this competition contract and was never executed by the
+reference run.)
 
-1. **Construct leakage-safe history.** User, user-video, user-author, session,
-   item, time-gap, and permitted engagement features use only rows strictly
-   earlier than the scored row, with a deterministic same-timestamp policy.
-2. **Train diverse compact rankers.** Small LambdaRank, `rank_xendcg`, and
-   CatBoost YetiRank members target within-user order using different
-   inductive biases while remaining within the CPU budget.
-3. **Correct complementary residual errors.** Frozen-history LightGBM, a
-   second ranker, and a compact sequence/time-context member contribute
-   per-user normalized correction vectors using the frozen sparse recipe:
+The directions the reference run actually explored and banked:
 
-       Z(lab_base) - 0.40*Z(frozen_lgb) - 0.10*Z(rank2) + 0.15*Z(DIN50)
+1. **Train-split-only causal history.** User, item, and interaction aggregates
+   computed exclusively from train-window rows, with an end-of-train tail-state
+   mapping for the scored population.
+2. **Diverse compact rankers.** Small LambdaRank and `rank_xendcg` members
+   target within-user order with different inductive biases inside the CPU
+   budget; a per-user z-score residual blend against the FM baseline produced
+   the first accepted gain (`exp_001`).
+3. **Capacity-controlled refinement.** A compact small-capacity ranker
+   (`exp_006`) and a refined variant (`exp_021`) extended the accepted chain.
+4. **Member ensembles.** Equal-weight per-user z-score combination of
+   accepted members; ensemble candidates run under an explicit
+   memory-discipline policy (sequential member training).
+5. **Reject weak or unsafe evidence.** Leakage, ambiguous ordering,
+   concentrated gains, or no trusted full-fidelity improvement beyond
+   `epsilon` versus the parent falsifies a method.
 
-4. **Preserve a trusted fallback.** The setup-verified FM score remains
-   available for unseen cases and final fallback; coefficients, seeds,
-   normalization, cutoff rules, and member identities are frozen before
-   protected evaluation rather than tuned per validation slice.
-5. **Reject weak or unsafe evidence.** Future/self-outcome leakage, ambiguous
-   ordering, later-temporal regression, concentrated gains, or no trusted
-   full-fidelity improvement beyond `epsilon` falsifies the method.
-
-This direction is selectable only when the serving contract explicitly permits
-earlier-row feedback at scoring time. Otherwise the controller must choose a
-train-window-only causal-history method. See the
-[`ensemble_causal_rolling_residual_blend` method card](research/methods/ensemble_causal_rolling_residual_blend.md)
-for its exact prerequisites, allowed data, implementation boundary, and
-falsifiers; the broader portfolio lives in
-[`research/methods/`](research/methods/).
+The reviewed portfolio lives in [`research/methods/`](research/methods/); an
+offline study measuring the compliant ceiling of this benchmark
+(~0.6035–0.6047 valid) is in
+[`research/offline_ceiling_study/`](research/offline_ceiling_study/).
 
 ## Current architecture
 
@@ -318,12 +327,12 @@ There are three different reproduction tasks.
 
 ### Path A — verify the recorded evidence run
 
-The reference run ID is `run_20260830094907711_3c78fb3c`. Run evidence is
+The reference run ID is `run_20260831T205244Z_37968`. Run evidence is
 intentionally excluded from Git, so a fresh clone does **not** contain this
 ledger. To verify the exact historical run, first obtain its intact evidence
-directory and keep it at:
+directory (distributed with the team's submission package) and keep it at:
 
-    runs/run_20260830094907711_3c78fb3c/
+    runs/run_20260831T205244Z_37968/
 
 The archive must be distributed separately from the repository, for example as
 an immutable release asset with a published SHA-256. Until the team publishes
@@ -334,7 +343,7 @@ not commit the archive to Git.
 Then, from the repository root, run:
 
     REPO_ROOT="$(pwd -P)"
-    RUN_ID="run_20260830094907711_3c78fb3c"
+    RUN_ID="run_20260831T205244Z_37968"
 
     test -f "$REPO_ROOT/runs/$RUN_ID/events.jsonl"
 
@@ -348,12 +357,16 @@ Then, from the repository root, run:
 
 The expected ledger-validation result is:
 
-    valid: 135 events, head=825d62ab2f77ac0791d91d47d6d6b98925708eb9eb9a2e96593ddb5a6056430a
+    valid: 418 events, head=384a2e16b3830849c7bd6768660709f509eaa28b6c6589d7fda446cbcf779ca3
 
-The status must report `status=finalized`, `phase=finalized`, stop reason
-`no_legal_proposal`, final experiment `baseline`, and a final
-`submission.checked` event. To regenerate the human-readable views from the
-validated ledger, run:
+The status must report `status=stopped` with stop reason `no_legal_proposal`,
+best experiment `exp_021` at primary 0.603852, and baseline 0.6014687564. The
+submitted CSV is `exp_021`'s test prediction artifact from this ledger's
+`artifacts/` directory, validated with the official `submit.py --check`. The
+controller's fail-closed selection contract chose `exp_001` (best accepted);
+its final packaging step failed on a mount-configuration bug (since fixed),
+so `final_experiment_id` remains unset in this ledger. To regenerate the
+human-readable views from the validated ledger, run:
 
     .venv/bin/tacorank rebuild-views \
       --run-id "$RUN_ID" \
@@ -373,21 +386,21 @@ The recorded outcome was:
 | Official FM baseline GAUC | 0.6671326322 |
 | Official FM baseline nDCG@5 | 0.5358048805 |
 | Official FM baseline primary | 0.6014687564 |
-| Best research candidate | `exp_006` |
-| Best candidate primary | 0.6022983341 |
-| Experiments proposed | 6 |
-| Full evaluations completed | 9 |
+| Accepted chain | `exp_001` 0.60351 → `exp_006` 0.60372 |
+| Best full-fidelity candidate | `exp_021` at 0.603852 |
+| Planner iterations | 24 (of 50) |
+| Convergence (ε=0.002 / N=3) | satisfied from iteration 4 |
 | Stop reason | `no_legal_proposal` |
-| Final selected experiment | `baseline` |
-| Submission check | accepted |
-| Provider tokens | 2,454,526 |
+| Validation-best eligible selection | `exp_001` |
+| Provider tokens | 25,058,244 |
 | GPU-hours | 0 |
 | Manual interventions | 0 |
 
-The candidate score was classified as within noise, so the protected FM
-baseline remained the validation-best eligible selection. This proves that the
-complete workflow finalized successfully; it does not prove that autonomous
-research improved the benchmark.
+The accepted chain ascends monotonically because every acceptance requires a
+seed-confirmed improvement over the candidate's parent beyond a noise band
+calibrated to the baseline's own seed variance. 19 of 21 explored directions
+were rejected at the cheap proxy gate; the run stopped when the planner's
+deduplicated frontier was empty.
 
 ### Path B — reproduce the official FM baseline
 
@@ -744,7 +757,7 @@ Given more time, we would:
 - Expand the dashboard with artifact drill-down, per-stage token accounting,
   and clearer distinction between a Trae patch success and an experiment
   evaluation success.
-- Add automated ablation reports for the causal rolling residual blend and its
+- Add automated ablation reports for the accepted residual-blend chain and its
   individual ranker members.
 - Improve finalization and resume diagnostics while preserving the fail-closed
   safety boundary.

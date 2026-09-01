@@ -13,9 +13,9 @@ def test_policy_starts_score_guided_depth_first_from_baseline(planner_context):
     assert choice.action == "propose"
     assert choice.phase == "depth"
     assert choice.reason_code == "SCORE_GUIDED_DEPTH_FIRST"
-    assert choice.family == "objective"
+    assert choice.family == "model"
     assert choice.parent.experiment_id == "exp_0000"
-    assert choice.method_card_id == "objective_pairwise_bpr"
+    assert choice.method_card_id == "model_lgbm_lambdarank_blend"
 
 
 def test_parallel_direction_is_indexed_and_legal(planner_context):
@@ -205,9 +205,17 @@ def test_policy_returns_to_trusted_frontier_with_family_diversity(planner_contex
 
     choice = SearchPolicy().choose(context)
 
-    assert choice.phase == "depth"
+    # With multiple accepted frontier members the member-combining ensemble
+    # route legally competes with plain depth continuation.
+    assert choice.phase in ("depth", "ensemble")
     assert choice.parent.experiment_id == "exp_0001"
-    assert choice.family == "ensemble"
+    # Family diversity would reach for ensemble here, but the generic
+    # depth route cannot name component_experiment_ids, and an ensemble
+    # without components fails Person 1 validation with
+    # ENSEMBLE_COMPONENT_REQUIRED. Only the soft-portfolio route can
+    # propose one, so diversity falls through to the next allowed family.
+    assert choice.family == "objective"
+    assert choice.component_experiment_ids == ()
 
 
 def test_policy_deepens_best_branch_before_untried_baseline_family(planner_context):
@@ -303,13 +311,16 @@ def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
         parent_delta=None,
         method_card_ids=["objective_listwise_user_softmax"],
     )
-    loss_aligned_features = make_summary(
+    # The branch is only exhausted once every objective card has been spent on
+    # it. The family gained objective_lambdarank_ndcg, so leaving it unattempted
+    # would test continuation rather than backtracking.
+    lambdarank = make_summary(
         "exp_0004",
         parent_experiment_id="exp_0001",
         family="objective",
         parent_eligible=False,
         parent_delta=None,
-        method_card_ids=["objective_loss_aligned_features"],
+        method_card_ids=["objective_lambdarank_ndcg"],
     )
     contract = SimpleNamespace(**vars(planner_context.contract_summary))
     contract.allowed_families = ["objective"]
@@ -318,7 +329,7 @@ def test_policy_backtracks_only_after_best_branch_is_exhausted(planner_context):
         baseline=root,
         current_best=best,
         eligible_frontier=[root, best],
-        family_history=[best, pairwise, loss_aligned_features, listwise],
+        family_history=[best, pairwise, listwise, lambdarank],
         method_cards=planner_context.method_cards,
         playbook=planner_context.playbook,
     )
@@ -460,8 +471,8 @@ def test_playbook_continues_after_no_op_with_independent_choice(planner_context)
 
     assert choice.action == "propose"
     assert choice.reason_code == "NO_OP_INDEPENDENT_MECHANISM"
-    assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    assert choice.family == "model"
+    assert choice.method_card_id == "model_lgbm_lambdarank_blend"
 
 
 def test_playbook_stops_after_quarantine_only_when_no_independent_method_remains(
@@ -588,8 +599,8 @@ def test_playbook_branches_after_terminal_proxy_prune(planner_context):
     assert choice.action == "propose"
     assert choice.reason_code == "EARLY_FIDELITY_REJECTED"
     assert choice.parent.experiment_id == "exp_0000"
-    assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    assert choice.family == "model"
+    assert choice.method_card_id == "model_lgbm_lambdarank_blend"
 
 
 def test_soft_pairwise_tradeoff_gets_one_bounded_listwise_child(planner_context):
@@ -726,7 +737,7 @@ def test_severe_proxy_regression_is_not_refined_or_ensembled(planner_context):
 
     assert choice.phase == "playbook"
     assert choice.reason_code == "EARLY_FIDELITY_REJECTED"
-    assert choice.family == "temporal_history"
+    assert choice.family == "model"
     assert choice.component_experiment_ids == ()
 
 
@@ -823,7 +834,11 @@ def test_playbook_refines_meaningful_pairwise_no_gain_in_family(planner_context)
 
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.family == "objective"
-    assert choice.method_card_id == "objective_loss_aligned_features"
+    # A generic no-gain refinement follows method_order, which now offers the
+    # metric-aligned objective before listwise. The specific
+    # pairwise_gauc_up_ndcg_down rule still routes to listwise directly,
+    # because it names the card rather than taking the ordered next one.
+    assert choice.method_card_id == "objective_lambdarank_ndcg"
 
 
 def test_directionally_positive_parent_prevents_premature_search_stop(
@@ -880,7 +895,11 @@ def test_near_best_exploratory_parent_continues_depth_first(planner_context):
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.parent.experiment_id == "exp_0003"
     assert choice.family == "duration_bias"
-    assert choice.method_card_id == "duration_bias_censored_watch_time"
+    # The parent already spent duration_bias_censored_watch_time, so the
+    # same-family refinement picks the family's other card. Before the family
+    # had a second card this route had nothing to offer and the search had to
+    # leave the direction after a single attempt.
+    assert choice.method_card_id == "duration_bias_quantile_deconfounded"
 
 
 def test_meaningful_no_gain_backtracks_to_highest_scoring_experimental_path(
@@ -930,7 +949,10 @@ def test_meaningful_no_gain_backtracks_to_highest_scoring_experimental_path(
     assert choice.reason_code == "SCORE_GUIDED_SAME_FAMILY_REFINEMENT"
     assert choice.parent.experiment_id == "exp_002"
     assert choice.family == "temporal_history"
-    assert choice.method_card_id == "temporal_history_compact"
+    # exp_002 already spent temporal_history_compact, so refining its own
+    # family now takes the family's other card instead of leaving the branch
+    # after a single attempt.
+    assert choice.method_card_id == "temporal_history_target_attention"
 
 
 def test_meaningful_no_gain_switches_family_after_best_path_refinement(
@@ -962,6 +984,22 @@ def test_meaningful_no_gain_switches_family_after_best_path_refinement(
         method_card_ids=["temporal_history_compact"],
         status="rejected",
     )
+    # The family only switches once every temporal_history card has been spent
+    # on exp_002. Leaving the second one unattempted would test same-family
+    # refinement instead.
+    attention = make_summary(
+        "exp_005",
+        parent_experiment_id="exp_002",
+        family="temporal_history",
+        score=0.60129,
+        parent_eligible=False,
+        decision="reject",
+        trust_verdict="negative",
+        parent_delta=-0.0000985105993917,
+        prediction_change=0.02,
+        method_card_ids=["temporal_history_target_attention"],
+        status="rejected",
+    )
     latest = make_summary(
         "exp_004",
         parent_experiment_id="exp_002",
@@ -978,7 +1016,7 @@ def test_meaningful_no_gain_switches_family_after_best_path_refinement(
         baseline=root,
         current_best=root,
         eligible_frontier=[root, strongest, latest],
-        family_history=[strongest, refinement, latest],
+        family_history=[strongest, refinement, attention, latest],
         method_cards=planner_context.method_cards,
         playbook=planner_context.playbook,
     )
@@ -1021,7 +1059,7 @@ def test_playbook_abandons_trusted_regression(planner_context):
     choice = SearchPolicy().choose(context_with_latest(planner_context, latest))
 
     assert choice.reason_code == "TRUSTED_FULL_REGRESSION"
-    assert choice.family == "temporal_history"
+    assert choice.family == "model"
 
 
 def test_optional_ranker_cannot_inject_an_illegal_choice(planner_context):
@@ -1039,8 +1077,8 @@ def test_optional_ranker_cannot_inject_an_illegal_choice(planner_context):
 
     choice = policy.choose(planner_context)
 
-    assert choice.family == "objective"
-    assert choice.method_card_id == "objective_pairwise_bpr"
+    assert choice.family == "model"
+    assert choice.method_card_id == "model_lgbm_lambdarank_blend"
 
 
 def test_policy_fails_closed_when_contract_has_no_allowed_families(planner_context):

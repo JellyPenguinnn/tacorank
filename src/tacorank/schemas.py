@@ -960,8 +960,9 @@ class TrustAssessment(StrictModel):
         supplied = (self.seed_mean is not None, self.seed_stderr is not None)
         if supplied[0] != supplied[1]:
             raise ValueError("seed mean and standard error must be supplied together")
-        if any(supplied) and self.seed_count < 3:
-            raise ValueError("seed aggregates require at least three seed results")
+        # Floor matches TrustConfig.required_seed_count: two confirmed seeds.
+        if any(supplied) and self.seed_count < 2:
+            raise ValueError("seed aggregates require at least two seed results")
         return self
 
 
@@ -1155,8 +1156,10 @@ class EvaluationResult(StrictModel):
                     "seed evidence events"
                 )
             if self.trust.stability in (Stability.CONFIRMED, Stability.UNSTABLE):
+                # Keep this floor equal to evaluation.trust.TrustConfig
+                # .required_seed_count: the policy confirms on two seeds.
                 if (
-                    self.trust.seed_count < 3
+                    self.trust.seed_count < 2
                     or self.trust.seed_mean is None
                     or self.trust.seed_stderr is None
                 ):
@@ -1284,6 +1287,31 @@ class PlannerDataProfile(StrictModel):
     score_entity_overlap: Dict[NonEmptyStr, PlannerEdaOverlapSummary]
     train_long_view_by_tab: List[PlannerEdaRateSlice]
     train_long_view_by_date: List[PlannerEdaRateSlice]
+    # Within-user structure. GAUC and nDCG@5 are computed inside each user's
+    # impression list, so a feature that does not vary within a list cannot
+    # move either metric. The marginal statistics above cannot express that,
+    # which leaves the planner reasoning about population-level effects when
+    # the metric only responds to within-list ones. These fields are optional
+    # so profiles recorded before this section remain loadable.
+    score_user_list_size: Optional[PlannerEdaNumericSummary] = None
+    score_single_row_user_fraction: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    score_repeat_exposure_fraction: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    score_within_user_duration_dispersion: Optional[float] = Field(
+        default=None, ge=0.0
+    )
+    train_discriminative_user_fraction: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    train_all_negative_user_fraction: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    train_all_positive_user_fraction: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0
+    )
 
     @field_validator("profile_sha256", "train_file_sha256", "score_file_sha256")
     @classmethod
@@ -1307,8 +1335,13 @@ class PlannerDataProfile(StrictModel):
             raise ValueError("planner EDA training date range is invalid")
         if self.score_date_min > self.score_date_max:
             raise ValueError("planner EDA score date range is invalid")
+        # Absent sections are excluded rather than hashed as nulls, so a
+        # profile recorded before a section existed still hashes to the value
+        # stored in its ledger and historical schema-v1 runs keep replaying.
         canonical = json.dumps(
-            self.model_dump(mode="json", exclude={"profile_sha256"}),
+            self.model_dump(
+                mode="json", exclude={"profile_sha256"}, exclude_none=True
+            ),
             ensure_ascii=False,
             allow_nan=False,
             sort_keys=True,
@@ -1648,7 +1681,10 @@ class RecoveryPolicyContext(StrictModel):
     attempt_history: List[Dict[str, Any]] = Field(default_factory=list)
     repair_attempts_used: int = Field(ge=0)
     max_repair_attempts: int = Field(ge=0, le=2)
-    same_commit_retries_used: int = Field(ge=0, le=1)
+    # Keep the upper bound equal to recovery.policy.MAX_SAME_COMMIT_RETRIES:
+    # the router builds this context AFTER a failure, so the counter can show
+    # every granted retry as already used.
+    same_commit_retries_used: int = Field(ge=0, le=2)
     remaining_repair_budget: int = Field(ge=0)
     previous_error_fingerprints: List[NonEmptyStr] = Field(default_factory=list)
     remaining_run_budget: Dict[str, int] = Field(default_factory=dict)

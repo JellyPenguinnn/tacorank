@@ -11,6 +11,11 @@ from .self_debug import build_self_debug_instructions
 
 MAX_REPAIR_ATTEMPTS = 2
 
+# Same-commit retries for transient infrastructure failures. Two retries
+# ride out short host-level flakiness (Docker Desktop probe stalls) that a
+# single immediate retry tends to re-enter while the host is still loaded.
+MAX_SAME_COMMIT_RETRIES = 2
+
 
 class RecoveryManager:
     """Choose one auditable recovery action without executing it."""
@@ -213,6 +218,27 @@ class RecoveryManager:
                 {},
             )
 
+        # Transient infrastructure failures are routed before the repeated-
+        # fingerprint guard: host-level flakiness (a stalled Docker probe, a
+        # slow output copy) normalizes to one generic fingerprint even when
+        # the underlying causes differ, so a repeat is not evidence that the
+        # sealed commit itself is bad.
+        transient = failure.failure_class in {"infrastructure_error", "hang"}
+        if transient:
+            if int(context.same_commit_retries_used) < MAX_SAME_COMMIT_RETRIES:
+                return (
+                    "retry_same_commit",
+                    "TRANSIENT_SAME_COMMIT_RETRY",
+                    "Retry the exact sealed commit once with identical settings.",
+                    {},
+                )
+            return (
+                "abandon",
+                "SAME_COMMIT_RETRY_EXHAUSTED",
+                "Abandon: the bounded same-commit retries are exhausted.",
+                {},
+            )
+
         if same_count >= 2:
             return (
                 "abandon",
@@ -245,10 +271,8 @@ class RecoveryManager:
                 {},
             )
 
-        transient = failure.failure_class in {"infrastructure_error", "hang"}
-        timeout_retry = failure.failure_class == "timeout" and failure.made_progress
-        if transient or timeout_retry:
-            if int(context.same_commit_retries_used) < 1:
+        if failure.failure_class == "timeout" and failure.made_progress:
+            if int(context.same_commit_retries_used) < MAX_SAME_COMMIT_RETRIES:
                 return (
                     "retry_same_commit",
                     "TRANSIENT_SAME_COMMIT_RETRY",
@@ -258,7 +282,7 @@ class RecoveryManager:
             return (
                 "abandon",
                 "SAME_COMMIT_RETRY_EXHAUSTED",
-                "Abandon: the exact same-commit retry has already been used.",
+                "Abandon: the bounded same-commit retries are exhausted.",
                 {},
             )
         if failure.failure_class == "timeout":

@@ -37,9 +37,15 @@ DEFAULT_METHOD_ORDER = {
     "multitask": ("multitask_single_auxiliary",),
     "duration_bias": ("duration_bias_censored_watch_time",),
     "features": ("temporal_drift_past_only",),
-    "model": ("model_compact_ranker",),
+    "model": (
+        "model_lgbm_lambdarank_blend",
+        "model_lgbm_causal_history",
+        "model_lgbm_xendcg",
+        "model_compact_ranker",
+    ),
     "ensemble": (
-        "ensemble_parallel_round_synthesis",
+        "ensemble_zblend_diverse",
+        "ensemble_seed_mean",
         "ensemble_diverse_residual_candidate",
         "ensemble_confirmed_members",
     ),
@@ -195,9 +201,15 @@ def _method_for_family(
         for card in eligible_method_cards(context, family)
     }
     if preferred is None:
-        # This card requires an explicit secondary component chosen by the
-        # soft-portfolio route. Generic depth-first proposals have no such
-        # component contract and must not select it.
+        # Every ensemble card combines named prior experiments, and only the
+        # soft-portfolio route knows which. The generic depth-first and
+        # independent-family routes emit component_experiment_ids=(), so an
+        # ensemble chosen here fails Person 1 validation with
+        # ENSEMBLE_COMPONENT_REQUIRED and ends the run on an invalid-provider-
+        # plan checkpoint. Leave the family to the route that can name its
+        # components.
+        if family == "ensemble":
+            return None
         eligible.pop("ensemble_diverse_residual_candidate", None)
     attempted = (
         set()
@@ -213,19 +225,38 @@ def _method_for_family(
     return eligible[remaining[0]] if remaining else None
 
 
+# A method attempt only blocks re-selection when it produced scientific
+# information. An experiment that died on an implementation failure (invalid,
+# abandoned, no-op) never tested its mechanism, so the method stays available
+# for re-exploration instead of the run stopping on method exhaustion. The
+# ledger's duplicate guard caps how many times one method/parent pair may be
+# re-tried.
+_INFORMATIVE_DECISIONS = {"accept", "prune", "reject"}
+
+
 def _attempted_methods_for_parent(
     context: Any, parent_experiment_id: str | None
 ) -> set[str]:
-    return {
-        method_id
-        for summary in as_list(get_value(context, "family_history", None))
-        if parent_experiment_id is not None
-        and str(get_value(summary, "parent_experiment_id", ""))
-        == parent_experiment_id
-        for method_id in map(
-            str, as_list(get_value(summary, "method_card_ids", None))
+    attempted: set[str] = set()
+    for summary in as_list(get_value(context, "family_history", None)):
+        if parent_experiment_id is None:
+            continue
+        if (
+            str(get_value(summary, "parent_experiment_id", ""))
+            != parent_experiment_id
+        ):
+            continue
+        decision = _normalized(get_value(summary, "decision", None))
+        verdict = _normalized(get_value(summary, "trust_verdict", None))
+        if decision not in _INFORMATIVE_DECISIONS and verdict not in (
+            "negative",
+            "redundant",
+        ):
+            continue
+        attempted.update(
+            map(str, as_list(get_value(summary, "method_card_ids", None)))
         )
-    }
+    return attempted
 
 
 def _ordered_eligible_method_cards(context: Any, family: str) -> tuple[Any, ...]:
@@ -697,6 +728,51 @@ def _soft_prune_choice(
     return None
 
 
+def _member_ensemble_choice(
+    context: Any,
+    eligible: Sequence[ExperimentNodeView],
+    parent: ExperimentNodeView,
+) -> PolicyChoice | None:
+    """Propose a member-combining ensemble from accepted frontier nodes.
+
+    The soft-result route only reaches the residual ensemble card. Cards
+    that combine ACCEPTED members (per-user z-blend) need a route that can
+    name those members: combine the depth-first parent with the other
+    accepted non-baseline frontier nodes.
+    """
+
+    members = tuple(
+        node.experiment_id
+        for node in eligible
+        if node.experiment_id
+        not in (parent.experiment_id, "baseline", None)
+    )
+    if not members:
+        return None
+    card = _method_for_family(
+        context,
+        "ensemble",
+        preferred="ensemble_zblend_diverse",
+        parent_experiment_id=parent.experiment_id,
+    )
+    if card is None:
+        return None
+    components = members[:2]
+    return _proposal(
+        parent=parent,
+        family="ensemble",
+        card=card,
+        phase="ensemble",
+        reason_code="CONFIRMED_MEMBER_ZBLEND",
+        reason=(
+            "Combine trusted parent %s with confirmed diverse members %s by "
+            "per-user z-scored equal-weight blending."
+            % (parent.experiment_id, ", ".join(components))
+        ),
+        component_experiment_ids=components,
+    )
+
+
 def _playbook_choice(
     context: Any,
     eligible: list[ExperimentNodeView],
@@ -1078,6 +1154,13 @@ class SearchPolicy:
         for parent in frontier:
             depth: list[PolicyChoice] = []
             for family in allowed:
+                if family == "ensemble":
+                    choice = _member_ensemble_choice(
+                        context, eligible, parent
+                    )
+                    if choice is not None:
+                        depth.append(choice)
+                    continue
                 card = _method_for_family(
                     context,
                     family,
@@ -1099,8 +1182,18 @@ class SearchPolicy:
                         ),
                     )
                 )
+            # Continue the branch's own family first. Sorting recently used
+            # families to the back spread the search across seven families in
+            # fourteen experiments and left every direction shallow, which is
+            # the opposite of the depth-first traversal the playbook
+            # specifies. A family is exhausted for a parent once its cards are
+            # spent, so preferring it here ends the direction on evidence
+            # rather than on a diversity heuristic. Recency still breaks ties
+            # between the remaining families so the search cannot stall on one
+            # exhausted alternative.
             depth.sort(
                 key=lambda choice: (
+                    choice.family != parent.family,
                     choice.family in recent,
                     allowed.index(choice.family),
                 )

@@ -625,7 +625,10 @@ def _extract_bounded_tar(
             close_fds=True,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        raise ProcessLaunchError("container output extraction failed") from error
+        raise ProcessLaunchError(
+            "container output extraction failed: "
+            f"{type(error).__name__}: {error}"
+        ) from error
 
     def consume() -> None:
         total_bytes = 0
@@ -749,7 +752,10 @@ def _extract_bounded_tar(
             raise DiskSpaceExhausted(
                 "container output extraction ran out of disk space"
             ) from first
-        raise ProcessLaunchError("container output extraction failed") from first
+        raise ProcessLaunchError(
+            "container output extraction failed: "
+            f"{type(first).__name__}: {first}"
+        ) from first
 
 
 def _normalize_output_relative_path(value: str) -> str:

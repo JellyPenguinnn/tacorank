@@ -290,7 +290,9 @@ class RuntimeOutputExtractionSpec:
     destination: Path
     allowed_relative_paths: Tuple[str, ...]
     max_bytes: int
-    timeout_seconds: float = 30.0
+    # Docker Desktop streams ``docker exec`` output through a named pipe
+    # that slows sharply while the candidate saturates the CPU quota.
+    timeout_seconds: float = 120.0
 
 
 @dataclass(frozen=True)
@@ -300,7 +302,9 @@ class RuntimeMetricsSpec:
     argv: Tuple[str, ...]
     cwd: Path
     environment: Mapping[str, str]
-    timeout_seconds: float = 2.0
+    # ``docker stats --no-stream`` regularly needs several seconds on the
+    # Docker Desktop named-pipe backend while the host is under load.
+    timeout_seconds: float = 10.0
 
 
 @dataclass(frozen=True)

@@ -42,16 +42,37 @@ RAW_REQUIRED = (
     "log_standard_4_08_to_4_21_pure.csv",
     "log_standard_4_22_to_5_08_pure.csv",
     "video_features_basic_pure.csv",
+    "video_features_statistic_pure.csv",
+    "user_features_pure.csv",
+)
+
+# Extra per-row log columns exposed to candidates beyond the starter-kit
+# seven. Train rows carry timing plus per-row outcome signals usable ONLY
+# as strictly-past history; score rows carry timing only, because outcome
+# columns do not exist at serve time.
+TRAIN_EXTRA_COLUMNS = ("time_ms", "hourmin", "is_click", "play_time_ms")
+SCORE_EXTRA_COLUMNS = ("time_ms", "hourmin")
+
+# Dataset side files hard-linked into every candidate view. These are
+# organizer-published KuaiRand-Pure files, not external data.
+SIDE_FEATURE_FILES = (
+    "video_features_basic_pure.csv",
+    "video_features_statistic_pure.csv",
+    "user_features_pure.csv",
 )
 TRAE_ONLY_DATA_BOUNDARY_SHA256 = hashlib.sha256(
     b"tacorank-trae-only-no-dataset-v1"
 ).hexdigest()
 RUNTIME_REQUIRED_IMPORTS = (
     "benchmarks.kuairand_pure.pipeline",
+    "catboost",
     "certifi",
+    "lightgbm",
     "numpy",
     "pandas",
     "pydantic",
+    "scipy",
+    "sklearn",
     "tacorank",
     "yaml",
 )
@@ -106,8 +127,70 @@ def setup_trae_deployment(
             "candidate_proxy",
             "candidate_full",
         ],
-
-        "target_interface_excerpts": dict(PRODUCTION_TARGET_INTERFACE_EXCERPTS),
+        "target_interface_excerpts": {
+            "candidate": (
+                "def run(invocation: PipelineInvocation) -> None; read only "
+                "invocation.input_root and write exactly invocation.output_path as "
+                "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
+                "invocation.seed; return None. train.csv has the exact columns "
+                "date,user_id,video_id,author_id,tab,duration_ms,long_view,"
+                "time_ms,hourmin,is_click,play_time_ms, where date is an integer "
+                "YYYYMMDD value and time_ms is the epoch-millisecond impression "
+                "time; score.csv has row_id,date,user_id,video_id,author_id,tab,"
+                "duration_ms,time_ms,hourmin and never exposes long_view or any "
+                "other outcome column. is_click and play_time_ms are outcomes of "
+                "their own row: use them only as strictly-past history (rows with "
+                "time_ms before the row being scored), never as same-row features, "
+                "or the feature cannot exist at serve time. Every feature must "
+                "derive from the train split alone: for scored rows use the "
+                "user's end-of-train aggregate state, and never let any "
+                "score.csv row (even unlabeled) enter any aggregate, count, or "
+                "encoding. The input root also "
+                "contains the organizer-published side files "
+                "video_features_basic_pure.csv, video_features_statistic_pure.csv "
+                "and user_features_pure.csv for joins on video_id/user_id. fm_baseline_predictions.csv is the "
+                "setup-verified official FM score for every score.csv row. These are "
+                "unconstrained real-valued ranking scores, not probabilities. Never "
+                "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
+                "parent-plus-residual result. Preserve it as the strong parent and "
+                "add only a bounded train-only residual on the original score scale "
+                "unless the approved hypothesis explicitly replaces the parent. "
+                "The candidate runs in an offline container with no network: the "
+                "importable third-party packages are numpy, pandas, scipy, "
+                "scikit-learn, lightgbm, catboost, pydantic, and PyYAML, plus the standard "
+                "library. Importing anything else fails the isolated entrypoint "
+                "import check and rejects the patch. Prefer these implementations "
+                "over hand-rolled numeric code: a hand-written approximation "
+                "trained for a few epochs inside the wall-clock limit is usually "
+                "far weaker than the standard one, and the mechanism under test is "
+                "then never actually tested. Set an explicit seed and a fixed "
+                "thread count equal to the container CPU quota (8): the quota "
+                "is frozen per deployment, so full-quota threading stays "
+                "reproducible, while thread_count=1 wastes 7 of 8 cores. Never wrap the "
+                "approved mechanism in a broad try/except that falls back to "
+                "copying the parent scores: a mechanism that cannot run must "
+                "raise so the harness can repair it from the real traceback; a "
+                "silent fallback is recorded as a wasted no-op. "
+                "The smoke, proxy, and full views share identical training data; only the "
+                "scored population differs. Proxy is a terminal decision gate, not a "
+                "rehearsal: a proxy regression prunes the experiment and it never "
+                "reaches full evaluation. Train at full strength for every fidelity "
+                "and use fidelity only to bound scoring cost, never to shrink the "
+                "training sample, epochs, or capacity. "
+                "Bound the residual relative to the parent score's own spread rather "
+                "than an absolute constant: a cap far below one standard deviation "
+                "of the parent scores cannot reorder anything, and a candidate that "
+                "leaves within-user ordering essentially unchanged is rejected as a "
+                "no-op. Only within-user ordering is measured, so a change that is "
+                "constant inside a user's list cannot move the metrics. "
+                "Training dates strictly precede score dates. Preserve contiguous "
+                "score row_id order, duplicate rows, finite deterministic scores, "
+                "and exclusive output creation. The production loader imports "
+                "solution.candidate:run. Keep the implementation in candidate.py "
+                "unless every helper path and its import pattern are explicitly "
+                "authorized by the ExperimentSpec target_files."
+            )
+        },
         "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
@@ -233,7 +316,11 @@ def setup_live_deployment(
         "docker_host": docker_host,
         "docker_image": image,
         "docker_image_environment_sha256": image_environment_sha256,
-        "docker_cpu_count": 2.0,
+        # LightGBM training dominates iteration wall time; 2 CPUs on a
+        # multi-core host made every fidelity run a ~7 minute retrain.
+        # Determinism holds because the quota (and thus the thread count)
+        # is frozen per deployment and every run uses the same value.
+        "docker_cpu_count": 8.0,
         "docker_tmpfs_size_mb": 256,
         "output_quota_max_bytes": 2 * 1024 * 1024 * 1024,
         "data_manifest_path": str(manifest_path),
@@ -259,6 +346,107 @@ def setup_live_deployment(
             "tab",
             "duration_ms",
             "long_view",
+            # timing and strictly-past history signals on the log rows
+            "time_ms",
+            "hourmin",
+            "is_click",
+            "play_time_ms",
+            "row_id",
+            "score",
+            # video_features_basic_pure.csv
+            "video_type",
+            "upload_dt",
+            "upload_type",
+            "visible_status",
+            "video_duration",
+            "server_width",
+            "server_height",
+            "music_id",
+            "music_type",
+            "tag",
+            # video_features_statistic_pure.csv (organizer-published static
+            # aggregates over the dataset)
+            "counts",
+            "show_cnt",
+            "show_user_num",
+            "play_cnt",
+            "play_user_num",
+            "play_duration",
+            "complete_play_cnt",
+            "complete_play_user_num",
+            "valid_play_cnt",
+            "valid_play_user_num",
+            "long_time_play_cnt",
+            "long_time_play_user_num",
+            "short_time_play_cnt",
+            "short_time_play_user_num",
+            "play_progress",
+            "comment_stay_duration",
+            "like_cnt",
+            "like_user_num",
+            "click_like_cnt",
+            "double_click_cnt",
+            "cancel_like_cnt",
+            "cancel_like_user_num",
+            "comment_cnt",
+            "comment_user_num",
+            "direct_comment_cnt",
+            "reply_comment_cnt",
+            "delete_comment_cnt",
+            "delete_comment_user_num",
+            "comment_like_cnt",
+            "comment_like_user_num",
+            "follow_cnt",
+            "follow_user_num",
+            "cancel_follow_cnt",
+            "cancel_follow_user_num",
+            "share_cnt",
+            "share_user_num",
+            "download_cnt",
+            "download_user_num",
+            "report_cnt",
+            "report_user_num",
+            "reduce_similar_cnt",
+            "reduce_similar_user_num",
+            "collect_cnt",
+            "collect_user_num",
+            "cancel_collect_cnt",
+            "cancel_collect_user_num",
+            "direct_comment_user_num",
+            "reply_comment_user_num",
+            "share_all_cnt",
+            "share_all_user_num",
+            "outsite_share_all_cnt",
+            # user_features_pure.csv
+            "user_active_degree",
+            "is_lowactive_period",
+            "is_live_streamer",
+            "is_video_author",
+            "follow_user_num_range",
+            "fans_user_num",
+            "fans_user_num_range",
+            "friend_user_num",
+            "friend_user_num_range",
+            "register_days",
+            "register_days_range",
+            "onehot_feat0",
+            "onehot_feat1",
+            "onehot_feat2",
+            "onehot_feat3",
+            "onehot_feat4",
+            "onehot_feat5",
+            "onehot_feat6",
+            "onehot_feat7",
+            "onehot_feat8",
+            "onehot_feat9",
+            "onehot_feat10",
+            "onehot_feat11",
+            "onehot_feat12",
+            "onehot_feat13",
+            "onehot_feat14",
+            "onehot_feat15",
+            "onehot_feat16",
+            "onehot_feat17",
         ],
         "protected_columns": ["label"],
         "hidden_path_tokens": ["hidden_labels", "final_labels", "test_labels"],
@@ -288,12 +476,14 @@ def setup_live_deployment(
         "convergence_epsilon": 0.002,
         "convergence_patience": 3,
         "max_repairs_per_experiment": 2,
-        "allowed_runtime_adjustments": {},
-        "timeout_profiles": {"standard": 600, "extended": 900},
+        "allowed_runtime_adjustments": {
+            "memory_limit_mb": {"next_value": 14336},
+            "timeout_profile": {"next_value": "extended"},
+        },
+        "timeout_profiles": {"standard": 1800, "extended": 2700},
         "max_confirmation_attempts": 2,
         "seed_schedule": [11, 22, 33, 44, 55],
-        "context_token_limit": 6000,
-        "synthesis_context_token_limit": 16000,
+        "context_token_limit": 24000,
         "adapter_mode": "live",
         "live_adapter_config_sha256": _sha256_file(live_path),
         "editable_roots": ["solution"],
@@ -329,7 +519,83 @@ def setup_live_deployment(
         "active_research_prohibitions": [],
         "prediction_change_no_op_threshold": 0.001,
         "max_single_score_fraction": 0.5,
-        "target_interface_excerpts": dict(PRODUCTION_TARGET_INTERFACE_EXCERPTS),
+        "target_interface_excerpts": {
+            **{
+                key: value
+                for key, value in PRODUCTION_TARGET_INTERFACE_EXCERPTS.items()
+                if key != "solution/candidate.py"
+            },
+            "solution/candidate.py": (
+                "Required candidate entrypoint: def run(invocation: "
+                "PipelineInvocation) -> None; include this file in target_files; read only "
+                "invocation.input_root and write exactly invocation.output_path as "
+                "row_id,user_id,video_id,score CSV; use invocation.fidelity and "
+                "invocation.seed; return None. train.csv has the exact columns "
+                "date,user_id,video_id,author_id,tab,duration_ms,long_view,"
+                "time_ms,hourmin,is_click,play_time_ms, where date is an integer "
+                "YYYYMMDD value and time_ms is the epoch-millisecond impression "
+                "time; score.csv has row_id,date,user_id,video_id,author_id,tab,"
+                "duration_ms,time_ms,hourmin and never exposes long_view or any "
+                "other outcome column. is_click and play_time_ms are outcomes of "
+                "their own row: use them only as strictly-past history (rows with "
+                "time_ms before the row being scored), never as same-row features, "
+                "or the feature cannot exist at serve time. Every feature must "
+                "derive from the train split alone: for scored rows use the "
+                "user's end-of-train aggregate state, and never let any "
+                "score.csv row (even unlabeled) enter any aggregate, count, or "
+                "encoding. The input root also "
+                "contains the organizer-published side files "
+                "video_features_basic_pure.csv, video_features_statistic_pure.csv "
+                "and user_features_pure.csv for joins on video_id/user_id. fm_baseline_predictions.csv contains "
+                "the setup-verified official FM score aligned one-to-one with "
+                "score.csv; fm_baseline_predictions.sha256 authenticates it. The "
+                "baseline candidate reproduces these bytes exactly. FM scores are "
+                "unconstrained real-valued ranking scores, not probabilities. Never "
+                "sigmoid, clip to [0,1], normalize, or rescale the FM parent or a "
+                "parent-plus-residual result. Keep this FM score as the strong parent "
+                "and learn one bounded train-only residual on the original score scale "
+                "unless the approved ExperimentSpec explicitly tests replacement or a "
+                "selected method card is tagged replacement_capable; a replacement "
+                "candidate outputs its own score and uses the FM score as an input "
+                "feature or fallback. "
+                "The candidate runs in an offline container with no network: the "
+                "importable third-party packages are numpy, pandas, scipy, "
+                "scikit-learn, lightgbm, catboost, pydantic, and PyYAML, plus the standard "
+                "library. Importing anything else fails the isolated entrypoint "
+                "import check and rejects the patch. Prefer these implementations "
+                "over hand-rolled numeric code: a hand-written approximation "
+                "trained for a few epochs inside the wall-clock limit is usually "
+                "far weaker than the standard one, and the mechanism under test is "
+                "then never actually tested. Set an explicit seed and a fixed "
+                "thread count equal to the container CPU quota (8): the quota "
+                "is frozen per deployment, so full-quota threading stays "
+                "reproducible, while thread_count=1 wastes 7 of 8 cores. Never wrap the "
+                "approved mechanism in a broad try/except that falls back to "
+                "copying the parent scores: a mechanism that cannot run must "
+                "raise so the harness can repair it from the real traceback; a "
+                "silent fallback is recorded as a wasted no-op. "
+                "The smoke, proxy, and full views share identical training data; only the "
+                "scored population differs. Proxy is a terminal decision gate, not a "
+                "rehearsal: a proxy regression prunes the experiment and it never "
+                "reaches full evaluation. Train at full strength for every fidelity "
+                "and use fidelity only to bound scoring cost, never to shrink the "
+                "training sample, epochs, or capacity. "
+                "Bound the residual relative to the parent score's own spread rather "
+                "than an absolute constant: a cap far below one standard deviation "
+                "of the parent scores cannot reorder anything, and a candidate that "
+                "leaves within-user ordering essentially unchanged is rejected as a "
+                "no-op. Only within-user ordering is measured, so a change that is "
+                "constant inside a user's list cannot move the metrics. "
+                                "Do not reinterpret duration_ms as watch time: it is video duration. "
+                "Training dates strictly precede score dates. Preserve contiguous "
+                "score row_id order, duplicate rows, finite deterministic scores, "
+                "and exclusive output creation. Use all training rows or report a "
+                "deterministic representative sampling fraction in the code. The "
+                "production loader imports solution.candidate:run; keep the "
+                "implementation in candidate.py unless every helper path and import "
+                "pattern are explicitly authorized by target_files."
+            )
+        },
         "coding_step_limit": 64,
         "coding_token_limit": None,
         "coding_wall_time_limit_seconds": 1800,
@@ -534,8 +800,14 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
 
     common = views / "common"
     common.mkdir(mode=0o700)
+    extra_columns = _load_extra_log_columns(data)
+    for split_name, split_rows in (("train", train), ("valid", valid), ("test", test)):
+        if len(extra_columns[split_name]) != len(split_rows):
+            raise DeploymentError(
+                "raw log columns do not align with the official %s split" % split_name
+            )
     train_path = common / "train.csv"
-    _write_train(train_path, train)
+    _write_train(train_path, train, extra_columns["train"])
     command_directories = {
         "candidate_smoke": views / "candidate-smoke",
         "candidate_proxy": views / "candidate-proxy",
@@ -554,14 +826,25 @@ def _prepare_data(root: Path, deployment: Path, data: Path) -> Mapping[str, Any]
         "candidate_full": baseline_prediction_csvs["full"],
         "candidate_final_infer": baseline_final_prediction_csv,
     }
+    score_extras = {
+        "candidate_smoke": extra_columns["valid"],
+        "candidate_proxy": extra_columns["valid"],
+        "candidate_full": extra_columns["valid"],
+        "candidate_final_infer": extra_columns["test"],
+    }
     for command_id, directory in command_directories.items():
         directory.mkdir(mode=0o700)
         os.link(train_path, directory / "train.csv")
+        for side_name in SIDE_FEATURE_FILES:
+            _copy_exclusive(data / side_name, directory / side_name)
         rows, indices = index_sets[command_id]
+        extras_rows = score_extras[command_id]
         selected: Iterable[Sequence[Any]] = rows
+        selected_extras: Iterable[Sequence[Any]] = extras_rows
         if indices is not None:
             selected = (rows[index] for index in indices)
-        _write_score(directory / "score.csv", selected)
+            selected_extras = (extras_rows[index] for index in indices)
+        _write_score(directory / "score.csv", selected, selected_extras)
         fm_view = directory / "fm_baseline_predictions.csv"
         _copy_exclusive(fm_prediction_sources[command_id], fm_view)
         _write_text_exclusive(
@@ -704,24 +987,75 @@ def _load_official_splits(root: Path, data: Path) -> Mapping[str, Any]:
     return module.load(str(data))
 
 
-def _write_train(path: Path, rows: Sequence[Sequence[Any]]) -> None:
+def _load_extra_log_columns(data: Path) -> Mapping[str, list]:
+    """Extra per-row columns, positionally aligned with the official splits.
+
+    The starter-kit loader reads the two standard logs in a fixed file
+    order, filters by date, and preserves row order, so re-reading the raw
+    logs the same way yields rows aligned one-to-one with each split.
+    """
+
+    split_ranges = {
+        "train": (20220408, 20220421),
+        "valid": (20220422, 20220428),
+        "test": (20220429, 20220508),
+    }
+    out: Dict[str, list] = {name: [] for name in split_ranges}
+    for name in (
+        "log_standard_4_08_to_4_21_pure.csv",
+        "log_standard_4_22_to_5_08_pure.csv",
+    ):
+        with (data / name).open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                date = int(row["date"])
+                for split, (lo, hi) in split_ranges.items():
+                    if lo <= date <= hi:
+                        out[split].append(
+                            (
+                                row["time_ms"],
+                                row["hourmin"],
+                                row["is_click"],
+                                row["play_time_ms"],
+                            )
+                        )
+                        break
+    return out
+
+
+def _write_train(
+    path: Path,
+    rows: Sequence[Sequence[Any]],
+    extras: Sequence[Sequence[Any]],
+) -> None:
+    if len(rows) != len(extras):
+        raise DeploymentError("train extra columns do not align with the official split")
     with _exclusive_csv(path) as handle:
         writer = csv.writer(handle)
         writer.writerow(
-            ("date", "user_id", "video_id", "author_id", "tab", "duration_ms", "long_view")
+            (
+                "date", "user_id", "video_id", "author_id", "tab",
+                "duration_ms", "long_view", *TRAIN_EXTRA_COLUMNS,
+            )
         )
-        for row in rows:
-            writer.writerow(row)
+        for row, extra in zip(rows, extras):
+            writer.writerow((*row, *extra))
 
 
-def _write_score(path: Path, rows: Iterable[Sequence[Any]]) -> None:
+def _write_score(
+    path: Path,
+    rows: Iterable[Sequence[Any]],
+    extras: Iterable[Sequence[Any]],
+) -> None:
     with _exclusive_csv(path) as handle:
         writer = csv.writer(handle)
         writer.writerow(
-            ("row_id", "date", "user_id", "video_id", "author_id", "tab", "duration_ms")
+            (
+                "row_id", "date", "user_id", "video_id", "author_id", "tab",
+                "duration_ms", *SCORE_EXTRA_COLUMNS,
+            )
         )
-        for row_id, row in enumerate(rows):
-            writer.writerow((row_id, *row[:6]))
+        for row_id, (row, extra) in enumerate(zip(rows, extras)):
+            writer.writerow((row_id, *row[:6], extra[0], extra[1]))
 
 
 def _write_population(path: Path, rows: Iterable[Sequence[Any]]) -> None:
@@ -1652,6 +1986,15 @@ def _run(
     label: str,
     capture_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    # Force UTF-8 for child I/O. Python defaults its streams to the console
+    # codepage on Windows (cp1252), so a child that prints non-ASCII dies with
+    # UnicodeEncodeError through no fault of its own: the starter kit's
+    # submit.py prints a Chinese status line, which aborted official FM
+    # baseline generation and failed the whole deployment. Setting this here
+    # keeps the fix inside TacoRank rather than in the protected submodule.
+    environment = dict(os.environ)
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment["PYTHONUTF8"] = "1"
     try:
         completed = subprocess.run(
             list(args),
@@ -1660,6 +2003,9 @@ def _run(
             stdout=subprocess.PIPE if capture_output else None,
             stderr=subprocess.PIPE if capture_output else None,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
             shell=False,
             check=False,
         )

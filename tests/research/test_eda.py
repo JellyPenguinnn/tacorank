@@ -14,17 +14,18 @@ from tacorank.schemas import PlannerDataProfile
 def _write_views(root: Path) -> Path:
     root.mkdir()
     (root / "train.csv").write_text(
-        "date,user_id,video_id,author_id,tab,duration_ms,long_view\n"
-        "20220408,user_secret_a,video_a,author_a,home,100,1\n"
-        "20220408,user_secret_a,video_b,author_b,home,200,0\n"
-        "20220409,user_b,video_a,author_a,discover,300,1\n"
-        "20220409,user_c,video_c,author_c,discover,400,0\n",
+        "date,user_id,video_id,author_id,tab,duration_ms,long_view,"
+        "time_ms,hourmin,is_click,play_time_ms\n"
+        "20220408,user_secret_a,video_a,author_a,home,100,1,1000,900,1,80\n"
+        "20220408,user_secret_a,video_b,author_b,home,200,0,2000,905,0,10\n"
+        "20220409,user_b,video_a,author_a,discover,300,1,3000,1000,1,250\n"
+        "20220409,user_c,video_c,author_c,discover,400,0,4000,1010,0,0\n",
         encoding="utf-8",
     )
     (root / "score.csv").write_text(
-        "row_id,date,user_id,video_id,author_id,tab,duration_ms\n"
-        "0,20220410,user_secret_a,video_a,author_a,home,150\n"
-        "1,20220410,user_new,video_new,author_c,discover,450\n",
+        "row_id,date,user_id,video_id,author_id,tab,duration_ms,time_ms,hourmin\n"
+        "0,20220410,user_secret_a,video_a,author_a,home,150,5000,1100\n"
+        "1,20220410,user_new,video_new,author_c,discover,450,6000,1105\n",
         encoding="utf-8",
     )
     return root
@@ -70,8 +71,8 @@ def test_eda_toolbox_builds_deterministic_aggregate_profile(tmp_path: Path) -> N
 def test_eda_toolbox_rejects_a_labelled_score_view(tmp_path: Path) -> None:
     root = _write_views(tmp_path / "candidate-full")
     (root / "score.csv").write_text(
-        "row_id,date,user_id,video_id,author_id,tab,duration_ms,long_view\n"
-        "0,20220410,user_a,video_a,author_a,home,150,1\n",
+        "row_id,date,user_id,video_id,author_id,tab,duration_ms,time_ms,hourmin,long_view\n"
+        "0,20220410,user_a,video_a,author_a,home,150,5000,1100,1\n",
         encoding="utf-8",
     )
 

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 import shutil
 from typing import Dict, Mapping, Optional, Sequence
 
@@ -110,11 +111,28 @@ def render_evaluation_summary(
     )
 
 
+# Windows denies a rename over a file another handle has open, where POSIX
+# simply succeeds. Anything that reads a derived view concurrently -- a status
+# watcher, an editor, a virus scanner, the search indexer -- can therefore make
+# os.replace raise PermissionError. run_20260831T043328Z died that way on
+# state.json, mid-experiment, with an otherwise healthy proxy result. The
+# holder releases the file in milliseconds, so retry briefly before failing.
+_REPLACE_ATTEMPTS = 10
+_REPLACE_BACKOFF_SECONDS = 0.05
+
+
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(content, encoding="utf-8")
-    os.replace(temporary, path)
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_BACKOFF_SECONDS * (attempt + 1))
 
 
 def _atomic_write_json(path: Path, payload: object) -> None:

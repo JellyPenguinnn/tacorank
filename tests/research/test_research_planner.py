@@ -45,7 +45,7 @@ def make_spec(context, choice, literature_evidence=()):
                 "cost_tier": "medium",
             },
         )(),
-        "method_card_ids": [choice.method_card_id],
+        "method_card_ids": [choice.method_card_id or "objective_pairwise_bpr"],
         "evidence_event_ids": ["evt_000001"],
         "literature_evidence": list(literature_evidence),
     }.items():

@@ -24,6 +24,8 @@ No improvement after a bounded, mechanism-driven trial.
 
 ## Do not use when
 
+Corrected 2026-08-31: as implemented in this harness (a small-capacity compact-rank LightGBM variant, not a deep model) it measured 0.60279 full-fidelity standalone and is a key diversity member — an offline z-sum of causal-replacement + compact-rank + a reference causal ranker measured 0.60411. Keep small capacity; do not turn it into a deep model (lab: 255 leaves 0.5953 vs 7 leaves 0.6122).
+
 Baseline parity or the objective contract is unresolved.
 
 ## Minimal implementation

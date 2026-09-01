@@ -15,8 +15,22 @@ class MethodEligibility:
     reasons: tuple[str, ...]
 
 
+# Share of a feature's spread that must survive inside a single user's list
+# before it counts as a within-list axis worth exploiting ahead of a loss
+# re-fit. GAUC and nDCG@5 only compare items inside one user's list, so a
+# feature below this is close to a per-user constant and cannot move them.
+WITHIN_USER_FEATURE_AXIS_MIN = 0.2
+
+
 def _normalized(value: Any) -> str:
     return str(enum_value(value) or "").strip().lower()
+
+
+def _number(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _metric_delta(summary: Any, *names: str) -> float | None:
@@ -82,6 +96,36 @@ def available_capabilities(context: Any) -> frozenset[str]:
     if "random_exposure_log" in allowed_data:
         capabilities.add("random_exposure_log")
 
+    # A materially changing training rate by date is an auditable prerequisite
+    # for the past-only drift card.  Derive it from the hash-bound aggregate
+    # profile rather than requiring a manually asserted capability.  This lets
+    # the planner explore a useful temporal mechanism when the data support it,
+    # while keeping the decision label-free and deterministic.
+    profile = get_value(context, "data_profile", None)
+    date_slices = as_list(get_value(profile, "train_long_view_by_date", None))
+    rates = []
+    for item in date_slices:
+        rate = _number(get_value(item, "positive_rate", None))
+        if rate is not None:
+            rates.append(rate)
+    if len(rates) >= 2 and max(rates) - min(rates) >= 0.01:
+        capabilities.add("drift_diagnostics_material")
+
+    # Objective cards re-fit a loss over the parent's own feature set, so as an
+    # opening move they cannot add information the parent lacks. Grant the
+    # justification once either a full public result exists (the objective card
+    # is then a response to measured ordering error rather than an opening
+    # guess) or the profile shows no within-list feature axis worth trying
+    # first. Ranking metrics only see within-list contrasts, so a feature whose
+    # spread is mostly between users is not such an axis.
+    dispersion = _number(
+        get_value(profile, "score_within_user_duration_dispersion", None)
+    )
+    if dispersion is None or dispersion < WITHIN_USER_FEATURE_AXIS_MIN:
+        capabilities.add("objective_refit_justified")
+    else:
+        capabilities.add("within_user_feature_axis_material")
+
     pairwise_results = [
         summary
         for summary in history
@@ -108,6 +152,9 @@ def available_capabilities(context: Any) -> frozenset[str]:
     ]
     if public_results:
         capabilities.add("standard_public_evaluation_complete")
+        # A measured full result makes an objective re-fit a response to
+        # observed ordering error rather than an opening guess.
+        capabilities.add("objective_refit_justified")
     confirmed = [
         summary
         for summary in public_results

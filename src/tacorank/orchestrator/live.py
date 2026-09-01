@@ -988,24 +988,18 @@ class ProtectedEvaluationBridge:
 
     def _parent_experiment_id(self, experiment_id: str) -> Optional[str]:
         event = next(
-            item
-            for item in self.event_store.read_events(repair_tail=True)
-            if item.payload.type == "experiment.proposed"
-            and item.payload.spec.experiment_id == experiment_id
+            (
+                item
+                for item in self.event_store.read_events(repair_tail=True)
+                if item.payload.type == "experiment.proposed"
+                and item.payload.spec.experiment_id == experiment_id
+            ),
+            None,
         )
-        return event.payload.spec.parent_experiment_id
+        return None if event is None else event.payload.spec.parent_experiment_id
 
-    def _reference_batch(
-        self,
-        experiment_id: Optional[str],
-        key: str,
-        population: _PopulationData,
-    ) -> Any:
-        if not experiment_id or experiment_id == "baseline":
-            return self._batch_from_path(
-                self.baseline_predictions[key], population, "baseline_%s" % key
-            )
-        output = next(
+    def _accepted_output(self, experiment_id: str, key: str) -> Any:
+        return next(
             (
                 event.payload.result
                 for event in reversed(self.event_store.read_events(repair_tail=True))
@@ -1016,11 +1010,32 @@ class ProtectedEvaluationBridge:
             ),
             None,
         )
-        if output is None:
-            raise ContractError(
-                "reference experiment %s has no accepted %s prediction" % (experiment_id, key)
-            )
-        return self._batch_from_artifact(output.prediction_artifact, population)
+
+    def _reference_batch(
+        self,
+        experiment_id: Optional[str],
+        key: str,
+        population: _PopulationData,
+    ) -> Any:
+        # This reference only supplies the delta baseline for one comparison,
+        # so the nearest evaluated ancestor is as valid a reference as the
+        # immediate parent. Insisting on the immediate parent made any branch
+        # from a node pruned before full fidelity fail deterministically: a
+        # parent pruned at proxy never has a full prediction, so the child's
+        # full evaluation could only ever raise. Walk up to the closest
+        # ancestor that was actually evaluated at this fidelity, ending at the
+        # baseline, which always has one.
+        seen: set[str] = set()
+        current = experiment_id
+        while current and current != "baseline" and current not in seen:
+            seen.add(current)
+            output = self._accepted_output(current, key)
+            if output is not None:
+                return self._batch_from_artifact(output.prediction_artifact, population)
+            current = self._parent_experiment_id(current)
+        return self._batch_from_path(
+            self.baseline_predictions[key], population, "baseline_%s" % key
+        )
 
     def _output_fidelity(self, output_event: Any) -> str:
         finished = next(
@@ -1433,7 +1448,7 @@ def _mount_policies(
         "candidate_final_infer": "full",
         "clean_reproduce": "full",
     }
-    return tuple(
+    policies = [
         ContainerMountPolicy(
             command_id=command_id,
             fidelity=fidelities[command_id],
@@ -1456,7 +1471,24 @@ def _mount_policies(
             ),
         )
         for command_id in sorted(fidelities)
+    ]
+    # submission_check reads the contract's submission rows plus the already
+    # verified prediction artifact; it has no per-command input root.
+    policies.append(
+        ContainerMountPolicy(
+            command_id="submission_check",
+            fidelity="full",
+            data_manifest_sha256=config.data_manifest_sha256,
+            mounts=(
+                ContainerReadOnlyMount(
+                    live.contract_root.resolve(strict=True),
+                    "/contracts",
+                    "contract",
+                ),
+            ),
+        )
     )
+    return tuple(policies)
 
 
 def _require_live_files(config: RunConfig, live: LiveAdapterConfig) -> None:

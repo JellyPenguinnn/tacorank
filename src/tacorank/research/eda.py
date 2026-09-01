@@ -32,6 +32,10 @@ TRAIN_COLUMNS = (
     "tab",
     "duration_ms",
     "long_view",
+    "time_ms",
+    "hourmin",
+    "is_click",
+    "play_time_ms",
 )
 SCORE_COLUMNS = (
     "row_id",
@@ -41,6 +45,8 @@ SCORE_COLUMNS = (
     "author_id",
     "tab",
     "duration_ms",
+    "time_ms",
+    "hourmin",
 )
 ENTITY_COLUMNS = ("user_id", "video_id", "author_id")
 CARDINALITY_COLUMNS = ENTITY_COLUMNS + ("tab",)
@@ -51,6 +57,7 @@ EDA_TOOL_IDS = (
     "duration_distribution",
     "entity_sparsity",
     "score_train_overlap",
+    "within_user_structure",
 )
 _MAX_RATE_SLICES = 32
 
@@ -234,6 +241,106 @@ def _bounded_rate_slices(
     ]
 
 
+def _within_user_dispersion(
+    duration_by_user: Dict[str, List[float]], overall: Sequence[float]
+) -> Optional[float]:
+    """Share of duration spread that survives inside a single user's list.
+
+    Ranking metrics only see within-list contrasts, so a feature whose spread
+    is entirely *between* users is invisible to them no matter how strong it
+    looks marginally. Returns the mean within-user standard deviation of
+    log1p(duration) divided by the population standard deviation: near 0 means
+    the feature is effectively a per-user constant, near 1 means a user's own
+    list spans the full population range.
+    """
+
+    population = [math.log1p(value) for value in overall]
+    if len(population) < 2:
+        return None
+    mean = sum(population) / len(population)
+    variance = sum((value - mean) ** 2 for value in population) / len(population)
+    population_sd = math.sqrt(variance)
+    if population_sd <= 0.0:
+        return None
+    within: List[float] = []
+    for values in duration_by_user.values():
+        if len(values) < 2:
+            continue
+        logged = [math.log1p(value) for value in values]
+        local_mean = sum(logged) / len(logged)
+        local_var = sum((value - local_mean) ** 2 for value in logged) / len(logged)
+        within.append(math.sqrt(local_var))
+    if not within:
+        return None
+    return _rounded(min(sum(within) / len(within) / population_sd, 1.0))
+
+
+def _label_variation_fractions(
+    label_counts: Dict[str, Tuple[int, int]]
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Split training users into discriminative, all-negative, all-positive.
+
+    Only discriminative users -- those whose list contains both labels --
+    contribute a comparable pair to GAUC or a non-degenerate nDCG. The
+    remainder are fixed for every possible model, so they bound how much any
+    experiment can move the metric.
+    """
+
+    if not label_counts:
+        return None, None, None
+    total = len(label_counts)
+    all_negative = sum(1 for rows, positives in label_counts.values() if positives == 0)
+    all_positive = sum(
+        1 for rows, positives in label_counts.values() if positives == rows
+    )
+    discriminative = total - all_negative - all_positive
+    return (
+        _rounded(discriminative / total),
+        _rounded(all_negative / total),
+        _rounded(all_positive / total),
+    )
+
+
+def _within_user_section(
+    train_user_labels: Mapping[str, Sequence[int]],
+    score_user_durations: Mapping[str, Sequence[float]],
+    score_user_videos: Mapping[str, Mapping[str, int]],
+    score: "_ViewAccumulator",
+) -> Dict[str, object]:
+    """Assemble the within-user block of the profile."""
+
+    list_sizes = [len(values) for values in score_user_durations.values()]
+    single_row = sum(1 for size in list_sizes if size < 2)
+    repeats = sum(
+        sum(count for count in videos.values() if count > 1)
+        for videos in score_user_videos.values()
+    )
+    discriminative, all_negative, all_positive = _label_variation_fractions(
+        {
+            user: (int(counts[0]), int(counts[1]))
+            for user, counts in train_user_labels.items()
+        }
+    )
+    return {
+        "score_user_list_size": (
+            _numeric_summary(list_sizes) if list_sizes else None
+        ),
+        "score_single_row_user_fraction": (
+            _rounded(single_row / len(list_sizes)) if list_sizes else None
+        ),
+        "score_repeat_exposure_fraction": (
+            _rounded(repeats / score.rows) if score.rows else None
+        ),
+        "score_within_user_duration_dispersion": _within_user_dispersion(
+            {user: list(values) for user, values in score_user_durations.items()},
+            score.durations,
+        ),
+        "train_discriminative_user_fraction": discriminative,
+        "train_all_negative_user_fraction": all_negative,
+        "train_all_positive_user_fraction": all_positive,
+    }
+
+
 def _overlap_summary(
     score_values: Set[str], train_values: Set[str]
 ) -> PlannerEdaOverlapSummary:
@@ -287,6 +394,10 @@ class PlannerEdaToolbox:
         tab_rates = defaultdict(lambda: [0, 0])
         date_rates = defaultdict(lambda: [0, 0])
         positive_count = 0
+        # Within-user structure, gathered in the same single pass.
+        train_user_labels: Dict[str, List[int]] = defaultdict(lambda: [0, 0])
+        score_user_durations: Dict[str, List[float]] = defaultdict(list)
+        score_user_videos: Dict[str, Counter] = defaultdict(Counter)
 
         train_handle, train_reader = _read_csv(train_path, TRAIN_COLUMNS)
         try:
@@ -311,6 +422,10 @@ class PlannerEdaToolbox:
                         "train long_view must be binary at data row %d" % row_number
                     )
                 positive_count += label
+                if row["user_id"]:
+                    counts = train_user_labels[row["user_id"]]
+                    counts[0] += 1
+                    counts[1] += label
                 if row["tab"]:
                     tab_rates[row["tab"]][0] += 1
                     tab_rates[row["tab"]][1] += label
@@ -342,7 +457,13 @@ class PlannerEdaToolbox:
                     raise PlannerEdaError(
                         "score row_id must be contiguous at data row %d" % row_number
                     )
-                _update_common(score, row, view="score", row_number=row_number)
+                _, duration = _update_common(
+                    score, row, view="score", row_number=row_number
+                )
+                if row["user_id"]:
+                    score_user_durations[row["user_id"]].append(duration)
+                    if row["video_id"]:
+                        score_user_videos[row["user_id"]][row["video_id"]] += 1
         finally:
             score_handle.close()
 
@@ -396,9 +517,15 @@ class PlannerEdaToolbox:
             "train_long_view_by_date": _bounded_rate_slices(
                 temporal_rates, chronological=True
             ),
+            **_within_user_section(
+                train_user_labels, score_user_durations, score_user_videos, score
+            ),
         }
+        # Mirror PlannerDataProfile.validate_eda_profile: a section that could
+        # not be computed is omitted rather than hashed as a null, so the two
+        # sides agree and older profiles keep validating.
         canonical = json.dumps(
-            payload,
+            {key: value for key, value in payload.items() if value is not None},
             default=lambda value: value.model_dump(mode="json"),
             ensure_ascii=False,
             allow_nan=False,

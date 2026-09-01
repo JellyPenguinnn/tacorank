@@ -38,6 +38,11 @@ _GATE_A_CHECK_NAMES = frozenset(
 )
 
 
+# The bounded code-recovery actions that share the repair prompt contract.
+# Kept in sync with the orchestrator's _CODE_RECOVERY_ACTIONS.
+_REPAIR_PROMPT_ACTIONS = frozenset({"trae_repair", "restart_from_trusted_parent"})
+
+
 class PromptContractError(ValueError):
     """Raised before invocation when a coding context violates its contract."""
 
@@ -173,13 +178,13 @@ def build_coding_prompt(
         "Begin by viewing the authoritative target files directly; do not list the repository root or survey unrelated directories.",
         "Modify only authoritative_target_files. Do not add ad-hoc smoke, test, helper, or alternate entrypoint files unless each path is explicitly present in authoritative_target_files.",
         "The interface excerpts and method cards below are the supplied integration context. Inspect one non-target file only when a concrete missing symbol or schema blocks the edit.",
-        "The production entrypoint is loaded as solution.candidate:run. Keep it wired to every approved helper used by the experiment; sibling imports are allowed only when both files are authoritative_target_files.",
-        "Treat parent_commit_sha as the executable research parent, not merely as Git ancestry. The checked-out target source already contains that parent's behavior. Preserve it cumulatively and add the approved child mechanism unless the ExperimentSpec explicitly authorizes replacement or ablation.",
-        "fm_baseline_predictions.csv is always the original setup-verified official FM input. For a non-baseline parent, copying or adding a new residual directly to that file's scores does not preserve inherited parent behavior; keep the existing parent mechanism in the entrypoint's score path.",
-        "When the interface supplies setup-verified FM scores, preserve them as the parent and implement the approved mechanism as a bounded residual unless the ExperimentSpec explicitly requires replacement.",
+        "When a selected method card contains a '## Reference implementation' section, transcribe that code into the target file and adapt only what the approved ExperimentSpec changes; do not re-derive the plumbing from scratch, and do not spend steps exploring alternatives to reviewed reference code.",
+        "The production entrypoint is loaded as solution.candidate:run. Prefer one self-contained candidate.py; use sibling imports only when the approved target files and interface explicitly authorize them.",
+        "When the interface supplies setup-verified FM scores, preserve them as the parent and implement the approved mechanism as a bounded residual unless the ExperimentSpec explicitly requires replacement or a selected method card is tagged replacement_capable; for those, output the new model's own score directly and use the FM score as an input feature or fallback for unseen categories.",
         "The supplied FM scores are unconstrained real-valued ranking scores, not probabilities. Never sigmoid, clip to [0,1], normalize, or rescale the FM parent or a parent-plus-residual result. Bound only the residual on the parent's original scale.",
         "Prior-result summaries are mandatory implementation constraints. Use them to avoid repeating score collapse, excessive parent divergence, missing personalization, or loss of within-user rankability.",
         "Before task_done, review the edited score path for full/representative training coverage, non-zero trainable gradients, user-conditioned score variation, correct feature semantics, deterministic seeds, and finite fallback scores.",
+        "Never wrap the approved mechanism in a broad try/except that falls back to copying the parent scores: a candidate that cannot run its mechanism must raise, so the harness can repair it from the real traceback. Silent fallback converts a fixable bug into an unfixable no-op and wastes the whole experiment. Per-row fallback for genuinely missing values is fine; whole-path fallback is not.",
         "The symbolic allowed_command_ids are controller-owned post-patch checks, not shell tools available in this coding action. Do not search for or invoke them.",
         "Use the next editing-capable tool call after the target view to make the smallest coherent edit. Once the required edit and one bounded recheck are complete, then call task_done immediately; do not spend remaining steps browsing or making unrelated improvements.",
         "",
@@ -285,8 +290,14 @@ def build_repair_prompt(
     )
     target_files = _validated_paths(spec_document.get("target_files"), "target_files")
     decision_document = _json_document(decision, "recovery_decision")
-    if decision_document.get("action") != "trae_repair":
-        raise PromptContractError("recovery decision is not a trae_repair action")
+    # Both bounded code-recovery actions build their prompt here:
+    # restart_from_trusted_parent recodes from the parent commit rather than
+    # editing the rejected candidate, but it is the same bounded repair task
+    # under the same hypothesis. Accepting only trae_repair made every
+    # restart raise PromptContractError, which surfaced as
+    # CODING_WORKER_FAILURE and abandoned the experiment.
+    if decision_document.get("action") not in _REPAIR_PROMPT_ACTIONS:
+        raise PromptContractError("recovery decision is not a code repair action")
     if decision_document.get("run_id", run_id) != run_id or decision_document.get(
         "experiment_id", experiment_id
     ) != experiment_id:

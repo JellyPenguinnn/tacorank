@@ -41,12 +41,25 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONNOUSERSITE=1 \
     PYTHONUNBUFFERED=1
 
+# LightGBM links against the OpenMP runtime, which python:3.12-slim omits.
+# Without it the wheel installs cleanly and then fails at import with
+# "libgomp.so.1: cannot open shared object file", so the candidate would be
+# rejected at Gate A's isolated import rather than at install time.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /opt/tacorank
 COPY pyproject.toml setup.cfg setup.py requirements.txt ./
 COPY src ./src
 COPY benchmarks ./benchmarks
-RUN python -m pip install --no-cache-dir \
-        --requirement requirements.txt \
+# requirements.txt was copied in but never installed, so the candidate
+# container held only setup.cfg's install_requires (pydantic, PyYAML). Every
+# candidate therefore had to train in pure Python, and a patch that reached
+# for numpy failed Gate A's isolated import with ModuleNotFoundError. Install
+# the declared requirements so the numeric stack the starter kit assumes is
+# actually present; the built image id stays pinned per deployment.
+RUN python -m pip install --no-cache-dir --requirement requirements.txt \
     && python -m pip install --no-cache-dir --no-deps .
 COPY --from=trae-tools \
     /usr/local/lib/python3.12/site-packages/trae_agent/dist \

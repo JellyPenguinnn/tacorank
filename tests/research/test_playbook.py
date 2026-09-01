@@ -35,7 +35,7 @@ def test_markdown_playbook_control_block_is_executable():
     )
 
     assert playbook.rule_order[0] == "output_rejected"
-    assert playbook.family_order[0] == "objective"
+    assert playbook.family_order[0] == "model"
     assert playbook.methods_for("objective")[0] == "objective_pairwise_bpr"
     assert len(playbook.source_sha256) == 64
 

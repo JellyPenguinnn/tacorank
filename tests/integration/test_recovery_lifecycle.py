@@ -528,7 +528,7 @@ def test_permanent_initial_coding_failure_abandons_only_the_experiment(
     assert state.active_experiment_id is None
 
 
-def test_real_recovery_allows_only_one_same_commit_retry_across_fingerprints(
+def test_real_recovery_survives_two_transient_failures_with_bounded_retries(
     harness, baseline_evaluation
 ):
     artifacts = harness.event_store.artifact_store
@@ -544,15 +544,18 @@ def test_real_recovery_allows_only_one_same_commit_retry_across_fingerprints(
         for event in harness.events()
         if event.event_type == EventType.RECOVERY_DECIDED
     ]
-    assert [decision.action for decision in decisions] == [
+    assert [decision.action for decision in decisions[:2]] == [
         RecoveryAction.RETRY_SAME_COMMIT,
-        RecoveryAction.ABANDON,
+        RecoveryAction.RETRY_SAME_COMMIT,
     ]
-    assert len(runner.requests) == 2
-    assert runner.requests[0].seed == runner.requests[1].seed
-    assert runner.requests[0].patch_commit_sha == runner.requests[1].patch_commit_sha
-    assert state.experiments["exp_001"].same_commit_retry_count == 1
-    assert state.experiments["exp_001"].status == ExperimentStatus.INVALID
+    assert runner.requests[0].seed == runner.requests[1].seed == runner.requests[2].seed
+    assert (
+        runner.requests[0].patch_commit_sha
+        == runner.requests[1].patch_commit_sha
+        == runner.requests[2].patch_commit_sha
+    )
+    assert state.experiments["exp_001"].same_commit_retry_count == 2
+    assert state.experiments["exp_001"].status != ExperimentStatus.INVALID
 
 
 def test_runner_exception_is_retried_as_infrastructure_failure(

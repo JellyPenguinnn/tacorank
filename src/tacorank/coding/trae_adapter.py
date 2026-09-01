@@ -226,7 +226,14 @@ class TraeConfig:
     docker_tmpfs_limit_mb: int = 256
     docker_agent_tools_size_limit_mb: int = 64
     docker_cli_timeout_seconds: int = 30
-    version_timeout_seconds: int = 10
+    # `trae --version` runs inside a runtime virtualenv that setup-live has
+    # just created, so the first invocation pays for cold Python imports with
+    # no bytecode cache while a virus scanner walks a brand-new tree. Ten
+    # seconds was tight enough that preflight failed immediately after a
+    # deployment build and then passed on a second attempt, once the caches
+    # were warm. This is a ceiling on a version check, not a delay, so a
+    # generous value costs nothing when the runtime is already warm.
+    version_timeout_seconds: int = 60
     termination_grace_seconds: int = 5
     max_process_output_bytes: int = 8 * 1024 * 1024
     max_trajectory_bytes: int = 50 * 1024 * 1024

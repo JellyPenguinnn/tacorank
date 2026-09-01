@@ -417,21 +417,34 @@ def test_harness_recomputes_prior_fingerprints_and_excludes_current_failure():
 
 
 @pytest.mark.parametrize("outcome", ["infrastructure_error", "hang", "timeout"])
-def test_transient_execution_failure_gets_one_exact_retry(outcome):
+def test_transient_execution_failure_gets_bounded_exact_retries(outcome):
     result = run_failure(outcome, "execution stopped after progress")
     first = decide(result)
-    fingerprint = classify_failure(result).fingerprint
-    second = decide(result, context(previous=[fingerprint]))
+    exhausted = decide(result, context(retries=2))
 
     assert first.action == RecoveryAction.RETRY_SAME_COMMIT
     assert first.repair_attempt == 1
     assert first.remaining_repair_budget == 2
-    assert second.action == RecoveryAction.ABANDON
+    assert exhausted.action == RecoveryAction.ABANDON
+    assert exhausted.reason_code == "SAME_COMMIT_RETRY_EXHAUSTED"
+
+
+@pytest.mark.parametrize("outcome", ["infrastructure_error", "hang"])
+def test_infrastructure_repeat_fingerprint_still_retries(outcome):
+    # Host-level flakiness normalizes to one generic fingerprint, so a
+    # repeated fingerprint must not abandon a transient infra failure
+    # while bounded same-commit retries remain.
+    result = run_failure(outcome, "execution stopped after progress")
+    fingerprint = classify_failure(result).fingerprint
+    second = decide(result, context(previous=[fingerprint], retries=1))
+
+    assert second.action == RecoveryAction.RETRY_SAME_COMMIT
+    assert second.reason_code == "TRANSIENT_SAME_COMMIT_RETRY"
 
 
 def test_same_commit_retry_is_global_across_different_fingerprints():
     second_failure = run_failure("hang", "different worker failure")
-    decision = decide(second_failure, context(retries=1))
+    decision = decide(second_failure, context(retries=2))
 
     assert decision.action == RecoveryAction.ABANDON
     assert decision.reason_code == "SAME_COMMIT_RETRY_EXHAUSTED"
@@ -568,7 +581,12 @@ def test_first_noop_gets_one_scoped_trae_wiring_repair():
     assert "solution/train.py" in decision.instructions
     assert "starting with the current diff" in decision.instructions
     assert "Do not survey setup files" in decision.instructions
-    assert "task_done immediately" in decision.instructions
+    # The worker's tools are the editor and task_done, so it must be told to
+    # finish rather than to run a check it cannot run. Gating task_done on a
+    # check it has no way to perform left it editing until the step budget was
+    # gone, which discards the attempt and produces no patch at all.
+    assert "call task_done" in decision.instructions
+    assert "cannot execute code" in decision.instructions
     assert "Frozen contract; protected evaluator and data" not in decision.instructions
 
 
@@ -613,7 +631,7 @@ def test_exhausted_noop_repair_worker_returns_evidence_to_planner():
 def test_repeated_hang_emits_evidence_linked_lesson():
     result = run_failure("hang", "worker stopped")
     fingerprint = classify_failure(result).fingerprint
-    decision = decide(result, context(previous=[fingerprint]))
+    decision = decide(result, context(previous=[fingerprint], retries=2))
 
     assert decision.lesson_candidate is not None
     assert decision.lesson_candidate.source_event_ids == ["evt-failure-1"]

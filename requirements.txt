@@ -6,6 +6,17 @@ numpy>=1.23,<3
 # Upstream KuaiRand-Pure dataset loader
 pandas>=1.5,<3
 
+# Candidate modelling. Without these the coding worker has to hand-roll every
+# method in numpy inside the candidate wall-clock limit, which is what it did:
+# the LambdaRank card came back as a 3-epoch linear model over 65,536 hashed
+# user-video buckets, and scored at the noise floor. These are the standard
+# implementations the method cards' sources actually use -- LightGBM supplies
+# the lambdarank objective directly. Pinned by the image digest per deployment,
+# and deterministic when a seed and single-threaded execution are set.
+scipy>=1.10,<2
+scikit-learn>=1.3,<2
+lightgbm>=4,<5
+
 # TacoRank shared schemas
 pydantic>=2,<3
 
@@ -14,3 +25,4 @@ certifi>=2025.1.31,<2027
 
 # Strict parsing of the reviewed Trae execution-surface configuration
 PyYAML>=6,<7
+catboost>=1.2,<2

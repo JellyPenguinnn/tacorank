@@ -49,6 +49,12 @@ from tacorank.execution.telemetry import (
 )
 
 
+# Docker Desktop can stall a single ``docker stats`` probe for several
+# seconds while the candidate is CPU-bound; only a sustained loss of
+# telemetry is evidence of an unhealthy runtime.
+_MAX_CONSECUTIVE_TELEMETRY_MISSES = 3
+
+
 class ExecutionAuthorizationError(RuntimeError):
     """Raised when receipt, commit, diff, or protected hashes do not match."""
 
@@ -334,6 +340,8 @@ class ExecutionRunner:
         termination: Optional[Tuple[str, str, str]] = None
         telemetry_error: Optional[BaseException] = None
 
+        consecutive_sample_failures = 0
+        consecutive_probe_failures = 0
         try:
             with TelemetryJournal(manager.telemetry_path) as journal:
                 while True:
@@ -352,7 +360,10 @@ class ExecutionRunner:
                         # A short-lived ``docker run --rm`` can disappear after
                         # the liveness check but before ``docker stats``.  That
                         # is normal completion; metrics loss while the launcher
-                        # remains alive is still fail-closed.
+                        # remains alive stays fail-closed, but only after the
+                        # bounded consecutive-miss window below, because Docker
+                        # Desktop stalls ``docker stats`` for seconds under
+                        # host load without the candidate being unhealthy.
                         if not process.is_alive():
                             break
                         if time.monotonic() - started >= limits.wall_time_seconds:
@@ -362,7 +373,20 @@ class ExecutionRunner:
                                 "hard wall-time limit exceeded",
                             )
                             break
-                        raise
+                        consecutive_sample_failures += 1
+                        if consecutive_sample_failures >= _MAX_CONSECUTIVE_TELEMETRY_MISSES:
+                            raise
+                        remaining = limits.wall_time_seconds - (
+                            time.monotonic() - started
+                        )
+                        time.sleep(
+                            min(
+                                self.policy.telemetry_interval_seconds,
+                                max(0.001, remaining),
+                            )
+                        )
+                        continue
+                    consecutive_sample_failures = 0
                     journal.append(sample)
                     tracker.observe(
                         rss_mb=_field(sample, "rss_mb", None),
@@ -422,13 +446,28 @@ class ExecutionRunner:
 
                     try:
                         outputs_ready = process.runtime_outputs_ready()
-                    except ProcessLaunchError:
-                        termination = (
-                            "infrastructure_error",
-                            "RUNTIME_OUTPUT_HANDSHAKE_FAILURE",
-                            "container output completion probe failed",
-                        )
-                        break
+                    except ProcessLaunchError as error:
+                        # A single probe is one ``docker exec`` on a loaded
+                        # Docker Desktop backend; treat a short streak of
+                        # failures as "not ready yet" before failing closed.
+                        consecutive_probe_failures += 1
+                        if (
+                            consecutive_probe_failures
+                            >= _MAX_CONSECUTIVE_TELEMETRY_MISSES
+                        ):
+                            detail = str(error).strip()
+                            summary = "container output completion probe failed"
+                            if detail:
+                                summary = f"{summary}: {detail}"
+                            termination = (
+                                "infrastructure_error",
+                                "RUNTIME_OUTPUT_HANDSHAKE_FAILURE",
+                                summary,
+                            )
+                            break
+                        outputs_ready = False
+                    else:
+                        consecutive_probe_failures = 0
                     if outputs_ready:
                         try:
                             process.extract_ready_runtime_outputs()
@@ -446,11 +485,15 @@ class ExecutionRunner:
                                 "runtime output could not be written because storage is full",
                             )
                             break
-                        except ProcessLaunchError:
+                        except ProcessLaunchError as error:
+                            detail = str(error).strip()
+                            summary = "bounded container output extraction failed"
+                            if detail:
+                                summary = f"{summary}: {detail}"
                             termination = (
                                 "infrastructure_error",
                                 "RUNTIME_OUTPUT_EXTRACTION_FAILURE",
-                                "bounded container output extraction failed",
+                                summary,
                             )
                             break
                         release_wait = limits.wall_time_seconds - elapsed
@@ -974,13 +1017,44 @@ def _normalized_error_evidence(evidence: str) -> str:
     return normalized[:4096]
 
 
-def _safe_summary(summary: str) -> str:
-    return redact_runtime_output(str(summary)).replace("\x00", "")[:512]
+def _safe_summary(summary: str, limit: int = 512) -> str:
+    return redact_runtime_output(str(summary)).replace("\x00", "")[:limit]
+
+
+# Traceback frames pointing into the candidate's own source. The exception
+# line alone names the error but never where it came from, and the coding
+# worker has no shell to reproduce the failure, so a bare "ValueError: left
+# keys must be sorted" leaves it editing blind until its step budget is gone.
+_CANDIDATE_FRAME_RE = re.compile(
+    r'^\s*File "(?P<path>[^"]*solution[/\\][^"]+)", line (?P<line>\d+), in (?P<symbol>\S+)'
+)
+_TAIL_SUMMARY_LIMIT = 1024
 
 
 def _tail_summary(log_tail: str, fallback: str) -> str:
     lines = [line.strip() for line in log_tail.splitlines() if line.strip()]
-    return _safe_summary(lines[-1] if lines else fallback)
+    if not lines:
+        return _safe_summary(fallback)
+    # Keep the deepest candidate frames so the fault is locatable, then the
+    # final exception line. Only frames inside the candidate's own files are
+    # included: interpreter and third-party frames add length without telling
+    # the worker which of its own lines to change.
+    frames = [
+        "%s:%s in %s" % (
+            match.group("path").replace("\\", "/").rsplit("/solution/", 1)[-1],
+            match.group("line"),
+            match.group("symbol"),
+        )
+        for line in lines
+        for match in (_CANDIDATE_FRAME_RE.match(line),)
+        if match
+    ]
+    if not frames:
+        return _safe_summary(lines[-1], _TAIL_SUMMARY_LIMIT)
+    return _safe_summary(
+        "%s (candidate frames: %s)" % (lines[-1], " <- ".join(frames[-4:])),
+        _TAIL_SUMMARY_LIMIT,
+    )
 
 
 def _enum_value(value: Any) -> Any:

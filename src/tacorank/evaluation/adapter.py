@@ -412,6 +412,7 @@ class EvaluationService:
             predictions.scores,
             request.parent_scores,
             self.trust_config.no_op.score_tolerance,
+            user_ids=predictions.user_ids,
         )
         diagnostic_summary = compute_evaluation_diagnostics(
             user_ids=predictions.user_ids,

@@ -91,7 +91,7 @@ def test_container_runtime_stats_drive_candidate_cpu_and_rss_telemetry(
     assert calls[0][1]["shell"] is False
 
 
-def test_container_stats_retry_only_during_bounded_initial_discovery(
+def test_container_stats_probe_retries_stay_bounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -100,16 +100,27 @@ def test_container_stats_retry_only_during_bounded_initial_discovery(
         cwd=tmp_path,
         environment={},
     )
+    success = subprocess.CompletedProcess(
+        specification.argv,
+        0,
+        stdout='{"CPUPerc":"1.0%","MemUsage":"1MiB / 1GiB"}\n',
+        stderr="",
+    )
+    failure = subprocess.CompletedProcess(specification.argv, 1, stdout="", stderr="")
     responses = iter(
         (
-            subprocess.CompletedProcess(specification.argv, 1, stdout="", stderr=""),
-            subprocess.CompletedProcess(
-                specification.argv,
-                0,
-                stdout='{"CPUPerc":"1.0%","MemUsage":"1MiB / 1GiB"}\n',
-                stderr="",
-            ),
-            subprocess.CompletedProcess(specification.argv, 1, stdout="", stderr=""),
+            # Initial discovery tolerates a slow container registration.
+            failure,
+            success,
+            # A transient post-discovery stall recovers within the bounded
+            # retry budget instead of failing the whole execution.
+            failure,
+            failure,
+            success,
+            # A sustained loss still fails closed after the bounded retries.
+            failure,
+            failure,
+            failure,
         )
     )
     calls = 0
@@ -126,9 +137,11 @@ def test_container_stats_retry_only_during_bounded_initial_discovery(
 
     assert reader.sample(0).rss_mb == 1.0
     assert calls == 2
+    assert reader.sample(0).rss_mb == 1.0
+    assert calls == 5
     with pytest.raises(resources.RuntimeMetricsError, match="unavailable"):
         reader.sample(0)
-    assert calls == 3
+    assert calls == 8
 
 
 def test_container_stats_initial_retry_never_exceeds_run_deadline(

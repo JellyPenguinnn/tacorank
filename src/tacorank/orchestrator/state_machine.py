@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Iterable, List, Optional
 
 from ..memory.projections import project
+from ..recovery.policy import MAX_SAME_COMMIT_RETRIES
 from ..schemas import (
     Event,
     EventPayload,
@@ -83,6 +84,29 @@ def _authorized_no_op_reimplementation(events: List[Event], state, spec) -> bool
         and evaluation.payload.result.trust.verdict == TrustVerdict.NO_OP
         and spec.parent_experiment_id == node.parent_experiment_id
         and spec.family == node.family
+    )
+
+
+def _authorized_failed_attempt_reexploration(state, spec) -> bool:
+    """Allow re-proposing a method whose prior attempts never tested it.
+
+    An experiment abandoned on an implementation failure (INVALID) or closed
+    as a wiring no-op produced no evidence about its mechanism, so the same
+    method/parent pair may be proposed again instead of exhausting the
+    portfolio. Bounded to three total attempts per duplicate key, and never
+    authorized once any attempt reached an informative terminal state.
+    """
+
+    prior = [
+        node
+        for node in state.experiments.values()
+        if node.duplicate_key == spec.duplicate_key
+    ]
+    if not prior or len(prior) >= 3:
+        return False
+    return all(
+        node.status in (ExperimentStatus.INVALID, ExperimentStatus.NO_OP)
+        for node in prior
     )
 
 
@@ -241,7 +265,8 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
         )
         _require(
             not duplicate_exists
-            or _authorized_no_op_reimplementation(events, state, spec),
+            or _authorized_no_op_reimplementation(events, state, spec)
+            or _authorized_failed_attempt_reexploration(state, spec),
             "duplicate experiment proposal",
         )
         if spec.parent_experiment_id:
@@ -458,7 +483,10 @@ def validate_transition(events: List[Event], payload: EventPayload) -> None:
             "remaining repair budget is inconsistent",
         )
         if decision.action == RecoveryAction.RETRY_SAME_COMMIT:
-            _require(node.same_commit_retry_count == 0, "same-commit retry has already been used")
+            _require(
+                node.same_commit_retry_count < MAX_SAME_COMMIT_RETRIES,
+                "same-commit retries have already been used",
+            )
     elif event_type == EventType.OUTPUT_CHECKED:
         result = payload.result
         node = state.experiments.get(result.experiment_id)

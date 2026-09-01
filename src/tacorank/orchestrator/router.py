@@ -74,6 +74,7 @@ from .finalize import (
     baseline_reproduction_event_id,
     candidate_finalization_plan,
 )
+from .state import ExperimentStatus
 from .state_machine import TransitionError
 from .ports import (
     CodingWorker,
@@ -98,6 +99,20 @@ _CODE_RECOVERY_ACTIONS = frozenset(
         RecoveryAction.RESTART_FROM_TRUSTED_PARENT,
     }
 )
+
+
+class _RepairWorkerUnavailable(Exception):
+    """A repair worker failed; the failure and recovery are already recorded.
+
+    Raised by ``_execute_code_repair`` after it records the adapter failure
+    and obtains a non-retry recovery decision, so upper layers must honor
+    ``action`` instead of recording or deciding the same failure again.
+    """
+
+    def __init__(self, action: RecoveryAction, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.action = action
+        self.cause = cause
 
 
 class ResumablePlanningError(OrchestrationError):
@@ -703,13 +718,49 @@ class Harness:
             update={"recovery_instructions": decision.instructions}
         )
         if decision.action == RecoveryAction.RESTART_FROM_TRUSTED_PARENT:
-            candidate = await self.coding_worker.restart_from_trusted_parent(
-                context, decision
-            )
+            worker_call = self.coding_worker.restart_from_trusted_parent
             patch_stage = "trusted_parent_restart_patch_created"
         else:
-            candidate = await self.coding_worker.repair_patch(context, decision)
+            worker_call = self.coding_worker.repair_patch
             patch_stage = "repair_patch_created"
+        try:
+            candidate = await worker_call(context, decision)
+        except Exception as error:
+            # A repair worker blip (a Trae step-limit or provider hiccup)
+            # previously escaped to the top-level handler, which stops the
+            # whole run because the continuation point of an arbitrary escaped
+            # exception is unknown. Here the continuation point IS known: the
+            # worktree is disposable and no execution is in flight, so honor
+            # exactly one policy-granted same-commit retry of the same repair
+            # before falling back to that conservative stop.
+            failure_event = self._record_adapter_failure(
+                experiment_id=decision.experiment_id,
+                attempt=decision.repair_attempt + 1,
+                stage="coding",
+                error=error,
+                causation_event_id=decision_event.event_id,
+            )
+            retry_action, retry_recovery = await self._recover(
+                failure_event,
+                failure_event.payload.result,
+                decision.experiment_id,
+            )
+            if retry_action != RecoveryAction.RETRY_SAME_COMMIT:
+                # The failure and its recovery decision are already recorded;
+                # signal the decided action upward without re-deciding it.
+                raise _RepairWorkerUnavailable(retry_action, error) from error
+            _, retry_context, retry_decision_event = retry_recovery
+            retry_context = retry_context.model_copy(
+                update={"recovery_instructions": decision.instructions}
+            )
+            # The failed attempt may have consumed a repair slot, so the
+            # worker's identity check requires the reissued decision to carry
+            # the retry context's attempt number, not the stale original.
+            decision = decision.model_copy(
+                update={"repair_attempt": int(retry_context.repair_attempt)}
+            )
+            candidate = await worker_call(retry_context, decision)
+            decision_event = retry_decision_event
         candidate = candidate.__class__.model_validate(
             {
                 **candidate.model_dump(mode="json"),
@@ -812,8 +863,13 @@ class Harness:
             failure_event.payload.result,
             experiment_id,
         )
-        # An exception means the normal continuation point is unknown. Even
-        # when policy records a repair/retry action, stop rather than guessing
+        if self._lane_closed_safely(experiment_id):
+            # Recovery closed the experiment in a planner-safe terminal
+            # state; the run continues with the next proposal instead of
+            # stopping for a failure that already cost only one experiment.
+            return self.state()
+        # Otherwise the normal continuation point is unknown. Even when
+        # policy records a repair/retry action, stop rather than guessing
         # which side effects completed. Resume can inspect the durable evidence.
         self.stop(
             StopDecision(
@@ -822,6 +878,73 @@ class Harness:
                 "The %s adapter failed; recovery recorded %s and the run was stopped safely."
                 % (stage, action.value),
             )
+        )
+        return self.state()
+
+    _TERMINAL_DECISIONS = frozenset(
+        {
+            ExperimentDecisionKind.ACCEPT,
+            ExperimentDecisionKind.REJECT,
+            ExperimentDecisionKind.PRUNE,
+            ExperimentDecisionKind.INVALID,
+        }
+    )
+
+    def _has_terminal_decision(self, experiment_id: str) -> bool:
+        """Whether the planner can already branch past this experiment."""
+
+        return any(
+            event.payload.type == "experiment.decided"
+            and event.payload.decision.experiment_id == experiment_id
+            and event.payload.decision.decision in self._TERMINAL_DECISIONS
+            for event in self.events()
+        )
+
+    def _abandon_experiment(
+        self,
+        spec: object,
+        attempt: int,
+        fidelity: object,
+        causation_event_id: str,
+        reason_code: str,
+    ) -> object:
+        """Close an abandoned experiment with a terminal decision.
+
+        Recovery can abandon an experiment mid-fidelity, but abandonment is
+        not by itself visible to the planner: the experiment's most recent
+        decision is still the promotion that queued this stage. The search
+        policy then reports FIDELITY_PROMOTION_REQUIRED forever, the run
+        deterministically stops on no_legal_proposal, and every remaining
+        iteration is lost. Record the terminal decision so the planner can
+        branch past it.
+
+        Idempotent, so it is safe at every early exit from the fidelity loop
+        including the ones that already decided. An earlier revision closed
+        only the evaluation-failure exits, and run_20260831T005157Z then
+        deadlocked identically through the execution path: exp_002 was
+        promoted at proxy, its retry was abandoned on a repeated fingerprint,
+        and the run stopped two experiments in.
+        """
+
+        if self._has_terminal_decision(spec.experiment_id):
+            return self.state()
+        decision = ExperimentDecision(
+            run_id=self.config.run_id,
+            experiment_id=spec.experiment_id,
+            evaluation_event_id=None,
+            decision=ExperimentDecisionKind.INVALID,
+            reason_code=reason_code,
+            fidelity_completed=fidelity,
+            parent_eligible=False,
+            best_eligible=False,
+            next_fidelity=None,
+        )
+        self._append(
+            ExperimentDecidedPayload(decision=decision),
+            stage="decision_abandoned",
+            experiment_id=spec.experiment_id,
+            attempt=attempt,
+            causation_event_id=causation_event_id,
         )
         return self.state()
 
@@ -834,6 +957,30 @@ class Harness:
             # inspect/replace the provider instead of converting it into a
             # stopped run.
             raise
+        except _RepairWorkerUnavailable as failure:
+            # The repair worker failure and its recovery decision are already
+            # in the ledger. Honor the decided action without re-deciding:
+            # planning continues for return_to_planner, or whenever recovery
+            # left the experiment in a planner-safe terminal state; a
+            # mid-fidelity abandon that left no terminal state keeps the
+            # conservative safe stop, because it can deadlock the planner.
+            if failure.action == RecoveryAction.RETURN_TO_PLANNER:
+                return self.state()
+            state = self.state()
+            if (
+                state.active_experiment_id
+                and self._lane_closed_safely(state.active_experiment_id)
+            ):
+                return state
+            self.stop(
+                StopDecision(
+                    True,
+                    "ADAPTER_FAILURE_%s" % failure.action.value.upper(),
+                    "The coding repair adapter failed; recovery recorded %s "
+                    "and the run was stopped safely." % failure.action.value,
+                )
+            )
+            return self.state()
         except Exception as error:
             try:
                 return await self._handle_unexpected_adapter_failure(error)
@@ -1129,7 +1276,7 @@ class Harness:
                     ),
                     data_manifest_sha256=self.config.data_manifest_sha256,
                     timeout_seconds=self.config.timeout_profiles.get("standard", 600),
-                    memory_limit_mb=4096,
+                    memory_limit_mb=10240,
                     gpu_memory_limit_mb=0,
                     network_enabled=False,
                     runtime_settings=runtime_settings,
@@ -1300,7 +1447,13 @@ class Harness:
                                 next_execution_cause = patch_check_event.event_id
                                 stage_queue.appendleft(fidelity)
                                 continue
-                        return self.state()
+                        return self._abandon_experiment(
+                            spec,
+                            attempt,
+                            fidelity,
+                            proposal_event.event_id,
+                            "STAGE_ABANDONED",
+                        )
                 elif action in _CODE_RECOVERY_ACTIONS:
                     patch, patch_check, patch_check_event = (
                         await self._execute_code_repair(
@@ -1312,9 +1465,21 @@ class Harness:
                         next_execution_cause = patch_check_event.event_id
                         stage_queue.appendleft(fidelity)
                         continue
-                    return self.state()
+                    return self._abandon_experiment(
+                        spec,
+                        attempt,
+                        fidelity,
+                        proposal_event.event_id,
+                        "STAGE_ABANDONED",
+                    )
                 elif action != RecoveryAction.RETRY_SAME_COMMIT:
-                    return self.state()
+                    return self._abandon_experiment(
+                        spec,
+                        attempt,
+                        fidelity,
+                        proposal_event.event_id,
+                        "STAGE_ABANDONED",
+                    )
             output_event = self._append(
                 OutputCheckedPayload(result=output),
                 stage="output_checked_%s" % fidelity.value,
@@ -1347,7 +1512,13 @@ class Harness:
                     )
                 if repair_accepted:
                     continue
-                return self.state()
+                return self._abandon_experiment(
+                    spec,
+                    attempt,
+                    fidelity,
+                    proposal_event.event_id,
+                    "STAGE_ABANDONED",
+                )
 
             if fidelity == Fidelity.SMOKE:
                 next_fidelity = stage_queue[0] if stage_queue else Fidelity.PROXY
@@ -1480,7 +1651,13 @@ class Harness:
                                 next_execution_cause = patch_check_event.event_id
                                 stage_queue.appendleft(fidelity)
                                 continue
-                        return self.state()
+                        return self._abandon_experiment(
+                            spec,
+                            attempt,
+                            fidelity,
+                            retry_failure.event_id,
+                            "EVALUATION_ABANDONED",
+                        )
                 elif action == RecoveryAction.ADJUST_APPROVED_RUNTIME_SETTING:
                     self._validate_runtime_adjustments(
                         recovery_decision.runtime_adjustments
@@ -1511,9 +1688,30 @@ class Harness:
                         next_execution_cause = patch_check_event.event_id
                         stage_queue.appendleft(fidelity)
                         continue
-                    return self.state()
-                else:
-                    return self.state()
+                    return self._abandon_experiment(
+                        spec,
+                        attempt,
+                        fidelity,
+                        failure_event.event_id,
+                        "EVALUATION_REPAIR_REJECTED",
+                    )
+                elif action != RecoveryAction.RETRY_SAME_COMMIT:
+                    return self._abandon_experiment(
+                        spec,
+                        attempt,
+                        fidelity,
+                        failure_event.event_id,
+                        "EVALUATION_ABANDONED",
+                    )
+            self.config.validate_metric_set(evaluation.metric_set)
+            evaluation_event = self._append(
+                EvaluationCompletedPayload(result=evaluation),
+                stage="evaluation_%s" % fidelity.value,
+                experiment_id=spec.experiment_id,
+                attempt=attempt,
+                causation_event_id=evaluation_causation_event_id,
+                resource_delta=evaluation.resource_delta,
+            )
             if self._stop_if_runtime_budget_exhausted():
                 return self.state()
             if evaluation.trust.verdict == TrustVerdict.NO_OP:
@@ -1532,25 +1730,14 @@ class Harness:
                                 recovery, proposal_event.event_id
                             )
                         )
-                    except CodingWorkerError as error:
+                    except _RepairWorkerUnavailable as failure:
                         # The no-op evidence remains a valid research result
-                        # even when the bounded repair worker exhausts its 20
-                        # internal steps. Preserve the worker failure, then
-                        # return ownership to planning instead of stopping the
-                        # autonomous loop.
-                        failure_event = self._record_adapter_failure(
-                            experiment_id=spec.experiment_id,
-                            attempt=attempt,
-                            stage="coding",
-                            error=error,
-                            causation_event_id=self.events()[-1].event_id,
-                        )
-                        action, recovery = await self._recover(
-                            failure_event,
-                            failure_event.payload.result,
-                            spec.experiment_id,
-                        )
-                        if action == RecoveryAction.RETURN_TO_PLANNER:
+                        # even when the bounded repair worker exhausts its
+                        # internal steps. ``_execute_code_repair`` already
+                        # recorded the worker failure and its recovery
+                        # decision; return ownership to planning instead of
+                        # stopping the autonomous loop.
+                        if failure.action == RecoveryAction.RETURN_TO_PLANNER:
                             return self.state()
                         raise
                     if self._stop_if_runtime_budget_exhausted():
@@ -1757,14 +1944,14 @@ class Harness:
         if callable(capacity):
             available = capacity(planner_context)
             if available < 1:
-                self.stop(
-                    StopDecision(
-                        True,
-                        "PARALLEL_ROUND_INCOMPLETE",
-                        "No unique legal research method remains for a parallel round.",
-                    )
-                )
-                return []
+                # The scout lane demands a method never tried anywhere in the
+                # run, so a long run legitimately exhausts parallel capacity.
+                # That is not an end-of-search condition: the sequential
+                # depth-first route can still backtrack and re-explore, so
+                # signal the caller to run one sequential experiment instead
+                # of stopping the run.
+                logger.info("parallel_capacity_exhausted; falling back to sequential")
+                return None
             if available < count:
                 logger.info(
                     "parallel_round_width_reduced requested=%d available=%d",
@@ -1899,6 +2086,11 @@ class Harness:
                 failure_event.payload.result,
                 spec.experiment_id,
             )
+            if self._lane_closed_safely(spec.experiment_id):
+                # Recovery left this lane's experiment in a terminal state the
+                # planner can branch past, so one failed lane costs one
+                # experiment, not the whole run.
+                return self.state()
             if self._pending_parallel_stop is None:
                 self._pending_parallel_stop = StopDecision(
                     True,
@@ -1907,6 +2099,22 @@ class Harness:
                     % (stage, action.value),
                 )
             return self.state()
+
+    _SAFE_TERMINAL_STATUSES = frozenset(
+        {
+            ExperimentStatus.INVALID,
+            ExperimentStatus.NO_OP,
+            ExperimentStatus.ACCEPTED,
+            ExperimentStatus.REJECTED,
+            ExperimentStatus.PRUNED,
+        }
+    )
+
+    def _lane_closed_safely(self, experiment_id: str) -> bool:
+        """Whether recovery left the experiment planner-safe to branch past."""
+
+        node = self.state().experiments.get(experiment_id)
+        return node is not None and node.status in self._SAFE_TERMINAL_STATUSES
 
     @staticmethod
     def _event_experiment_id(event: Event) -> Optional[str]:
@@ -1932,6 +2140,10 @@ class Harness:
                 self.stop(decision)
             return self.state()
         prepared = await self._prepare_parallel_round(count)
+        if prepared is None:
+            # Parallel capacity exhausted; continue the search sequentially,
+            # which permits backtracking and bounded re-exploration.
+            return await self.run_one_experiment()
         if not prepared:
             return self.state()
         self._parallel_round_active = True
@@ -2114,7 +2326,7 @@ class Harness:
             seed=seed,
             data_manifest_sha256=self.config.data_manifest_sha256,
             timeout_seconds=self.config.timeout_profiles.get("standard", 600),
-            memory_limit_mb=4096,
+            memory_limit_mb=10240,
             gpu_memory_limit_mb=0,
             network_enabled=False,
         )

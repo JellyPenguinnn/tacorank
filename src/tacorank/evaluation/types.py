@@ -69,6 +69,13 @@ class PredictionChange:
     changed_row_fraction: Optional[float]
     identical_score_fraction: Optional[float]
     unique_score_fraction: float
+    # Fraction of within-user item pairs whose relative order differs from the
+    # parent. GAUC and nDCG@5 depend only on within-user ordering, so this is
+    # the metric-relevant measure of "did the candidate actually change
+    # anything". It is derived evidence for the no-op gate only and is
+    # deliberately absent from CanonicalPredictionChange so the hash-bound
+    # ledger schema is unchanged. None when user grouping was unavailable.
+    within_user_rank_change: Optional[float] = None
 
 
 @dataclass(frozen=True)
