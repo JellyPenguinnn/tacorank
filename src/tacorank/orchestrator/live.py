@@ -1448,7 +1448,7 @@ def _mount_policies(
         "candidate_final_infer": "full",
         "clean_reproduce": "full",
     }
-    return tuple(
+    policies = [
         ContainerMountPolicy(
             command_id=command_id,
             fidelity=fidelities[command_id],
@@ -1471,7 +1471,24 @@ def _mount_policies(
             ),
         )
         for command_id in sorted(fidelities)
+    ]
+    # submission_check reads the contract's submission rows plus the already
+    # verified prediction artifact; it has no per-command input root.
+    policies.append(
+        ContainerMountPolicy(
+            command_id="submission_check",
+            fidelity="full",
+            data_manifest_sha256=config.data_manifest_sha256,
+            mounts=(
+                ContainerReadOnlyMount(
+                    live.contract_root.resolve(strict=True),
+                    "/contracts",
+                    "contract",
+                ),
+            ),
+        )
     )
+    return tuple(policies)
 
 
 def _require_live_files(config: RunConfig, live: LiveAdapterConfig) -> None:

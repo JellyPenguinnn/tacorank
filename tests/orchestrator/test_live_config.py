@@ -41,7 +41,9 @@ def test_mount_policies_expose_pipeline_roots_at_canonical_paths(
         SimpleNamespace(contract_root=contract_root, input_roots=input_roots),
     )
 
-    assert {policy.command_id for policy in policies} == set(command_ids)
+    assert {policy.command_id for policy in policies} == set(command_ids) | {
+        "submission_check"
+    }
     for policy in policies:
         assert tuple(mount.target for mount in policy.mounts) == (
             "/contracts",
